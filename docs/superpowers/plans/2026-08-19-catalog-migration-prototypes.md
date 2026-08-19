@@ -17,6 +17,12 @@
 - **Every run is isolated.** All created catalog objects carry a `RUN_ID` suffix so repeated runs never collide and never depend on prior state.
 - **Assert programmatically, not visually.** Verification uses the Orders and Catalog APIs. The sandbox Dashboard is for eyeballing only, never for a pass/fail claim.
 - **Preserve-and-relabel is the leading hypothesis** (§8.3): add variations to the existing item object, keep `item_id`, and never delete the original variation. Tasks 4–6 test it against the alternatives rather than assuming it.
+- **Check `res.errors` after every Square call.** The SDK surfaces API-level
+  failures in the response body without throwing. `client.ts` exports
+  `assertNoErrors(res, context)` for this; every Square call in every task
+  passes its response through it. A silently-errored response that reads as an
+  empty result is the worst failure mode available to this plan, because
+  "the catalog object is absent" is the exact signal Task 4 measures.
 - Node 20+. pnpm.
 
 ---
