@@ -48,9 +48,16 @@ describe('verification helpers', () => {
    * condition `isNotFoundError` in verify.ts already checks, so
    * `catalogObjectExists` correctly reports `false` with no changes
    * needed. This test is the permanent record that the detector detects.
+   *
+   * F8 (Task 4 review): seeded with orderCount 1, not 0. The situation the
+   * migration assertion actually guards against is a deleted variation
+   * that has orders referencing it — a variation with zero sales proves
+   * less. If Square ever treated a sales-referenced catalog object
+   * differently at the GetObject layer after deletion, a zero-order
+   * control would never catch it.
    */
   it('reports a genuinely deleted catalog object as absent (negative control)', async () => {
-    const seeded = await seedFlatItem('Proto Verify Delete Control', 6500, 0)
+    const seeded = await seedFlatItem('Proto Verify Delete Control', 6500, 1)
     const variationId = seeded.variationIds[0]
 
     // Confirm it's alive before deletion, so the later "false" is meaningful.
