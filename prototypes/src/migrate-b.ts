@@ -10,8 +10,19 @@ export type PatternItemResult = {
  * Approach 1 (spec §8.6 recommendation): one Square item per warehouse
  * pattern, each keeping its existing size variations. Twelve visually
  * distinct tiles in the POS grid, four entries each — the till cost of
- * each tile is exactly `sizes.length`, independent of how many patterns
- * exist.
+ * each tile is `sizes.length`, independent of how many patterns exist.
+ *
+ * `entriesPerItem` is measured, not assumed: each upsert response is read
+ * back for `itemData.variations.length` — what Square actually persisted
+ * and returned — the same way `expandInPlace` derives `entryCount`. It
+ * would be wrong to just return `sizes.length` from the input, because
+ * that number is true regardless of what Square did with the request; a
+ * silently dropped variation would still report the full count. If Square
+ * ever persisted a different count per item, the items would not be
+ * interchangeable for the "four entries each" claim this function makes,
+ * so all per-item counts are asserted equal before a single number is
+ * returned — the honest thing to do when the tiles are meant to be
+ * identical, rather than silently taking the first or last one.
  */
 export async function createItemPerPattern(
   baseName: string,
@@ -20,6 +31,7 @@ export async function createItemPerPattern(
   priceCents: number,
 ): Promise<PatternItemResult> {
   const createdItemIds: string[] = []
+  const perItemCounts: number[] = []
 
   for (let p = 0; p < patterns.length; p++) {
     const tempItemId = `#pat_${RUN_ID}_${p}`
@@ -45,12 +57,34 @@ export async function createItemPerPattern(
     })
     assertNoErrors(res, 'catalog.object.upsert (createItemPerPattern)')
 
-    const id = res.catalogObject?.id
+    const saved = res.catalogObject
+    const id = saved?.id
     if (!id) throw new Error(`Failed to create pattern item ${patterns[p]}`)
     createdItemIds.push(id)
+
+    // Measure what Square actually persisted, not what was requested. A
+    // missing variations array is a real failure (Square silently dropped
+    // everything) and must throw, not be read as "0 entries" — a reader
+    // downstream would otherwise mistake a broken response for evidence
+    // that the item was created empty on purpose.
+    const variations = saved.itemData?.variations
+    if (!variations) {
+      throw new Error(
+        `Pattern item ${id} (${patterns[p]}) came back with no variations array at all`,
+      )
+    }
+    perItemCounts.push(variations.length)
   }
 
-  return { createdItemIds, entriesPerItem: sizes.length }
+  const [first, ...rest] = perItemCounts
+  if (rest.some((count) => count !== first)) {
+    throw new Error(
+      `Pattern items came back with differing variation counts: ${JSON.stringify(perItemCounts)} ` +
+        `— tiles were expected to be identical (${sizes.length} entries each)`,
+    )
+  }
+
+  return { createdItemIds, entriesPerItem: first }
 }
 
 /**
