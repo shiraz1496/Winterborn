@@ -38,6 +38,7 @@ let cachedLocationId: string | undefined
 export async function mainLocationId(): Promise<string> {
   if (cachedLocationId) return cachedLocationId
   const res = await square.locations.list()
+  assertNoErrors(res, 'locations.list (mainLocationId)')
   const id = res.locations?.[0]?.id
   if (!id) throw new Error('Sandbox merchant has no locations')
   cachedLocationId = id

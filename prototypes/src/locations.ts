@@ -19,6 +19,12 @@ export async function ensureSecondLocation(): Promise<string> {
   if (locations.length >= 2) {
     const id = locations[1].id
     if (!id) throw new Error('Second location in sandbox has no id')
+    // I4: the sandbox accumulates locations across runs with no teardown,
+    // so this branch — reusing an already-existing second location — is
+    // the expected, common case. `locations.create` below is the
+    // exception, not the rule. Logged so a test run's output states which
+    // branch actually executed, rather than leaving it inferred.
+    console.log(`[harness] ensureSecondLocation: reused existing second location ${id}`)
     return id
   }
 
@@ -37,6 +43,7 @@ export async function ensureSecondLocation(): Promise<string> {
   assertNoErrors(created, 'locations.create (ensureSecondLocation)')
   const id = created.location?.id
   if (!id) throw new Error('Failed to create a second sandbox location')
+  console.log(`[harness] ensureSecondLocation: created a new second location ${id}`)
   return id
 }
 

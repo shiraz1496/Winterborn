@@ -29,6 +29,13 @@ describe('Prototype A: per-location price overrides survive migration', () => {
       secondLocation = await mainLocationId()
     }
 
+    // I4: distinctness must be CI-enforced, not inferred from the absence
+    // of the console.warn above. If ensureSecondLocation() silently
+    // returned the main location (or the fallback above kicked in), the
+    // rest of this test would still "pass" while proving nothing about a
+    // genuine second location. Fail loudly instead.
+    expect(secondLocation).not.toBe(await mainLocationId())
+
     const seeded = await seedFlatItem('Proto Override Cape', 16500, 1)
     const variationId = seeded.variationIds[0]
 
@@ -62,6 +69,17 @@ describe('Prototype A: per-location price overrides survive migration', () => {
 
       const newVarObj = await square.catalog.object.get({ objectId: newVariationId })
       assertNoErrors(newVarObj, 'catalog.object.get (F9 presentAtLocationIds check)')
+      // I2: getVariationOverrides()'s `?? []` erases the undefined-vs-[]
+      // distinction on the wire — `expect(overrides).toEqual({})` above
+      // passes identically whether Square returned `undefined` or `[]`.
+      // Read the raw field directly off the fetched object instead, so
+      // the record's "absent, not an empty array" claim is actually
+      // checked on this (the colour-variation) path.
+      console.log(
+        `[harness] new colour variation ${newVariationId} raw locationOverrides: ` +
+          `${JSON.stringify(newVarObj.object?.itemVariationData?.locationOverrides)}`,
+      )
+      expect(newVarObj.object?.itemVariationData?.locationOverrides).toBeUndefined()
       // Documents current behaviour: new variations carry no explicit
       // presentAtLocationIds either. F11: assert what Square actually
       // reports for presentAtAllLocations rather than describing it only

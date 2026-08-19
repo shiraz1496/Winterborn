@@ -49,6 +49,11 @@ describe('Prototype B: two-dimension items', () => {
             `presentAtLocationIds=${JSON.stringify(v.presentAtLocationIds)} ` +
             `presentAtAllLocations=${v.presentAtAllLocations}`,
         )
+        // I2: `?? []` above erases the undefined-vs-[] distinction — it
+        // passes identically whether Square returned `undefined` or `[]`.
+        // Assert the raw field directly so "absent, not an empty array"
+        // is actually checked here, not just claimed.
+        expect(v.itemVariationData?.locationOverrides).toBeUndefined()
         expect(v.itemVariationData?.locationOverrides ?? []).toEqual([])
         expect(v.presentAtLocationIds).toBeUndefined()
         expect(v.presentAtAllLocations).toBe(true)

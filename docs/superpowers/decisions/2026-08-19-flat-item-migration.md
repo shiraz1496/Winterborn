@@ -39,8 +39,8 @@ throw path and make no API call.
 | `prototypes/src/seed.test.ts` | 1 | `seedFlatItem(name, priceCents, orderCount)` creates a real flat ITEM with exactly one variation named `Regular` and drives real orders against it to `COMPLETED`. This is the fixture the gate is measured on — a genuinely flat item with genuine sales. |
 | `prototypes/src/verify.test.ts` | 3 | Seeded orders resolve back to their catalog objects; a never-existing object ID reports absent; **the negative control** — a variation that existed, *carried a completed order*, and was then deleted via `catalog.object.delete` reports absent. |
 | `prototypes/src/migrate-a.test.ts` | 1 | **The gate.** After `migrateFlatToVariations(itemId, ['Blue','Green','Multi'], 6500)` on a seeded flat item with 3 completed orders: `item_id` unchanged; the legacy variation ID unchanged, still live, still resolving to the same `item_id`; all 3 historical order lines still resolve to a live catalog object; the item now carries `Blue`, `Green`, `Multi` and `Unspecified (pre-2026)` and no longer carries `Regular`; and — fetched **directly by its pre-migration ID**, not via the item's name list — the legacy object itself carries `name: 'Unspecified (pre-2026)'` and `sellable: false`. |
-| `prototypes/src/overrides.test.ts` | 1 | A per-location price override ($165.00 base → $177.00 at a second location, mirroring the real Carmel premium on `Cape`) is set on the legacy variation, asserted present **before** the migration, and asserted still present **after** it. Plus the F9 block: every newly created colour variation is read back and asserted to have `locationOverrides` `{}`, `presentAtLocationIds` `undefined`, and `presentAtAllLocations` `true`. |
-| `prototypes/src/migrate-b.test.ts` | 2 | Item-per-pattern: 4 items created, `entriesPerItem` **measured from Square's own upsert responses**, each item's variation names equal `['Small','Medium','Large','XL']`, and every new item and variation read back and asserted to carry no location data. In-place expansion: the 4 seeded order lines still bind to their specific seeded variation IDs and those objects are still live, and `entryCount` is measured from Square's response. |
+| `prototypes/src/overrides.test.ts` | 1 | The two sandbox location IDs are asserted distinct (`expect(secondLocation).not.toBe(await mainLocationId())`) before anything else runs. A per-location price override ($165.00 base → $177.00 at that second location, mirroring the real Carmel premium on `Cape`) is set on the legacy variation, asserted present **before** the migration, and asserted still present **after** it. Plus the F9 block: every newly created colour variation is read back and asserted to have raw `itemVariationData.locationOverrides` `undefined` (checked directly on the fetched object, not only through the `getVariationOverrides()` helper, which normalises absence to `{}`), `presentAtLocationIds` `undefined`, and `presentAtAllLocations` `true`. |
+| `prototypes/src/migrate-b.test.ts` | 2 | Item-per-pattern: 4 items created, `entriesPerItem` **measured from Square's own upsert responses**, each item's variation names equal `['Small','Medium','Large','XL']`, and every new item and variation read back and asserted to carry no location data — including a direct `expect(v.itemVariationData?.locationOverrides).toBeUndefined()` on the raw field, alongside the pre-existing `?? []`-normalised check. In-place expansion: the 4 seeded order lines still bind to their specific seeded variation IDs and those objects are still live, and `entryCount` is measured from Square's response. |
 
 Two facts about the *method* matter as much as the results, because without
 them the headline answer would not be trustworthy:
@@ -116,8 +116,8 @@ Assertion by assertion:
 | Historical order lines still resolve to a live catalog object | **PASS** — all 3 lines re-read after migration, each `catalogObjectExists(line.catalogObjectId) === true`. | `migrate-a.test.ts` |
 | Legacy variation honestly relabelled and taken out of sale | **PASS** — on the object fetched by its pre-migration ID: `name === 'Unspecified (pre-2026)'`, `sellable === false`. | `migrate-a.test.ts` |
 | The detector genuinely reports a deleted object as absent | **PASS** — a deleted, order-referenced variation 404s. | `verify.test.ts` (negative control) |
-| Per-location price override survives on the legacy variation | **PASS** — `{ L1Y8D6MP72WPT: 17700 }` before the migration, `{ L1Y8D6MP72WPT: 17700 }` after. Genuine two-location sandbox: `locations.create` succeeded, so this is a real multi-location result, not a single-location fallback. | `overrides.test.ts` |
-| New colour variations carry the override forward | **FAIL — by design, and this is the most consequential finding here.** On every new variation: `itemVariationData.locationOverrides` is **absent** (`undefined` on the wire; the prototype's `getVariationOverrides()` helper normalises that to `{}`, which is a helper artefact, not an API shape — see Consequences item 6 for the real field), `presentAtLocationIds` is `undefined`, `presentAtAllLocations` is `true`. See "Consequences for Plan 3" item 2. | `overrides.test.ts` |
+| Per-location price override survives on the legacy variation | **PASS** — `{ L1Y8D6MP72WPT: 17700 }` before the migration, `{ L1Y8D6MP72WPT: 17700 }` after. Genuine two-location result: `expect(secondLocation).not.toBe(await mainLocationId())` now CI-asserts the two location IDs actually differ, rather than that being inferred from the absence of a `console.warn`. In the recorded run, `ensureSecondLocation()` reused an already-existing second location (`[harness] ensureSecondLocation: reused existing second location L1Y8D6MP72WPT`) — `locations.create` was **not** called; the sandbox had accumulated a second location from a prior run. The result is still two distinct sandbox locations, not a single-location fallback, but the earlier claim that `locations.create` succeeded was false as stated. | `overrides.test.ts` |
+| New colour variations carry the override forward | **FAIL — by design, and this is the most consequential finding here.** On every new variation: `itemVariationData.locationOverrides` is **absent** (`undefined` on the wire — now asserted directly with `expect(newVarObj.object?.itemVariationData?.locationOverrides).toBeUndefined()` against the raw fetched object, not just through the `getVariationOverrides()` helper, whose `?? []` normalises `undefined` and `[]` to the same `{}` and so cannot tell them apart; see Consequences item 6 for the real field), `presentAtLocationIds` is `undefined`, `presentAtAllLocations` is `true`. See "Consequences for Plan 3" item 2. | `overrides.test.ts` |
 | Item-per-pattern entries per item | **4**, measured from `itemData.variations.length` on each of the 4 upsert responses, with all four per-item counts asserted equal before the figure is returned. Fixture: 4 patterns × 4 sizes. Under the 16 ceiling. | `migrate-b.test.ts` |
 | In-place expansion entries per item | **20**, measured from Square's upsert response (`4 original size entries + 4 patterns × 4 sizes`). Over the 16 ceiling. | `migrate-b.test.ts` |
 | History survives in-place expansion | **PASS** — all 4 seeded order lines still bind to their specific seeded variation IDs and each of those objects is still live. | `migrate-b.test.ts` |
@@ -157,13 +157,25 @@ measured formulas.
    Deleting it orphans every order line that references it — proven by the negative
    control, which shows a deleted variation reads as absent even when an order
    points at it.
-3. **Every catalog write is read-modify-write.** Constructing an item or variation
-   from scratch drops `locationOverrides` and `present_at_location_ids`. The override
-   in the prototype survived precisely because the shallow spread of
-   `legacy.itemVariationData` never touches that key. Any code path that builds an
-   object literal instead of spreading the fetched one loses whatever it did not
-   think to set. This is spec §7.3's highest-consequence rule and the prototype is
-   the reason it can be stated as proven rather than assumed.
+3. **Every catalog write is read-modify-write.** Half of this is measured, half is
+   inferred, and the two halves should not be quoted with the same confidence. What
+   was measured: an existing override survives on the legacy variation precisely
+   because the shallow spread of `legacy.itemVariationData` never touches that key
+   (`overrides.test.ts`). What was **not** measured: nobody constructed a fresh
+   object literal over an *existing* override-bearing variation and watched the
+   override vanish — the negative control for this mechanism, structurally the same
+   experiment that was built for `catalogObjectExists` (see "Two facts about the
+   method"), was not built here. That new-variations-from-scratch come out with no
+   `locationOverrides` (Decisions/Consequences item 2, `overrides.test.ts` F9 block,
+   `migrate-b.test.ts`) is measured directly — but that is a different object (a
+   variation that never had an override) from an existing override being *dropped*
+   by a from-scratch write. The drop claim rests on Square's documented
+   replace-on-upsert semantics for catalog objects, not on an observed before/after.
+   The risk direction is benign either way: if Square instead merged fields on
+   upsert rather than replacing them, read-modify-write would simply be more
+   cautious than strictly required, not wrong. This is spec §7.3's highest-consequence
+   rule; treat the mandate as justified by the preservation evidence plus sound
+   inference about Square's semantics, not as fully proven by direct observation.
 4. **Two-dimension items: item-per-pattern.** Measured 4 selectable entries per item
    against a measured 20 for in-place expansion, on the same 4 × 4 fixture, against a
    binding ceiling of 16. In-place expansion breaches the ceiling on a fixture
@@ -203,7 +215,11 @@ Written for someone who cannot see the prototype code and cannot re-run anything
    BEFORE the migration, and write them onto the new variations AFTER it. Without
    this step the migration silently charges the wrong price at the till.**
 
-   The prototypes are unambiguous on this, on both code paths, CI-asserted:
+   The prototypes are unambiguous on this, on both code paths, CI-asserted directly
+   against the raw `itemVariationData.locationOverrides` field (`expect(...).toBeUndefined()`
+   on the object fetched straight from `catalog.object.get`, not routed through
+   `getVariationOverrides()`, whose `?? []` cannot distinguish an absent array from an
+   empty one — see the note below):
    - `migrate-a` (flat → colours): every new colour variation comes back with no
      `itemVariationData.locationOverrides` at all, `presentAtLocationIds` `undefined`,
      and `presentAtAllLocations` `true`. The override is preserved — on the
@@ -392,29 +408,43 @@ finding.
    carry it — but "should" is the honest word, and §7.3 requires preserving it. Assert
    it explicitly on the live-item test.
 
-3. **Whether the new variations sell correctly on a real POS device**, and whether a
+3. **Override coverage was narrow: a single override, on one location, on one legacy
+   variation.** Every override assertion in the suite exercises exactly one entry
+   (Carmel, on the legacy `Cape` variation). The real catalog has rows carrying two
+   simultaneous overrides on the same variation — spec §8.3 names `Stuffies / Large`:
+   Boston $80 + Carmel $75 — and `setVariationOverride()`'s multi-entry merge branch
+   (`prototypes/src/locations.ts`: filter out the entry for the location being set,
+   append the new one, upsert the combined array) never executed in any test run,
+   despite Consequences item 6 recommending exactly that filter-and-append pattern to
+   Plan 3. The conclusion still holds — the preservation mechanism measured is a
+   whole-object spread, which does not inspect array length or contents and so is
+   array-length-agnostic by construction — but a two-entry override surviving a
+   migration, and the merge branch itself, are inferred from that mechanism, not
+   separately measured.
+
+4. **Whether the new variations sell correctly on a real POS device**, and whether a
    `sellable: false` legacy row is genuinely hidden from the till grid rather than
    merely un-purchasable. §8.3 step 3 requires this; it is a physical-device check and
    no prototype can stand in for it.
 
-4. **CSV round-trip import.** Never exercised. §8.3 step 4 asked for a comparison; what
+5. **CSV round-trip import.** Never exercised. §8.3 step 4 asked for a comparison; what
    exists is proof for one path and silence on the other.
 
-5. **Behaviour at scale.** Every prototype write is a single-object
+6. **Behaviour at scale.** Every prototype write is a single-object
    `catalog.object.upsert`. `BatchUpsertCatalogObjects` — which §7.3 names as the
    production call — was never used. No run hit a rate limit, so the 429 /
    `retry-after` backoff path in §7.3 is entirely untested. The sandbox merchant has 2
    locations, not 14, and the largest fixture was 4 items × 4 variations.
 
-6. **The real catalog's shape.** Everything was measured on synthetic items seeded by
+7. **The real catalog's shape.** Everything was measured on synthetic items seeded by
    the prototypes. No production or export-derived item was migrated. In particular the
    assumption that the 14 flat Scarves rows each carry exactly one variation is taken
    from the §8.1 export analysis, not from a migration attempt.
 
-7. **The 12-pattern Footwear case itself.** Measured at 4 patterns × 4 sizes; the
+8. **The 12-pattern Footwear case itself.** Measured at 4 patterns × 4 sizes; the
    12-pattern figures in "Results" are projected from the measured formulas, not re-run.
 
-8. **Interaction with tax rates, archived items, and the residual inventory cells**
+9. **Interaction with tax rates, archived items, and the residual inventory cells**
    (§8.5). No prototype touched any of them. In particular, nothing here says what
    happens to the 17 non-zero `Current Quantity` cells (including negatives) when a
    variation is relabelled and taken out of sale.

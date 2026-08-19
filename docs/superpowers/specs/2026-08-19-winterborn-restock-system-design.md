@@ -536,14 +536,13 @@ Converting a FLAT item to a variation-structured item is a **restructure, not an
 
 1. **Prototype A — the flat case.** One low-volume flat item in sandbox (a Scarves-pattern item: single `Regular` variation).
    - Preferred approach: **add variations TO the existing item object, preserving `item_id`**, with the existing single price point becoming per-variation prices.
-   - Avoid create-new-and-archive-old unless the prototype proves it is required.
 2. **Prototype B — the two-dimension case.** One item that already has size variations (`Socks (Tech)` is ideal: three sizes, currently enabled at zero locations, so it is genuinely low-risk). This prototype answers §8.6.
 3. **Verify four things on each:**
    - Historical order lines still resolve to the item. — **PROVEN in sandbox.**
    - Item Sales reports still aggregate correctly. — **NOT PROVEN.** The prototypes establish the data-model linkage only; the reporting layer is Dashboard-only and could not be asserted programmatically. This is the **primary** thing to verify at step 5.
    - The new variations sell correctly on a test device. — **NOT PROVEN.** Physical-device check, outstanding.
    - **Per-location price overrides and `present_at_location_ids` survive the write.** 47 of 85 active rows carry an override; test on `Cape` (Carmel $177) and `Stuffies / Large` (two overrides: Boston $80, Carmel $75). — **PARTLY PROVEN.** The override survives on the legacy row (asserted before and after a real two-location round trip). It is **not** carried onto the new variations, which must be reapplied explicitly — see §7.3. `present_at_location_ids` survival was not asserted; assert it at step 5.
-4. **Write path: Catalog API read-modify-write.** Settled by the prototype ([decision record](../decisions/2026-08-19-flat-item-migration.md)). Fetch the ITEM object with `catalog.object.get`, spread it forward, and `catalog.object.upsert` it back under the same `id` — which is what preserves `item_id` and, with it, the sales history. Constructing an item object from scratch drops `location_overrides` and `present_at_location_ids`, so read-modify-write is mandatory, not stylistic. Recorded honestly: this was settled by proving one path, not by measuring both. **CSV round-trip import was never exercised and no claim is made about it. Do not use it.**
+4. **Write path: Catalog API read-modify-write.** Settled by the prototype ([decision record](../decisions/2026-08-19-flat-item-migration.md)). Fetch the ITEM object with `catalog.object.get`, spread it forward, and `catalog.object.upsert` it back under the same `id` — which is what preserves `item_id` and, with it, the sales history. This is only half measured: the prototype proved that an *existing* override on the legacy variation survives a spread-forward write, and separately proved that variations built *from scratch* come out with no `location_overrides`. It did not construct a fresh object literal over an *existing* override-bearing variation and observe the override vanish — that negative control was not built. The claim that constructing an item object from scratch **drops** `location_overrides` and `present_at_location_ids` is therefore inferred from Square's documented replace-on-upsert semantics, not directly measured. Read-modify-write is mandatory regardless: the risk is asymmetric — if the inference is wrong and Square merges rather than replaces, read-modify-write is merely more cautious than required, never wrong. Recorded honestly: this was settled by proving one path, not by measuring both. **CSV round-trip import was never exercised and no claim is made about it. Do not use it.**
 5. **Repeat on one live low-volume item.** Get explicit sign-off.
 6. **Only then** bulk-run, in revenue order: **Scarves (29%) first**, then Mittens, Socks, Stuffies, Capes/Wraps.
 
@@ -841,22 +840,21 @@ Anything decided in Document 2 or the client chat is settled scope and is not li
 
 **Closed by data analysis, 2026-08-19:** Sortly export (§6.3, §8.6) · Square catalog export (§8.1) · 2025 season exports (`data/square-2025/`, 41,226 tx verified) · product photos (559 URLs found in the Sortly export) · location names (all 14 confirmed from transaction data).
 
-**Closed by prototype, 2026-08-19:** Square sandbox credentials (item 1, delivered and in use) · the flat-item migration approach and the two-dimension restructure (§8.3, §8.6, §12) — see the [decision record](../decisions/2026-08-19-flat-item-migration.md). **Still open from that work and carried into the catalog scripts:** Item Sales report aggregation after migration, and till-device selling, both to be confirmed on one live low-volume item (`Socks (Tech)`) before any bulk run.
+**Closed by prototype, 2026-08-19:** Square sandbox credentials (delivered and in use) · the flat-item migration approach and the two-dimension restructure (§8.3, §8.6, §12) — see the [decision record](../decisions/2026-08-19-flat-item-migration.md). **Still open from that work and carried into the catalog scripts:** Item Sales report aggregation after migration, and till-device selling, both to be confirmed on one live low-volume item (`Socks (Tech)`) before any bulk run.
 
 | # | Item | Owner | Blocks | By |
 | --- | --- | --- | --- | --- |
-| 1 | **Square sandbox credentials** — app ID + access token | Osama | **everything**; Prototype A and B cannot start | now |
-| 2 | **Archive the 559 Sortly photos** to our own storage | Osama | visual family assignment (§6.3); links die with the subscription | before Sortly changes |
-| 3 | **Sending domain for magic-link email** (Resend verified sender) | Osama / Joel DNS | login works at all | before core app, ~Aug 25 |
-| 4 | **Production access token + webhook signature key** (Catalog, Inventory, Orders, Merchants) | Joel, owner-only | production catalog run and live sync | Aug 22, escalate |
-| 5 | **Pilot market identity** — which market, and does it exist in Square? | Joel | tax config, threshold seeding, location creation | Aug 21 |
-| 6 | **2026 buy** — placed? landing when? | Joel | new variants have no family, SKU or catalog entry, and the freeze is Sept 12 | Aug 21 |
-| 7 | Casey session: family sets + intake design | Joel to broker | ratifies §6.3. Per Document 2, if unscheduled by Aug 21 proceed from the export | Aug 21 |
-| 8 | Thermal label printer at the warehouse (Brother QL-class) | Joel purchases | dispatch labelling | Sep 15 |
-| 9 | Warehouse connectivity check at the packing/scan spot | Joel or Casey | online-only vs offline queue (§9.12) | Sep 15 |
-| 10 | Names and emails for user seeding | Joel | login seeding; five-minute task | Sep 8 |
-| 11 | Branding: logo and colours for the PWA icon | Joel | home-screen install | Sep 8 |
-| 12 | Process-mapping session (Phase 1 leftover) | Joel | validates request workflow states; not blocking | when available |
+| 1 | **Archive the 559 Sortly photos** to our own storage | Osama | visual family assignment (§6.3); links die with the subscription | before Sortly changes |
+| 2 | **Sending domain for magic-link email** (Resend verified sender) | Osama / Joel DNS | login works at all | before core app, ~Aug 25 |
+| 3 | **Production access token + webhook signature key** (Catalog, Inventory, Orders, Merchants) | Joel, owner-only | production catalog run and live sync | Aug 22, escalate |
+| 4 | **Pilot market identity** — which market, and does it exist in Square? | Joel | tax config, threshold seeding, location creation | Aug 21 |
+| 5 | **2026 buy** — placed? landing when? | Joel | new variants have no family, SKU or catalog entry, and the freeze is Sept 12 | Aug 21 |
+| 6 | Casey session: family sets + intake design | Joel to broker | ratifies §6.3. Per Document 2, if unscheduled by Aug 21 proceed from the export | Aug 21 |
+| 7 | Thermal label printer at the warehouse (Brother QL-class) | Joel purchases | dispatch labelling | Sep 15 |
+| 8 | Warehouse connectivity check at the packing/scan spot | Joel or Casey | online-only vs offline queue (§9.12) | Sep 15 |
+| 9 | Names and emails for user seeding | Joel | login seeding; five-minute task | Sep 8 |
+| 10 | Branding: logo and colours for the PWA icon | Joel | home-screen install | Sep 8 |
+| 11 | Process-mapping session (Phase 1 leftover) | Joel | validates request workflow states; not blocking | when available |
 
 **Work items owned by us, tracked in §8.5 rather than here:** clearing the 17 residual inventory cells including negatives · tax rates for the 11 unconfigured locations · the eight dead catalog entries.
 
