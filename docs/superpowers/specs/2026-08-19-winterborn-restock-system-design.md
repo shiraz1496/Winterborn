@@ -458,6 +458,10 @@ Verified against the live export (§8.1): **47 of 85 active rows carry a per-loc
 
 Also preserve `present_at_location_ids`. Verified enablement spread across 85 active rows: 37 at all 14 locations, 9 at 12, 3 at 13, 14 at exactly one location, and **8 at zero locations** (the dead entries in §8.1).
 
+**Preserving the override is not enough — it must be REAPPLIED to every new variation.** Proven in sandbox on both migration code paths ([decision record](../decisions/2026-08-19-flat-item-migration.md)): a read-modify-write migration keeps the override on the *legacy* row, which is relabelled `Unspecified (pre-2026)` and marked unsellable, while every **new** variation is created with `location_overrides` empty, no `present_at_location_ids`, and `present_at_all_locations: true` — flat price, everywhere. On the item-per-pattern path it is sharper still: a new pattern item has no legacy row at all, so there is nowhere for the premium to survive even inertly.
+
+Left unhandled, that means customers at Carmel and Boston are charged the base price at the till, on the variations they actually buy, on more than half the catalog, with nothing visibly wrong until someone reconciles takings. **Every catalog migration must read each variation's existing overrides and `present_at_location_ids` before the write and reapply them to the new variations after it, and `catalog:verify` (§8.4) must re-read and assert the match or fail the run.**
+
 ### 7.4 No inventory writes in v1
 
 **The system does NOT write inventory into Square in Stage 1.** This is a decision, not an omission. It removes double-receive risk, concurrency handling, and any interaction with price overrides at write time. Square is read-only to us apart from the catalog restructure.
@@ -526,6 +530,8 @@ Converting a FLAT item to a variation-structured item is a **restructure, not an
 
 **This is a blocker gate. Nothing else in catalog work proceeds without sign-off.**
 
+**Sandbox gate CLOSED 2026-08-19.** Preserve-and-relabel does not orphan sales history: `item_id` survives, the legacy variation keeps its ID, and historical order lines still resolve to a live catalog object — proven against the live sandbox, with a negative control establishing that the detector genuinely reports a deleted object as absent. Full evidence and the resulting rules: [decision record](../decisions/2026-08-19-flat-item-migration.md). **Step 5 (one live low-volume item) is still outstanding and remains a gate.**
+
 **Amended from Document 2 on the evidence in §8.1: run TWO prototypes, not one.** The export shows two structurally different migrations, and only one of them is the flat case Document 2 anticipated.
 
 1. **Prototype A — the flat case.** One low-volume flat item in sandbox (a Scarves-pattern item: single `Regular` variation).
@@ -533,11 +539,11 @@ Converting a FLAT item to a variation-structured item is a **restructure, not an
    - Avoid create-new-and-archive-old unless the prototype proves it is required.
 2. **Prototype B — the two-dimension case.** One item that already has size variations (`Socks (Tech)` is ideal: three sizes, currently enabled at zero locations, so it is genuinely low-risk). This prototype answers §8.6.
 3. **Verify four things on each:**
-   - Historical order lines still resolve to the item.
-   - Item Sales reports still aggregate correctly.
-   - The new variations sell correctly on a test device.
-   - **Per-location price overrides and `present_at_location_ids` survive the write.** 47 of 85 active rows carry an override; test on `Cape` (Carmel $177) and `Stuffies / Large` (two overrides: Boston $80, Carmel $75).
-4. **Also compare the two write paths** and record which is used: CSV round-trip import versus Catalog API read-modify-write. The API path is preferred because it is per-item, controlled and testable, but the prototype should prove it rather than assume it.
+   - Historical order lines still resolve to the item. — **PROVEN in sandbox.**
+   - Item Sales reports still aggregate correctly. — **NOT PROVEN.** The prototypes establish the data-model linkage only; the reporting layer is Dashboard-only and could not be asserted programmatically. This is the **primary** thing to verify at step 5.
+   - The new variations sell correctly on a test device. — **NOT PROVEN.** Physical-device check, outstanding.
+   - **Per-location price overrides and `present_at_location_ids` survive the write.** 47 of 85 active rows carry an override; test on `Cape` (Carmel $177) and `Stuffies / Large` (two overrides: Boston $80, Carmel $75). — **PARTLY PROVEN.** The override survives on the legacy row (asserted before and after a real two-location round trip). It is **not** carried onto the new variations, which must be reapplied explicitly — see §7.3. `present_at_location_ids` survival was not asserted; assert it at step 5.
+4. **Write path: Catalog API read-modify-write.** Settled by the prototype ([decision record](../decisions/2026-08-19-flat-item-migration.md)). Fetch the ITEM object with `catalog.object.get`, spread it forward, and `catalog.object.upsert` it back under the same `id` — which is what preserves `item_id` and, with it, the sales history. Constructing an item object from scratch drops `location_overrides` and `present_at_location_ids`, so read-modify-write is mandatory, not stylistic. Recorded honestly: this was settled by proving one path, not by measuring both. **CSV round-trip import was never exercised and no claim is made about it. Do not use it.**
 5. **Repeat on one live low-volume item.** Get explicit sign-off.
 6. **Only then** bulk-run, in revenue order: **Scarves (29%) first**, then Mittens, Socks, Stuffies, Capes/Wraps.
 
@@ -579,7 +585,18 @@ The catalog export raised this; the Sortly export largely answers it.
 
 **Resolution: for Footwear, the till dimension is PATTERN, not colour** — and the account already has the precedent. Scarves in Square is *already* item-per-design: `Scarf (Stripes)`, `Scarf (Plaids)`, `Scarf (Double Weaves)`, `Scarf (Single Color)` are separate items, not variations of one. Applying the same convention to Footwear gives twelve visually distinct tiles in the POS grid, each keeping the size variations it already has. `sizes × colours` never occurs. A cashier picks a sock by looking at it, then picks a size, which is exactly two unambiguous taps.
 
-**The trade-off, to be settled by Prototype B:** new items begin with no sales history, so year-over-year fragments for Footwear. Mitigation is to retain the existing `Socks (Sport)` item as the *Standard* pattern (preserving its history and its $466k of trading record) and create new items only for the other eleven patterns. Prototype B must confirm that reporting still rolls up sensibly at category level.
+**Settled by Prototype B, 2026-08-19: item-per-pattern.** Measured against the live sandbox on a 4-pattern × 4-size fixture, with both figures read back from Square's own upsert responses rather than computed from the input:
+
+| Approach | Measured selectable entries per item | Ceiling (≤ 16) |
+| --- | --- | --- |
+| **Item-per-pattern (chosen)** | **4** — one entry per size, on each of the four items | passes |
+| In-place expansion | **20** — 4 original size entries + 4 patterns × 4 sizes | **breaches** |
+
+Item-per-pattern's entry count is `sizes.length`, independent of how many patterns exist, so the real 12-pattern Footwear case still yields **4 entries per tile**. In-place expansion scales as `patterns.length × sizes.length + existing.length`, so the same real case would give **52 entries on one item** — it already breaches the ceiling on a fixture smaller than the real one and gets worse with every pattern added. (4 and 20 are measured; 4 and 52 are projected from the measured formulas, not re-run.) In-place expansion was separately confirmed *not* to orphan history — it is rejected on the till rule alone. Full evidence: [decision record](../decisions/2026-08-19-flat-item-migration.md).
+
+**The trade-off, accepted:** new items begin with no sales history, so year-over-year fragments for Footwear. Mitigation, unchanged: retain the existing `Socks (Sport)` item as the *Standard* pattern (preserving its history and its $466k of trading record) and create new items only for the other eleven patterns. **Category-level roll-up in Square's reporting was not confirmed by the prototype** — it is Dashboard-only, and it is carried into the live low-volume item check at §8.3 step 5 alongside the Item Sales verification.
+
+**Note for the pattern items:** each new pattern item is created from scratch and therefore carries no `location_overrides` and no `present_at_location_ids` — and unlike the flat-item path there is no legacy row to fall back on. Any per-location pricing for Footwear must be captured before the migration and written onto each new pattern item's variations explicitly. See §7.3.
 
 **Where colour genuinely is the dimension** — Scarves, Capes, Wraps, Mittens, Headwear, Blankets — the model in §6 applies unchanged, and every one of those is one-dimensional in Square today.
 
@@ -594,7 +611,7 @@ The catalog export raised this; the Sortly export largely answers it.
 
 **Binding design rule, retained:** `selectable entries per item ≤ 16`. Nothing above survived it, but the rule stays as a guard against a family set quietly growing during the Casey session.
 
-**Fallback if Prototype B fails:** defer Footwear and Toys restructuring to Stage 2. Scarves, Mittens, Garments and Headwear still deliver colour visibility on the majority of revenue by Sept 18. **Never compromise the till to hit a date.**
+**Fallback, now narrowed:** Prototype B passed, so the till-size reason for deferring is gone. The fallback stands only if the live-item check at §8.3 step 5 shows reporting breaks — in which case defer Footwear and Toys restructuring to Stage 2. Scarves, Mittens, Garments and Headwear still deliver colour visibility on the majority of revenue by Sept 18. **Never compromise the till to hit a date.**
 
 ### 8.7 The freeze
 
@@ -808,7 +825,7 @@ Contract accepted Aug 18. Feature-complete **Sept 11**. Pilot live **Sept 18**. 
 | **No colour-level prediction this season** | 2025 data carries colour on 4.8% of revenue. Style-level suggestions are fine. Do not build or imply colour prediction now. |
 | **Warehouse connectivity** | Untested assumption that online-only scanning is viable. Verify before Sept 15; offline scan queueing is the Stage 2 remedy if not. |
 | **Sole support during peak season** | Sortly had a help desk; after cutover we are it. Observability and the health endpoint are load-bearing, not nice-to-have. |
-| **Two-dimension items (§8.6)** | Footwear and Toys carry a size dimension; adding colour risks a 24–32 entry till picker. Prototype B decides the approach. Fallback is deferring those two categories to Stage 2, which still delivers colour on 59% of revenue. **Never compromise the till to hit a date.** |
+| **Two-dimension items (§8.6)** | **RESOLVED 2026-08-19 — item-per-pattern.** Measured in sandbox: 4 selectable entries per item, against 20 for in-place expansion on the same fixture and a binding ceiling of 16. See the [decision record](../decisions/2026-08-19-flat-item-migration.md). The Stage 2 deferral fallback is no longer needed for the till-size reason; it stands only if the live-item reporting check at §8.3 step 5 fails. **Never compromise the till to hit a date.** |
 | **Tax configuration** | 11 of 14 locations have no tax rate. The pilot market must have correct tax before its first sale, or the takings are wrong from hour one. |
 | **Residual inventory counts** | 17 non-zero cells including negatives survive from an earlier tracking attempt. Clear them before enabling anything. |
 | **Sortly photo links expire** | 559 product photos exist only as `lnk.sortly.co` URLs tied to Joel's subscription. They are the only visual record of the warehouse variants and the input to visual family assignment. Archive them before Sortly is touched. |
@@ -822,6 +839,8 @@ Contract accepted Aug 18. Feature-complete **Sept 11**. Pilot live **Sept 18**. 
 Anything decided in Document 2 or the client chat is settled scope and is not listed here. This table carries only what is genuinely unresolved.
 
 **Closed by data analysis, 2026-08-19:** Sortly export (§6.3, §8.6) · Square catalog export (§8.1) · 2025 season exports (`data/square-2025/`, 41,226 tx verified) · product photos (559 URLs found in the Sortly export) · location names (all 14 confirmed from transaction data).
+
+**Closed by prototype, 2026-08-19:** Square sandbox credentials (item 1, delivered and in use) · the flat-item migration approach and the two-dimension restructure (§8.3, §8.6, §12) — see the [decision record](../decisions/2026-08-19-flat-item-migration.md). **Still open from that work and carried into the catalog scripts:** Item Sales report aggregation after migration, and till-device selling, both to be confirmed on one live low-volume item (`Socks (Tech)`) before any bulk run.
 
 | # | Item | Owner | Blocks | By |
 | --- | --- | --- | --- | --- |
