@@ -1,10 +1,25 @@
 import { describe, it, expect } from 'vitest'
-import { square, mainLocationId, RUN_ID } from './client.js'
+import { square, mainLocationId, assertSandbox, assertNoErrors, RUN_ID } from './client.js'
 
 describe('sandbox connectivity', () => {
-  it('refuses to run outside sandbox', () => {
-    expect(process.env.SQUARE_ENV).toBe('sandbox')
-    expect(process.env.SQUARE_APPLICATION_ID).toMatch(/^sandbox-/)
+  it('assertSandbox throws when SQUARE_ENV is not sandbox', () => {
+    const original = process.env.SQUARE_ENV
+    try {
+      process.env.SQUARE_ENV = 'production'
+      expect(() => assertSandbox()).toThrow(/SQUARE_ENV/)
+    } finally {
+      process.env.SQUARE_ENV = original
+    }
+  })
+
+  it('assertSandbox throws when SQUARE_APPLICATION_ID does not start with sandbox-', () => {
+    const original = process.env.SQUARE_APPLICATION_ID
+    try {
+      process.env.SQUARE_APPLICATION_ID = 'prod-not-a-sandbox-id'
+      expect(() => assertSandbox()).toThrow(/SQUARE_APPLICATION_ID/)
+    } finally {
+      process.env.SQUARE_APPLICATION_ID = original
+    }
   })
 
   it('lists at least one location', async () => {
@@ -16,8 +31,10 @@ describe('sandbox connectivity', () => {
 
   it('can read the catalog', async () => {
     const res = await square.catalog.list({ types: 'ITEM' })
-    const count = res.data?.length ?? 0
-    console.log('[harness] existing sandbox ITEM count:', count)
-    expect(count).toBeGreaterThanOrEqual(0)
+    assertNoErrors(res, 'catalog.list')
+    // Sandbox may legitimately have zero items — assert the response shape
+    // the SDK contract promises, not a positive count.
+    expect(Array.isArray(res.data)).toBe(true)
+    console.log('[harness] existing sandbox ITEM count:', res.data.length)
   })
 })

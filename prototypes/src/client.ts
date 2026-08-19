@@ -43,3 +43,36 @@ export async function mainLocationId(): Promise<string> {
   cachedLocationId = id
   return id
 }
+
+/**
+ * Shape shared by every Square SDK response: a structurally-successful HTTP
+ * call can still carry API-level failures in `errors`. The SDK does not
+ * throw on these — callers must check explicitly, or a permissions/auth
+ * failure silently reads as "field was undefined" (see Task 1 finding F4).
+ */
+interface ResponseWithErrors {
+  errors?: Array<{
+    category?: string
+    code?: string
+    detail?: string
+    field?: string
+  }>
+}
+
+function hasErrorsArray(res: unknown): res is ResponseWithErrors {
+  return typeof res === 'object' && res !== null && 'errors' in res
+}
+
+/**
+ * Throws if `res` carries a non-empty `errors` array, per the Square SDK's
+ * "either errors or the payload is present" response contract. `context`
+ * names the call that produced `res`, so a failure names the real cause
+ * instead of surfacing downstream as a generic "field was missing" error.
+ */
+export function assertNoErrors(res: unknown, context: string): void {
+  if (!hasErrorsArray(res) || !res.errors || res.errors.length === 0) return
+  const detail = res.errors
+    .map((e) => `${e.category ?? 'UNKNOWN'}/${e.code ?? 'UNKNOWN'}${e.detail ? `: ${e.detail}` : ''}`)
+    .join('; ')
+  throw new Error(`${context}: Square API returned errors — ${detail}`)
+}
