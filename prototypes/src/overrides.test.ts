@@ -63,10 +63,13 @@ describe('Prototype A: per-location price overrides survive migration', () => {
       const newVarObj = await square.catalog.object.get({ objectId: newVariationId })
       assertNoErrors(newVarObj, 'catalog.object.get (F9 presentAtLocationIds check)')
       // Documents current behaviour: new variations carry no explicit
-      // presentAtLocationIds either (Square then treats them as present
-      // at all locations by default, NOT as inheriting the legacy row's
-      // specific per-location overrides).
+      // presentAtLocationIds either. F11: assert what Square actually
+      // reports for presentAtAllLocations rather than describing it only
+      // in a comment/report — this is the fact the F9 production risk
+      // hinges on (every new colour variation selling at flat price
+      // across every market, not just "no override list").
       expect(newVarObj.object?.presentAtLocationIds).toBeUndefined()
+      expect(newVarObj.object?.presentAtAllLocations).toBe(true)
     }
   })
 })
