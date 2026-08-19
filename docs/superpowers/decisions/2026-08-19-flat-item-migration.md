@@ -15,13 +15,23 @@ Behind that question sits the project's headline value: a $2.9M season of sales
 history across 14 US market locations, and the year-over-year comparison the
 client reads off it. Spec §8.2 names the trap — converting a FLAT item to a
 variation-structured item is a restructure, not an edit — and §8.3 makes the
-prototype a blocker gate. This record closes that gate.
+prototype a blocker gate.
+
+**This record closes the sandbox half of that gate, and only that half.** The
+data-model question — does the migration orphan sales history — is answered, with
+a negative control proving the detector genuinely detects. The reporting question —
+does Square's *Item Sales* report still aggregate those lines under the item
+afterwards — is **not** answered, could not be answered programmatically in sandbox,
+and remains a gate. §8.3 step 5, one live low-volume item, is still outstanding.
+Read "What is still unknown" before quoting anything from here.
 
 ## What was tested
 
 Six test files, 12 tests, every one hitting the live Square sandbox through
-`square@43.2.1`. No mocks anywhere in the suite: every assertion below is a
-round trip through Square's API.
+`square@43.2.1`. No mocks anywhere in the suite. Ten of the twelve tests are
+genuine round trips through Square's API; the two exceptions are the
+`assertSandbox()` guard tests, which mutate an env var locally to exercise the
+throw path and make no API call.
 
 | File | Tests | What it asserts |
 | --- | --- | --- |
@@ -60,7 +70,11 @@ assertion groups still passed, and the mutation was then reverted.
 
 ## Results
 
-Full suite, run 2026-08-19 immediately before this record was written:
+Full suite, run 2026-08-19 immediately before this record was written. Verbatim,
+except that the `[harness]` stdout lines have been elided — the per-variation
+location-data dump from `migrate-b.test.ts` (reproduced in substance in the table
+below) and `connectivity.test.ts`'s `RUN_ID` and sandbox ITEM count of 61. Nothing
+failing or contradictory was trimmed:
 
 ```
 $ cd prototypes && pnpm test
@@ -103,7 +117,7 @@ Assertion by assertion:
 | Legacy variation honestly relabelled and taken out of sale | **PASS** — on the object fetched by its pre-migration ID: `name === 'Unspecified (pre-2026)'`, `sellable === false`. | `migrate-a.test.ts` |
 | The detector genuinely reports a deleted object as absent | **PASS** — a deleted, order-referenced variation 404s. | `verify.test.ts` (negative control) |
 | Per-location price override survives on the legacy variation | **PASS** — `{ L1Y8D6MP72WPT: 17700 }` before the migration, `{ L1Y8D6MP72WPT: 17700 }` after. Genuine two-location sandbox: `locations.create` succeeded, so this is a real multi-location result, not a single-location fallback. | `overrides.test.ts` |
-| New colour variations carry the override forward | **FAIL — by design, and this is the most consequential finding here.** `locationOverrides` is `{}`, `presentAtLocationIds` is `undefined`, `presentAtAllLocations` is `true`, on every new variation. See "Consequences for Plan 3" item 2. | `overrides.test.ts` |
+| New colour variations carry the override forward | **FAIL — by design, and this is the most consequential finding here.** On every new variation: `itemVariationData.locationOverrides` is **absent** (`undefined` on the wire; the prototype's `getVariationOverrides()` helper normalises that to `{}`, which is a helper artefact, not an API shape — see Consequences item 6 for the real field), `presentAtLocationIds` is `undefined`, `presentAtAllLocations` is `true`. See "Consequences for Plan 3" item 2. | `overrides.test.ts` |
 | Item-per-pattern entries per item | **4**, measured from `itemData.variations.length` on each of the 4 upsert responses, with all four per-item counts asserted equal before the figure is returned. Fixture: 4 patterns × 4 sizes. Under the 16 ceiling. | `migrate-b.test.ts` |
 | In-place expansion entries per item | **20**, measured from Square's upsert response (`4 original size entries + 4 patterns × 4 sizes`). Over the 16 ceiling. | `migrate-b.test.ts` |
 | History survives in-place expansion | **PASS** — all 4 seeded order lines still bind to their specific seeded variation IDs and each of those objects is still live. | `migrate-b.test.ts` |
@@ -179,7 +193,8 @@ measured formulas.
 Written for someone who cannot see the prototype code and cannot re-run anything.
 
 1. **Migrate flat items by read-modify-write on the existing ITEM object.** Reference
-   implementation: `prototypes/src/migrate-a.ts`, `migrateFlatToVariations()`. Fetch,
+   implementation — as evidence of the shape, not as code to lift; it does not
+   typecheck, see item 9: `prototypes/src/migrate-a.ts`, `migrateFlatToVariations()`. Fetch,
    spread, relabel the single existing variation to `Unspecified (pre-2026)` with
    `sellable: false`, append the new variations, upsert with the same item `id`.
    Never `catalog.object.delete` a variation that has ever been sold.
@@ -189,14 +204,22 @@ Written for someone who cannot see the prototype code and cannot re-run anything
    this step the migration silently charges the wrong price at the till.**
 
    The prototypes are unambiguous on this, on both code paths, CI-asserted:
-   - `migrate-a` (flat → colours): every new colour variation comes back with
-     `locationOverrides` `{}`, `presentAtLocationIds` `undefined`, and
-     `presentAtAllLocations` `true`. The override is preserved — on the now-unsellable
-     legacy row, where no customer will ever hit it.
+   - `migrate-a` (flat → colours): every new colour variation comes back with no
+     `itemVariationData.locationOverrides` at all, `presentAtLocationIds` `undefined`,
+     and `presentAtAllLocations` `true`. The override is preserved — on the
+     now-unsellable legacy row, where no customer will ever hit it.
    - `migrate-b` (item-per-pattern): every new pattern item and every one of its
-     variations comes back the same way. This path is **sharper**: a new pattern item
-     has no legacy row at all, so there is nowhere for the premium to survive even
-     inertly.
+     variations comes back the same way — `locationOverrides` absent,
+     `presentAtLocationIds` `undefined`, `presentAtAllLocations` `true`. This path is
+     **sharper**: a new pattern item has no legacy row at all, so there is nowhere for
+     the premium to survive even inertly.
+
+   **Do not write this step from the prototype helper's return type.**
+   `getVariationOverrides()` in `prototypes/src/locations.ts` returns a flattened
+   `{ locationId: cents }` map purely so tests can assert on it, and an empty result
+   reads as `{}` there. The real field is an array, and an absent one is `undefined`,
+   not `{}`. The wire shape you must both read and write is in item 6 below — nobody
+   can construct an override from a flattened map.
 
    The real catalog carries per-location overrides on **47 of 85 active rows**
    (spec §8.1, §7.3) — a systematic Carmel premium across most of the catalog plus a
@@ -245,8 +268,30 @@ Written for someone who cannot see the prototype code and cannot re-run anything
      never a plain `number`. `JSON.stringify` on any object containing one throws
      `TypeError: Do not know how to serialize a BigInt` — so debug logging of Square
      responses needs a replacer. This bites in logging code, not in the API call.
-   - `locationOverrides` lives inside `itemVariationData` on the variation, not on the
-     item and not at catalog-object level.
+   - **`locationOverrides` is an array on `itemVariationData`**, not on the item and not
+     at catalog-object level. Each entry is
+     `{ locationId, priceMoney: { amount: bigint, currency: 'USD' }, pricingType: 'FIXED_PRICING' }`.
+     **`pricingType` is required on each entry** — an override that omits it is not a
+     fixed per-location price. When a variation has no overrides the field is **absent
+     (`undefined`)**, not an empty array and not `{}`. Reapplying an override means
+     writing this array back onto the new variation, preserving any entries for other
+     locations: read the current array, filter out the entry for the location you are
+     setting, append the new entry, upsert the whole array. That is what
+     `setVariationOverride()` in `prototypes/src/locations.ts` does and it is the only
+     safe pattern, because the upsert replaces the array wholesale.
+   - **New objects are created with client-supplied temporary IDs, and this is the
+     mechanic Plan 3 will use most.** Any object being created in an upsert must carry
+     an `id` beginning with `#` (the prototypes use `#item_${RUN_ID}`,
+     `#var_${RUN_ID}_${i}`, `#new_${RUN_ID}_${i}`, `#pat_${RUN_ID}_${p}_${i}`).
+     A child variation references its not-yet-created parent by that same temp ID in
+     `itemVariationData.itemId`, and Square resolves the reference server-side. Existing
+     objects keep their real IDs — which is exactly how a read-modify-write migration
+     preserves `item_id` and the legacy variation ID while adding new rows in the same
+     call. On the response, `res.catalogObject` carries the persisted objects with their
+     real server IDs (this is how every prototype recovers them), and the response also
+     carries an `idMappings` array of temp-ID → server-ID pairs; the prototypes read the
+     IDs off `catalogObject` rather than from `idMappings`, so `idMappings` is reported
+     here as an SDK-typed field, not as something these tests exercised.
    - `ListCatalogRequest.types` is a comma-separated `string` (e.g. `'ITEM'`), not an
      array.
    - Order line items reference the **variation** ID in `catalogObjectId`, not the item
@@ -271,17 +316,26 @@ Written for someone who cannot see the prototype code and cannot re-run anything
    styles, Beanie colours, Matched Set components). Plan 3 needs an explicit branch for
    those, and it is not covered by any prototype.
 
-9. **Use deterministic idempotency keys, not `randomUUID()`.** The prototypes generate a
+9. **The prototypes do not typecheck, so read them as evidence, not as a starting
+   codebase.** `tsc --noEmit` fails on `seed.ts`, `verify.ts` and `migrate-a.ts`: the
+   SDK's `CatalogObject` is a discriminated union on `type`, and the prototype code
+   accesses `.itemData` / `.itemVariationData` without narrowing it first. There is no
+   typecheck gate in `prototypes/package.json` — vitest transpiles with esbuild and
+   never typechecks — so this was never surfaced by a passing run. Production code will
+   be strict-mode, so every port of this logic needs explicit `type === 'ITEM'` /
+   `type === 'ITEM_VARIATION'` guards that the prototypes never wrote.
+
+10. **Use deterministic idempotency keys, not `randomUUID()`.** The prototypes generate a
    fresh UUID per upsert, which is fine for a throwaway run but defeats §8.4's
    requirement that `catalog:apply` be idempotent and resumable — a re-run after a
    partial failure would re-issue every write under new keys. This is a design note,
    not a measured finding: no prototype tested resumability.
 
-10. **Verify Item Sales reporting on one live low-volume item before the bulk run**, per
+11. **Verify Item Sales reporting on one live low-volume item before the bulk run**, per
     §8.3 step 5. See "What is still unknown" — this is the first thing Plan 3 does, not
     the last.
 
-11. **Bulk-run order is unchanged** (§8.3 step 6): Scarves (29% of revenue) first, then
+12. **Bulk-run order is unchanged** (§8.3 step 6): Scarves (29% of revenue) first, then
     Mittens, Socks, Stuffies, Capes/Wraps. Every apply preceded by a `catalog:plan` dry
     run whose diff has been read.
 
