@@ -1,0 +1,22 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# client business data (real sales history, catalog, warehouse export)
+data/
+claude-code-asks/
+
+# deps / build
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+coverage/
+
+# os / editor
+.DS_Store
+*.log
+.vscode/
+.idea/
