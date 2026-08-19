@@ -280,18 +280,37 @@ Written for someone who cannot see the prototype code and cannot re-run anything
      `setVariationOverride()` in `prototypes/src/locations.ts` does and it is the only
      safe pattern, because the upsert replaces the array wholesale.
    - **New objects are created with client-supplied temporary IDs, and this is the
-     mechanic Plan 3 will use most.** Any object being created in an upsert must carry
-     an `id` beginning with `#` (the prototypes use `#item_${RUN_ID}`,
-     `#var_${RUN_ID}_${i}`, `#new_${RUN_ID}_${i}`, `#pat_${RUN_ID}_${p}_${i}`).
-     A child variation references its not-yet-created parent by that same temp ID in
-     `itemVariationData.itemId`, and Square resolves the reference server-side. Existing
-     objects keep their real IDs — which is exactly how a read-modify-write migration
-     preserves `item_id` and the legacy variation ID while adding new rows in the same
-     call. On the response, `res.catalogObject` carries the persisted objects with their
-     real server IDs (this is how every prototype recovers them), and the response also
-     carries an `idMappings` array of temp-ID → server-ID pairs; the prototypes read the
-     IDs off `catalogObject` rather than from `idMappings`, so `idMappings` is reported
-     here as an SDK-typed field, not as something these tests exercised.
+     mechanic Plan 3 will use most.** Every object being created in an upsert carries an
+     `id` beginning with `#` — Square's convention for a not-yet-created object, and the
+     pattern every prototype upsert follows. **What the new variation puts in
+     `itemVariationData.itemId` depends on whether its parent item already exists, and
+     the two cases are not interchangeable:**
+
+     1. **Creating a brand-new item.** The child variation references its
+        not-yet-created parent by the parent's *temp* ID, and Square resolves the
+        reference server-side. Used by `seed.ts`'s `createItem` (`#item_${RUN_ID}` with
+        children `#var_${RUN_ID}_${i}`, each carrying `itemId: tempItemId`) and by
+        `migrate-b.ts`'s `createItemPerPattern` (`#pat_${RUN_ID}_${p}` with children
+        `#pat_${RUN_ID}_${p}_${i}`, same shape). This is the item-per-pattern path.
+     2. **Adding variations onto an item that already exists, via read-modify-write.**
+        The child variation carries its own `#` temp ID but references the **real,
+        pre-existing item ID** in `itemVariationData.itemId`. There is no temp parent.
+        Used by `migrate-a.ts`'s `migrateFlatToVariations` (`#new_${RUN_ID}_${i}` with
+        `itemId` = the real item being migrated) and by `migrate-b.ts`'s `expandInPlace`
+        (`#exp_${RUN_ID}_${p}_${s}`, likewise). **This is not incidental — it is the
+        mechanism by which `item_id` is preserved**, and it is the case the flat-item
+        migration runs on. Writing case 1's shape here would create a new parent item
+        and orphan the history.
+
+     Existing objects keep their real IDs — the relabelled legacy variation in
+     `migrateFlatToVariations` is spread forward with its original ID untouched, which is
+     how the legacy variation ID survives alongside the new rows in the same call. On the
+     response, `res.catalogObject` carries the persisted objects with their real server
+     IDs (this is how every prototype recovers them, including the new variations' IDs),
+     and the response also carries an `idMappings` array of temp-ID → server-ID pairs;
+     the prototypes read the IDs off `catalogObject` rather than from `idMappings`, so
+     `idMappings` is reported here as an SDK-typed field, not as something these tests
+     exercised.
    - `ListCatalogRequest.types` is a comma-separated `string` (e.g. `'ITEM'`), not an
      array.
    - Order line items reference the **variation** ID in `catalogObjectId`, not the item
