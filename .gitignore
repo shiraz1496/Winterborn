@@ -20,3 +20,7 @@ coverage/
 *.log
 .vscode/
 .idea/
+
+# source conversations - contain commercial negotiation detail, keep local
+claude-web-chat-export.md
+upwork-chat.md
