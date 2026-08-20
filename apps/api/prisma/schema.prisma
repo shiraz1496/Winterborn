@@ -1,0 +1,17 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Placeholder so `prisma generate` succeeds with zero real models.
+// `prisma generate` hard-errors (exit 1) on a schema with no models at all
+// (prisma/prisma#11582), so an empty schema as literally specified in the
+// brief cannot pass Step 6. Task 2 defines the real models and should
+// remove this placeholder then.
+model ScaffoldPlaceholder {
+  id String @id @default(cuid())
+}

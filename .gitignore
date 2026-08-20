@@ -10,10 +10,12 @@ claude-code-asks/
 # deps / build
 node_modules/
 .next/
+next-env.d.ts
 dist/
 build/
 .turbo/
 coverage/
+*.tsbuildinfo
 
 # os / editor
 .DS_Store
