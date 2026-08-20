@@ -21,11 +21,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: '.nvmrc', cache: 'pnpm' }
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @winterborn/api db:generate
       - run: pnpm --filter @winterborn/api db:deploy
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+      - name: Enforce LedgerEvent sole-writer invariant
+        run: |
+          # LedgerService is the only code allowed to insert into ledger_event.
+          # That single-writer discipline is what makes the derivation in
+          # LedgerReadService trustworthy: every row got there through one
+          # code path with one set of idempotency and transfer-pairing rules.
+          # Plan 4 adds a webhook worker and a reconciliation poll, both of
+          # which will be tempted to call prisma.ledgerEvent.create directly
+          # instead of going through LedgerService.append()/transfer(). If
+          # this ever matches outside that one file, the invariant has
+          # already been broken.
+          matches=$(grep -rn "prisma\.ledgerEvent\.create" apps/api/src apps/api/test apps/api/prisma \
+            --include='*.ts' | grep -v "apps/api/src/ledger/ledger.service.ts" || true)
+          if [ -n "$matches" ]; then
+            echo "LedgerEvent must only ever be created from apps/api/src/ledger/ledger.service.ts."
+            echo "Found direct prisma.ledgerEvent.create calls elsewhere, which breaks the"
+            echo "sole-writer invariant the whole derivation model depends on:"
+            echo "$matches"
+            exit 1
+          fi

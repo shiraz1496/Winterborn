@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { saleKey, transferKeyPrefix } from '@winterborn/shared'
 import { PrismaService } from '../src/prisma/prisma.service.js'
 import { LedgerService } from '../src/ledger/ledger.service.js'
 import { seedDevCatalog, type DevSeed } from '../prisma/seed-dev.js'
@@ -20,7 +21,7 @@ describe('append', () => {
       quantity: -2,
       occurredAt: new Date('2025-12-07T14:00:00Z'),
       source: 'WEBHOOK' as const,
-      idempotencyKey: 'sale:order_1:line_1',
+      idempotencyKey: saleKey('order_1', 'line_1'),
     }
 
     const first = await ledger.append(input)
@@ -48,7 +49,7 @@ describe('append', () => {
         quantity: -1,
         occurredAt: new Date(),
         source: 'WEBHOOK',
-        idempotencyKey: 'sale:bad:1',
+        idempotencyKey: saleKey('bad', '1'),
       } as never),
     ).rejects.toThrow()
     expect(await prisma.ledgerEvent.count()).toBe(0)
@@ -65,7 +66,7 @@ describe('transfer', () => {
       quantity: 40,
       occurredAt: new Date('2025-11-21T09:00:00Z'),
       source: 'UI',
-      idempotencyKeyPrefix: 'dispatch:box_1:wv_1',
+      idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_1', 'wv_1'),
       type: 'DISPATCH',
     })
 
@@ -84,16 +85,22 @@ describe('transfer', () => {
   it('is atomic: a failed second leg leaves no first leg behind', async () => {
     // Pre-insert the "to" leg's key so the transaction's second insert collides.
     // Without a transaction this would strand a negative row at the warehouse
-    // and silently destroy stock.
+    // and silently destroy stock. Uses INTAKE, not DISPATCH: append() rejects
+    // DISPATCH/RETURN outright (spec §5.4, they only ever come from
+    // transfer()), and the collision only needs a matching idempotencyKey,
+    // not a matching event type. The ':to' suffix is transfer()'s own
+    // namespace (see transferKeyPrefix()'s doc comment) — this is the one
+    // deliberate collision into it, to prove the transaction is real.
+    const prefix = transferKeyPrefix('dispatch', 'box_2', 'wv_1')
     await ledger.append({
-      type: 'DISPATCH',
+      type: 'INTAKE',
       locationId: seed.denverId,
       variationId: seed.variationId,
       warehouseVariantId: seed.warehouseVariantId,
       quantity: 40,
       occurredAt: new Date(),
       source: 'UI',
-      idempotencyKey: 'dispatch:box_2:wv_1:to',
+      idempotencyKey: `${prefix}:to`,
     })
     const before = await prisma.ledgerEvent.count()
 
@@ -106,7 +113,7 @@ describe('transfer', () => {
         quantity: 40,
         occurredAt: new Date(),
         source: 'UI',
-        idempotencyKeyPrefix: 'dispatch:box_2:wv_1',
+        idempotencyKeyPrefix: prefix,
         type: 'DISPATCH',
       }),
     ).rejects.toThrow()
@@ -123,7 +130,7 @@ describe('transfer', () => {
       quantity: 15,
       occurredAt: new Date('2025-11-21T09:00:00Z'),
       source: 'UI' as const,
-      idempotencyKeyPrefix: 'dispatch:box_3:wv_1',
+      idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_3', 'wv_1'),
       type: 'DISPATCH' as const,
     }
     const first = await ledger.transfer(input)
@@ -146,7 +153,7 @@ describe('transfer', () => {
       quantity: 7,
       occurredAt: new Date('2025-11-21T09:00:00Z'),
       source: 'UI' as const,
-      idempotencyKeyPrefix: 'dispatch:box_4:wv_1',
+      idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_4', 'wv_1'),
       type: 'DISPATCH' as const,
     }
 
@@ -175,7 +182,7 @@ describe('append-only constraint', () => {
       quantity: -1,
       occurredAt: new Date('2025-11-21T09:00:00Z'),
       source: 'WEBHOOK',
-      idempotencyKey: 'append-only:sale:1',
+      idempotencyKey: saleKey('append-only-test', '1'),
     })
 
     await expect(

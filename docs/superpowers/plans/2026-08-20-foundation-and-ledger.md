@@ -1768,8 +1768,18 @@ describe('replay property', () => {
   it('replaying from zero always equals the incremental result', async () => {
     // The guarantee the whole system rests on: a missed webhook, a duplicate
     // write or a bad deploy can never cause permanent drift, because nothing
-    // is stored that cannot be recomputed. Generate random histories and
-    // assert the two paths agree every time.
+    // is stored that cannot be recomputed. Generate genuinely random
+    // histories — seeded, so a failure is reproducible — and assert the two
+    // paths agree every time.
+    //
+    // NOTE (post-review, 2026-08-20): the version actually shipped uses a
+    // small seeded LCG (see the `Lcg` class in the real test file) instead
+    // of the modular-arithmetic sketch below, because a fixed formula on the
+    // loop counters is not random at all — it runs the same 40 histories on
+    // every invocation. The seed comes from LEDGER_PROPERTY_SEED if set,
+    // otherwise a fresh random seed each run, and is logged on failure so
+    // any failing history is reproducible. See apps/api/test/ledger-derive.spec.ts
+    // for the version that actually ran.
     const types = ['DISPATCH', 'SALE', 'WRITE_OFF', 'RETURN', 'CORRECTION'] as const
     let key = 0
 
@@ -1988,7 +1998,9 @@ Add `LedgerReadService` to `LedgerModule`'s providers and exports.
 pnpm --filter @winterborn/api test -- ledger-derive
 ```
 
-Expected: PASS, 5 tests. The replay property test exercises 40 randomised histories.
+Expected: PASS, 5 tests. The replay property test exercises 40 genuinely randomised
+(seeded LCG) histories per run; the seed is printed and, on failure, logged again
+with the exact command to reproduce it.
 
 - [ ] **Step 5: Run the whole workspace**
 
@@ -2012,7 +2024,8 @@ git commit -m "feat(api): stock derivation, recompute, and the replay property t
 The plan is complete when `pnpm typecheck && pnpm build && pnpm test` passes from the repo root and:
 
 1. `on_hand` is computed nowhere except by summing `ledger_event`.
-2. Replaying from zero equals the incremental result across 40 randomised histories.
+2. Replaying from zero equals the incremental result across 40 genuinely randomised
+   (seeded, reproducible) histories, not 40 fixed ones.
 3. Re-delivering the same event 25 times produces one row.
 4. A transfer writes exactly two rows sharing a `transferId`, and a failed second leg leaves no first leg.
 5. A week of missed webhooks followed by one poll pass produces the correct count and no duplicates.

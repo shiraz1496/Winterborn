@@ -44,6 +44,10 @@ export const appendEventInputSchema = baseEvent
     message: 'WRITE_OFF events require a reason',
     path: ['reason'],
   })
+  .refine((e) => e.type !== 'DISPATCH' && e.type !== 'RETURN', {
+    message: 'DISPATCH and RETURN always come in pairs sharing a transferId (spec §5.4); use LedgerService.transfer(), not append()',
+    path: ['type'],
+  })
 /// z.input for the same reason as TransferInput: occurredAt accepts a string.
 export type AppendEventInput = z.input<typeof appendEventInputSchema>
 
@@ -82,3 +86,54 @@ export const stockLevelSchema = z.object({
   onHand: z.number().int(),
 })
 export type StockLevel = z.infer<typeof stockLevelSchema>
+
+/**
+ * Idempotency-key builders — the only sanctioned way to construct a
+ * LedgerEvent idempotencyKey / idempotencyKeyPrefix.
+ *
+ * Idempotency is the ledger's entire self-healing mechanism: append() is
+ * safe to call repeatedly because a second call with the same key returns
+ * the original row instead of inserting a duplicate (see
+ * LedgerService.append()'s docstring). That guarantee only holds if every
+ * producer of a given real-world event — today's tests, tomorrow's webhook
+ * handler, tomorrow's reconciliation poll — builds the *same* string for
+ * the *same* event. If a webhook handler and a poll worker key the same
+ * sale differently, every sale double-counts, permanently, and because
+ * LedgerEvent is append-only, unwinding it means a CORRECTION row per
+ * affected line. Use these builders instead of hand-assembling a key
+ * literal, so the convention lives in one place instead of being
+ * re-invented, and re-diverged, at every call site.
+ *
+ * idempotencyKey is a single unique column, so every key lives in one flat
+ * namespace. Each builder below owns a distinct fixed tag ('sale:',
+ * 'write_off:', 'intake:', 'correction:', 'dispatch:'/'return:') so that
+ * ordinary use cannot collide across event kinds. The one deliberate
+ * exception is transferKeyPrefix(): LedgerService.transfer() appends
+ * ':from' and ':to' to whatever prefix it is given, so a key built by one
+ * of the other functions here must never itself end in ':from' or ':to'.
+ */
+
+export function saleKey(orderId: string, lineUid: string): string {
+  return `sale:${orderId}:${lineUid}`
+}
+
+export function writeOffKey(ref: string): string {
+  return `write_off:${ref}`
+}
+
+export function intakeKey(ref: string): string {
+  return `intake:${ref}`
+}
+
+/// `originalIdempotencyKey` is the key of the event being corrected, so the
+/// correction's own key stays traceable back to what it corrects.
+export function correctionKey(originalIdempotencyKey: string): string {
+  return `correction:${originalIdempotencyKey}`
+}
+
+/// Pass straight through as `idempotencyKeyPrefix` to LedgerService.transfer();
+/// it derives the two row keys as `${prefix}:from` and `${prefix}:to` itself.
+/// Never append your own `:from`/`:to` suffix to the result.
+export function transferKeyPrefix(kind: 'dispatch' | 'return', ...parts: [string, ...string[]]): string {
+  return [kind, ...parts].join(':')
+}

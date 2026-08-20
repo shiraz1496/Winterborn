@@ -188,6 +188,13 @@ model Location {
 /// Append-only. Never updated, never deleted. A mistake is corrected by
 /// appending a CORRECTION row. This is what makes recompute-from-zero real.
 ///
+/// Enforced at the database level, not just by convention: the hand-written
+/// migration 20260820064642_ledger_append_only adds a BEFORE UPDATE OR
+/// DELETE trigger that raises on any attempt to mutate an existing row.
+/// `prisma db push` does not know about hand-written migrations and will
+/// drop it silently — always use `prisma migrate deploy`/`migrate dev` on
+/// this schema, never `db push`.
+///
 /// Mixed granularity is deliberate (spec §5.5): variationId is ALWAYS set,
 /// warehouseVariantId only when known. Sales arrive from Square at family
 /// level and therefore carry none.

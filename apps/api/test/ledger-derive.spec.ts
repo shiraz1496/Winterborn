@@ -2,12 +2,35 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { PrismaService } from '../src/prisma/prisma.service.js'
 import { LedgerService } from '../src/ledger/ledger.service.js'
 import { LedgerReadService } from '../src/ledger/ledger-read.service.js'
+import { saleKey, writeOffKey, correctionKey, transferKeyPrefix } from '@winterborn/shared'
 import { seedDevCatalog, type DevSeed } from '../prisma/seed-dev.js'
 
 const prisma = new PrismaService()
 const ledger = new LedgerService(prisma)
 const read = new LedgerReadService(prisma)
 let seed: DevSeed
+
+/**
+ * A minimal linear congruential generator (Numerical Recipes constants).
+ * No new dependency needed for 40 histories of a few dozen draws each — this
+ * is a handful of lines. Seeded and deterministic given a seed, which is
+ * what makes a failing run reproducible; see the replay property test below.
+ */
+class Lcg {
+  private state: number
+  constructor(seed: number) {
+    this.state = seed >>> 0
+  }
+  /** Uniform float in [0, 1). */
+  private next(): number {
+    this.state = (Math.imul(this.state, 1664525) + 1013904223) >>> 0
+    return this.state / 0x100000000
+  }
+  /** Uniform integer in [0, maxExclusive). */
+  int(maxExclusive: number): number {
+    return Math.floor(this.next() * maxExclusive)
+  }
+}
 
 beforeAll(async () => { await prisma.$connect() })
 afterAll(async () => { await prisma.$disconnect() })
@@ -23,7 +46,7 @@ describe('derivation', () => {
       quantity: 40,
       occurredAt: new Date('2025-11-21T09:00:00Z'),
       source: 'UI',
-      idempotencyKeyPrefix: 'dispatch:box_1:wv_1',
+      idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_1', 'wv_1'),
     })
     await ledger.append({
       type: 'SALE',
@@ -32,7 +55,7 @@ describe('derivation', () => {
       quantity: -12,
       occurredAt: new Date('2025-11-23T15:00:00Z'),
       source: 'WEBHOOK',
-      idempotencyKey: 'sale:o1:l1',
+      idempotencyKey: saleKey('o1', 'l1'),
     })
     await ledger.append({
       type: 'WRITE_OFF',
@@ -43,7 +66,7 @@ describe('derivation', () => {
       occurredAt: new Date('2025-11-24T10:00:00Z'),
       source: 'UI',
       reason: 'DAMAGE',
-      idempotencyKey: 'wo:1',
+      idempotencyKey: writeOffKey('1'),
     })
 
     expect(await read.onHandFor(seed.variationId, seed.denverId)).toBe(25)
@@ -60,7 +83,7 @@ describe('derivation', () => {
       quantity: 40,
       occurredAt: new Date(),
       source: 'UI',
-      idempotencyKeyPrefix: 'dispatch:box_1:wv_1',
+      idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_1', 'wv_1'),
     })
     await ledger.append({
       type: 'SALE',
@@ -69,7 +92,7 @@ describe('derivation', () => {
       quantity: -10,
       occurredAt: new Date(),
       source: 'POLL',
-      idempotencyKey: 'sale:o2:l1',
+      idempotencyKey: saleKey('o2', 'l1'),
     })
 
     const family = await read.onHandByFamily(seed.denverId)
@@ -92,7 +115,7 @@ describe('derivation', () => {
       quantity: -5,
       occurredAt: new Date(),
       source: 'WEBHOOK',
-      idempotencyKey: 'sale:o3:l1',
+      idempotencyKey: saleKey('o3', 'l1'),
     })
     await ledger.append({
       type: 'CORRECTION',
@@ -101,7 +124,7 @@ describe('derivation', () => {
       quantity: 5,
       occurredAt: new Date(),
       source: 'UI',
-      idempotencyKey: 'correction:sale:o3:l1',
+      idempotencyKey: correctionKey(saleKey('o3', 'l1')),
       note: 'refunded',
     })
     expect(await read.onHandFor(seed.variationId, seed.denverId)).toBe(0)
@@ -112,80 +135,104 @@ describe('replay property', () => {
   it('replaying from zero always equals the incremental result', async () => {
     // The guarantee the whole system rests on: a missed webhook, a duplicate
     // write or a bad deploy can never cause permanent drift, because nothing
-    // is stored that cannot be recomputed. Generate random histories and
-    // assert the two paths agree every time.
+    // is stored that cannot be recomputed. Generate genuinely random
+    // histories — seeded, so a failure is reproducible — and assert the two
+    // paths agree every time.
+    //
+    // The seed comes from LEDGER_PROPERTY_SEED if set, otherwise a fresh
+    // random seed each run, printed below and logged again on failure. To
+    // reproduce a specific failing run: LEDGER_PROPERTY_SEED=<seed> pnpm test.
+    const seedValue = process.env.LEDGER_PROPERTY_SEED
+      ? Number(process.env.LEDGER_PROPERTY_SEED)
+      : Math.floor(Math.random() * 0xffffffff)
+    const rng = new Lcg(seedValue)
+    console.log(`ledger replay property test seed=${seedValue}`)
+
     const types = ['DISPATCH', 'SALE', 'WRITE_OFF', 'RETURN', 'CORRECTION'] as const
     let key = 0
 
-    for (let round = 0; round < 40; round++) {
-      seed = await seedDevCatalog(prisma)
-      const opCount = 5 + (round % 12)
+    try {
+      for (let round = 0; round < 40; round++) {
+        seed = await seedDevCatalog(prisma)
+        const opCount = 5 + rng.int(12)
 
-      for (let i = 0; i < opCount; i++) {
-        const type = types[(round * 7 + i * 3) % types.length]!
-        const useOther = (round + i) % 3 === 0
-        const variationId = useOther ? seed.otherVariationId : seed.variationId
-        const warehouseVariantId = useOther ? seed.otherWarehouseVariantId : seed.warehouseVariantId
-        const magnitude = 1 + ((round * 5 + i * 11) % 37)
-        const occurredAt = new Date(Date.UTC(2025, 10, 1 + (i % 27), 9 + (i % 12)))
+        for (let i = 0; i < opCount; i++) {
+          const type = types[rng.int(types.length)]!
+          const useOther = rng.int(3) === 0
+          const variationId = useOther ? seed.otherVariationId : seed.variationId
+          const warehouseVariantId = useOther ? seed.otherWarehouseVariantId : seed.warehouseVariantId
+          const magnitude = 1 + rng.int(37)
+          const occurredAt = new Date(Date.UTC(2025, 10, 1 + rng.int(27), 9 + rng.int(12)))
 
-        if (type === 'DISPATCH' || type === 'RETURN') {
-          await ledger.transfer({
-            fromLocationId: type === 'DISPATCH' ? seed.warehouseId : seed.denverId,
-            toLocationId: type === 'DISPATCH' ? seed.denverId : seed.warehouseId,
-            variationId,
-            warehouseVariantId,
-            quantity: magnitude,
-            occurredAt,
-            source: 'UI',
-            idempotencyKeyPrefix: `t:${round}:${i}:${key++}`,
-            type,
-          })
-        } else if (type === 'SALE') {
-          await ledger.append({
-            type: 'SALE',
-            locationId: seed.denverId,
-            variationId,
-            quantity: -magnitude,
-            occurredAt,
-            source: i % 2 === 0 ? 'WEBHOOK' : 'POLL',
-            idempotencyKey: `s:${round}:${i}:${key++}`,
-          })
-        } else if (type === 'WRITE_OFF') {
-          await ledger.append({
-            type: 'WRITE_OFF',
-            locationId: seed.denverId,
-            variationId,
-            warehouseVariantId,
-            quantity: -magnitude,
-            occurredAt,
-            source: 'UI',
-            reason: 'DAMAGE',
-            idempotencyKey: `w:${round}:${i}:${key++}`,
-          })
-        } else {
-          await ledger.append({
-            type: 'CORRECTION',
-            locationId: seed.denverId,
-            variationId,
-            quantity: magnitude,
-            occurredAt,
-            source: 'UI',
-            idempotencyKey: `c:${round}:${i}:${key++}`,
-          })
+          if (type === 'DISPATCH' || type === 'RETURN') {
+            await ledger.transfer({
+              fromLocationId: type === 'DISPATCH' ? seed.warehouseId : seed.denverId,
+              toLocationId: type === 'DISPATCH' ? seed.denverId : seed.warehouseId,
+              variationId,
+              warehouseVariantId,
+              quantity: magnitude,
+              occurredAt,
+              source: 'UI',
+              idempotencyKeyPrefix: transferKeyPrefix(
+                type === 'DISPATCH' ? 'dispatch' : 'return',
+                String(round),
+                String(i),
+                String(key++),
+              ),
+              type,
+            })
+          } else if (type === 'SALE') {
+            await ledger.append({
+              type: 'SALE',
+              locationId: seed.denverId,
+              variationId,
+              quantity: -magnitude,
+              occurredAt,
+              source: rng.int(2) === 0 ? 'WEBHOOK' : 'POLL',
+              idempotencyKey: saleKey(`${round}:${i}`, String(key++)),
+            })
+          } else if (type === 'WRITE_OFF') {
+            await ledger.append({
+              type: 'WRITE_OFF',
+              locationId: seed.denverId,
+              variationId,
+              warehouseVariantId,
+              quantity: -magnitude,
+              occurredAt,
+              source: 'UI',
+              reason: 'DAMAGE',
+              idempotencyKey: writeOffKey(`${round}:${i}:${key++}`),
+            })
+          } else {
+            await ledger.append({
+              type: 'CORRECTION',
+              locationId: seed.denverId,
+              variationId,
+              quantity: magnitude,
+              occurredAt,
+              source: 'UI',
+              idempotencyKey: correctionKey(`replay:${round}:${i}:${key++}`),
+            })
+          }
         }
+
+        const incremental = await read.onHandByFamily()
+        const replayed = await read.recompute()
+
+        const norm = (rows: typeof incremental) =>
+          rows
+            .map((r) => `${r.locationId}|${r.variationId}|${r.onHand}`)
+            .sort()
+            .join('\n')
+
+        expect(norm(replayed)).toBe(norm(incremental))
       }
-
-      const incremental = await read.onHandByFamily()
-      const replayed = await read.recompute()
-
-      const norm = (rows: typeof incremental) =>
-        rows
-          .map((r) => `${r.locationId}|${r.variationId}|${r.onHand}`)
-          .sort()
-          .join('\n')
-
-      expect(norm(replayed)).toBe(norm(incremental))
+    } catch (err) {
+      console.error(
+        `ledger replay property test FAILED with seed=${seedValue}. ` +
+          `Reproduce with: LEDGER_PROPERTY_SEED=${seedValue} pnpm --filter @winterborn/api test -- ledger-derive`,
+      )
+      throw err
     }
   })
 
@@ -198,7 +245,7 @@ describe('replay property', () => {
       variationId: seed.variationId,
       quantity: -1,
       occurredAt: new Date(Date.UTC(2025, 11, 1 + (i % 7), 12)),
-      idempotencyKey: `sale:order_${i}:line_1`,
+      idempotencyKey: saleKey(`order_${i}`, 'line_1'),
     }))
 
     // Only the first ten arrived by webhook before the endpoint went down.

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { appendEventInputSchema, transferInputSchema } from './ledger.js'
+import {
+  appendEventInputSchema,
+  transferInputSchema,
+  saleKey,
+  writeOffKey,
+  intakeKey,
+  transferKeyPrefix,
+} from './ledger.js'
 
 describe('appendEventInputSchema', () => {
   it('accepts a sale with no warehouseVariantId', () => {
@@ -10,7 +17,7 @@ describe('appendEventInputSchema', () => {
       quantity: -2,
       occurredAt: '2025-12-07T14:00:00.000Z',
       source: 'WEBHOOK',
-      idempotencyKey: 'sale:o1:l1',
+      idempotencyKey: saleKey('o1', 'l1'),
     })
     expect(parsed.warehouseVariantId).toBeUndefined()
     expect(parsed.occurredAt instanceof Date).toBe(true)
@@ -28,7 +35,7 @@ describe('appendEventInputSchema', () => {
         quantity: -1,
         occurredAt: '2025-12-07T14:00:00.000Z',
         source: 'WEBHOOK',
-        idempotencyKey: 'sale:o1:l2',
+        idempotencyKey: saleKey('o1', 'l2'),
       }),
     ).toThrow()
   })
@@ -43,9 +50,43 @@ describe('appendEventInputSchema', () => {
         quantity: 0,
         occurredAt: '2025-12-07T14:00:00.000Z',
         source: 'UI',
-        idempotencyKey: 'intake:1',
+        idempotencyKey: intakeKey('1'),
       }),
     ).toThrow()
+  })
+
+  it('rejects DISPATCH, since transfers must go through transferInputSchema', () => {
+    // append() is a side door: nothing stops a caller writing a lone DISPATCH
+    // with no counterpart and no transferId, which the derivation cannot
+    // detect as broken and no replay can repair. Spec §5.4 requires DISPATCH
+    // and RETURN to always be written in pairs by LedgerService.transfer().
+    expect(() =>
+      appendEventInputSchema.parse({
+        type: 'DISPATCH',
+        locationId: 'loc_1',
+        variationId: 'var_1',
+        warehouseVariantId: 'wv_1',
+        quantity: 40,
+        occurredAt: '2025-12-07T14:00:00.000Z',
+        source: 'UI',
+        idempotencyKey: transferKeyPrefix('dispatch', 'box_1', 'wv_1'),
+      }),
+    ).toThrow(/transfer/)
+  })
+
+  it('rejects RETURN, for the same reason as DISPATCH', () => {
+    expect(() =>
+      appendEventInputSchema.parse({
+        type: 'RETURN',
+        locationId: 'loc_1',
+        variationId: 'var_1',
+        warehouseVariantId: 'wv_1',
+        quantity: 40,
+        occurredAt: '2025-12-07T14:00:00.000Z',
+        source: 'UI',
+        idempotencyKey: transferKeyPrefix('return', 'box_1', 'wv_1'),
+      }),
+    ).toThrow(/transfer/)
   })
 
   it('requires a reason on WRITE_OFF', () => {
@@ -58,7 +99,7 @@ describe('appendEventInputSchema', () => {
         quantity: -1,
         occurredAt: '2025-12-07T14:00:00.000Z',
         source: 'UI',
-        idempotencyKey: 'wo:1',
+        idempotencyKey: writeOffKey('1'),
       }),
     ).toThrow()
   })
@@ -75,7 +116,7 @@ describe('transferInputSchema', () => {
         quantity: 10,
         occurredAt: '2025-12-07T14:00:00.000Z',
         source: 'UI',
-        idempotencyKeyPrefix: 'dispatch:box_1',
+        idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_1'),
       }),
     ).toThrow()
   })
@@ -90,7 +131,7 @@ describe('transferInputSchema', () => {
         quantity: -10,
         occurredAt: '2025-12-07T14:00:00.000Z',
         source: 'UI',
-        idempotencyKeyPrefix: 'dispatch:box_1',
+        idempotencyKeyPrefix: transferKeyPrefix('dispatch', 'box_1'),
       }),
     ).toThrow()
   })
