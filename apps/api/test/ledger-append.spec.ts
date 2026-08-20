@@ -132,4 +132,31 @@ describe('transfer', () => {
     expect(again.transferId).toBe(first.transferId)
     expect(await prisma.ledgerEvent.count()).toBe(2)
   })
+
+  it('is idempotent under concurrent duplicate delivery', async () => {
+    // Two callers race with the same idempotencyKeyPrefix (e.g. a retried
+    // dispatch request). The loser must resolve gracefully with the winner's
+    // transferId, not throw a raw unique-constraint error, and the race must
+    // not produce a second pair of rows.
+    const input = {
+      fromLocationId: seed.warehouseId,
+      toLocationId: seed.denverId,
+      variationId: seed.variationId,
+      warehouseVariantId: seed.warehouseVariantId,
+      quantity: 7,
+      occurredAt: new Date('2025-11-21T09:00:00Z'),
+      source: 'UI' as const,
+      idempotencyKeyPrefix: 'dispatch:box_4:wv_1',
+      type: 'DISPATCH' as const,
+    }
+
+    const results = await Promise.allSettled([ledger.transfer(input), ledger.transfer(input)])
+
+    expect(results[0]?.status).toBe('fulfilled')
+    expect(results[1]?.status).toBe('fulfilled')
+    const transferIds = results.map((r) => (r.status === 'fulfilled' ? r.value.transferId : undefined))
+    expect(transferIds[0]).toBeDefined()
+    expect(transferIds[0]).toBe(transferIds[1])
+    expect(await prisma.ledgerEvent.count()).toBe(2)
+  })
 })

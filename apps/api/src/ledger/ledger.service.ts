@@ -71,16 +71,18 @@ export class LedgerService {
    * subtract stock from the warehouse without adding it anywhere, which the
    * derivation cannot detect and no later replay can repair, because replay
    * faithfully reproduces whatever rows exist.
+   *
+   * Idempotency mirrors append(): no pre-check read, just attempt the write
+   * and catch the unique violation on the `:from` key. A pre-check-then-write
+   * is a TOCTOU race under concurrent duplicate calls (the same retry storm
+   * append() is built to absorb); relying on the DB constraint instead means
+   * the loser of a race gets the same graceful {created:false} response as
+   * any other repeat delivery, not an unhandled exception.
    */
   async transfer(input: TransferInput): Promise<{ transferId: string; created: boolean }> {
     const t = transferInputSchema.parse(input)
     const fromKey = `${t.idempotencyKeyPrefix}:from`
     const toKey = `${t.idempotencyKeyPrefix}:to`
-
-    const existing = await this.prisma.ledgerEvent.findUnique({ where: { idempotencyKey: fromKey } })
-    if (existing?.transferId) {
-      return { transferId: existing.transferId, created: false }
-    }
 
     const transferId = randomUUID()
     const common = {
@@ -95,15 +97,26 @@ export class LedgerService {
       note: t.note ?? null,
     }
 
-    await this.prisma.$transaction([
-      this.prisma.ledgerEvent.create({
-        data: { ...common, locationId: t.fromLocationId, quantity: -t.quantity, idempotencyKey: fromKey },
-      }),
-      this.prisma.ledgerEvent.create({
-        data: { ...common, locationId: t.toLocationId, quantity: t.quantity, idempotencyKey: toKey },
-      }),
-    ])
-
-    return { transferId, created: true }
+    try {
+      await this.prisma.$transaction([
+        this.prisma.ledgerEvent.create({
+          data: { ...common, locationId: t.fromLocationId, quantity: -t.quantity, idempotencyKey: fromKey },
+        }),
+        this.prisma.ledgerEvent.create({
+          data: { ...common, locationId: t.toLocationId, quantity: t.quantity, idempotencyKey: toKey },
+        }),
+      ])
+      return { transferId, created: true }
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
+        const existing = await this.prisma.ledgerEvent.findUniqueOrThrow({
+          where: { idempotencyKey: fromKey },
+        })
+        if (existing.transferId) {
+          return { transferId: existing.transferId, created: false }
+        }
+      }
+      throw err
+    }
   }
 }
