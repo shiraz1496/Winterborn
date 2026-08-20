@@ -160,3 +160,37 @@ describe('transfer', () => {
     expect(await prisma.ledgerEvent.count()).toBe(2)
   })
 })
+
+describe('append-only constraint', () => {
+  it('rejects UPDATE and DELETE against an existing row, and TRUNCATE still works', async () => {
+    // The no-permanent-drift guarantee rests on the schema storing no
+    // balance anywhere; this trigger is what stops an UPDATE or DELETE from
+    // quietly rewriting history underneath that guarantee. Enforced at the
+    // database level so it applies to a migration, a console session, or a
+    // future service, not just to LedgerService's own discipline.
+    const { id } = await ledger.append({
+      type: 'SALE',
+      locationId: seed.denverId,
+      variationId: seed.variationId,
+      quantity: -1,
+      occurredAt: new Date('2025-11-21T09:00:00Z'),
+      source: 'WEBHOOK',
+      idempotencyKey: 'append-only:sale:1',
+    })
+
+    await expect(
+      prisma.ledgerEvent.update({ where: { id }, data: { quantity: -2 } }),
+    ).rejects.toThrow(/append-only/)
+
+    await expect(prisma.ledgerEvent.delete({ where: { id } })).rejects.toThrow(/append-only/)
+
+    // The row survived both attempts untouched.
+    const row = await prisma.ledgerEvent.findUniqueOrThrow({ where: { id } })
+    expect(row.quantity).toBe(-1)
+
+    // TRUNCATE does not fire row-level triggers, so seedDevCatalog (which
+    // truncates LedgerEvent among other tables between tests) must still work.
+    await expect(seedDevCatalog(prisma)).resolves.toBeDefined()
+    expect(await prisma.ledgerEvent.count()).toBe(0)
+  })
+})

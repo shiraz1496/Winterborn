@@ -66,10 +66,15 @@ export class LedgerReadService {
    * different code path than onHandByFamily: hand-written SQL against the
    * table rather than Prisma's groupBy.
    *
-   * Two independent implementations that must always agree is the point. If
-   * they ever diverge, either something other than LedgerService wrote to the
-   * ledger, or an event was mutated in place. Both are the failures this
-   * architecture exists to make impossible, and this is how we find out.
+   * Two independently-coded aggregations that must always agree is the
+   * point. If they diverge, one of the two has a derivation-logic bug — a
+   * wrong WHERE clause, the wrong GROUP BY columns, an aggregation mistake —
+   * and the mismatch catches it. Both queries read the same table at the
+   * same instant, so agreement here says nothing about who wrote the rows
+   * or whether a row was later mutated in place; it cannot detect either.
+   * The no-permanent-drift guarantee comes from the schema itself storing no
+   * balance anywhere, not from this comparison — see the append-only
+   * constraint on LedgerEvent for what actually rules out in-place mutation.
    */
   async recompute(locationId?: string): Promise<StockLevel[]> {
     const rows = await this.prisma.$queryRaw<
