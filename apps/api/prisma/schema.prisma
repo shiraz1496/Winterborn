@@ -7,11 +7,415 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Placeholder so `prisma generate` succeeds with zero real models.
-// `prisma generate` hard-errors (exit 1) on a schema with no models at all
-// (prisma/prisma#11582), so an empty schema as literally specified in the
-// brief cannot pass Step 6. Task 2 defines the real models and should
-// remove this placeholder then.
-model ScaffoldPlaceholder {
-  id String @id @default(cuid())
+enum Brand {
+  OWN
+  FRAAS
+}
+
+enum FamilyAssignmentSource {
+  LEXICAL
+  SYNONYM
+  VISUAL
+  MANUAL
+}
+
+model Category {
+  id             String         @id @default(cuid())
+  name           String         @unique
+  sortlyFolder   String?
+  itemGroups     ItemGroup[]
+  colourFamilies ColourFamily[]
+  sizeOptions    SizeOption[]
+  createdAt      DateTime       @default(now())
+}
+
+model ItemGroup {
+  id           String  @id @default(cuid())
+  categoryId   String
+  name         String
+  squareItemId String? @unique
+  brand        Brand   @default(OWN)
+
+  category          Category           @relation(fields: [categoryId], references: [id])
+  variations        Variation[]
+  warehouseVariants WarehouseVariant[]
+
+  @@unique([categoryId, name])
+}
+
+/// Tier 1: what the cashier taps. Becomes a Square variation.
+model ColourFamily {
+  id           String @id @default(cuid())
+  categoryId   String
+  name         String
+  displayOrder Int    @default(0)
+
+  category   Category        @relation(fields: [categoryId], references: [id])
+  variants   ColourVariant[]
+  variations Variation[]
+
+  @@unique([categoryId, name])
+}
+
+/// Tier 2: warehouse detail. Maps to exactly one family. See spec §6.
+model ColourVariant {
+  id                     String                 @id @default(cuid())
+  colourFamilyId         String
+  name                   String
+  sortlyName             String?
+  normalisedName         String
+  /// Archived from Sortly before the subscription lapses. Spec §6.3.
+  photoUrl               String?
+  familyAssignmentSource FamilyAssignmentSource
+  familyConfidence       Float                  @default(0)
+
+  colourFamily      ColourFamily       @relation(fields: [colourFamilyId], references: [id])
+  warehouseVariants WarehouseVariant[]
+
+  @@unique([colourFamilyId, name])
+  @@index([normalisedName])
+}
+
+model SizeOption {
+  id           String @id @default(cuid())
+  categoryId   String
+  name         String
+  displayOrder Int    @default(0)
+
+  category          Category           @relation(fields: [categoryId], references: [id])
+  variations        Variation[]
+  warehouseVariants WarehouseVariant[]
+
+  @@unique([categoryId, name])
+}
+
+/// Sellable unit: ItemGroup x ColourFamily x Size. Carries the till SKU.
+model Variation {
+  id                String  @id @default(cuid())
+  itemGroupId       String
+  colourFamilyId    String
+  sizeOptionId      String
+  squareVariationId String? @unique
+  tillSku           String  @unique
+  isSellable        Boolean @default(true)
+
+  itemGroup         ItemGroup            @relation(fields: [itemGroupId], references: [id])
+  colourFamily      ColourFamily         @relation(fields: [colourFamilyId], references: [id])
+  sizeOption        SizeOption           @relation(fields: [sizeOptionId], references: [id])
+  warehouseVariants WarehouseVariant[]
+  thresholds        Threshold[]
+  requestLines      RestockRequestLine[]
+
+  @@unique([itemGroupId, colourFamilyId, sizeOptionId])
+}
+
+/// Stock unit: ItemGroup x ColourVariant x Size. Carries the warehouse SKU.
+model WarehouseVariant {
+  id              String  @id @default(cuid())
+  itemGroupId     String
+  colourVariantId String
+  sizeOptionId    String
+  /// Denormalised roll-up from ColourVariant.colourFamilyId. Written at seed
+  /// time, maintained on family reassignment. Lets one ledger row carry both
+  /// granularities without a join at write time.
+  variationId     String
+  warehouseSku    String  @unique
+  unitCostCents   Int?
+  isSaleItem      Boolean @default(true)
+
+  itemGroup     ItemGroup             @relation(fields: [itemGroupId], references: [id])
+  colourVariant ColourVariant         @relation(fields: [colourVariantId], references: [id])
+  sizeOption    SizeOption            @relation(fields: [sizeOptionId], references: [id])
+  variation     Variation             @relation(fields: [variationId], references: [id])
+  boxLines      BoxLine[]
+  requestLines  RestockRequestLine[]
+
+  @@unique([itemGroupId, colourVariantId, sizeOptionId])
+  @@index([variationId])
+}
+
+enum LocationKind {
+  MARKET
+  WAREHOUSE
+}
+
+enum LedgerEventType {
+  INTAKE
+  DISPATCH
+  SALE
+  WRITE_OFF
+  RETURN
+  CORRECTION
+}
+
+enum LedgerSource {
+  WEBHOOK
+  POLL
+  UI
+  SCRIPT
+}
+
+enum WriteOffReason {
+  DAMAGE
+  GIFT
+  SAMPLE
+}
+
+/// The warehouse is a Location. That makes intake, dispatch and season
+/// returns the same operation with different endpoints. Spec §5.1.
+model Location {
+  id               String       @id @default(cuid())
+  name             String       @unique
+  kind             LocationKind
+  /// Null for the warehouse.
+  squareLocationId String?      @unique
+  timezone         String
+  /// Per-market season calendars. Boston opens Nov 7, Denver closes Dec 24.
+  seasonStart      DateTime?
+  seasonEnd        DateTime?
+  isActive         Boolean      @default(true)
+
+  ledgerEvents    LedgerEvent[]
+  restockRequests RestockRequest[]
+  boxes           Box[]
+  loads           Load[]
+  thresholds      Threshold[]
+  syncCursor      SquareSyncCursor?
+
+  @@index([kind])
+}
+
+/// Append-only. Never updated, never deleted. A mistake is corrected by
+/// appending a CORRECTION row. This is what makes recompute-from-zero real.
+///
+/// Mixed granularity is deliberate (spec §5.5): variationId is ALWAYS set,
+/// warehouseVariantId only when known. Sales arrive from Square at family
+/// level and therefore carry none.
+model LedgerEvent {
+  id                 String          @id @default(cuid())
+  type               LedgerEventType
+  locationId         String
+  variationId        String
+  warehouseVariantId String?
+  /// Signed. Positive adds at this location, negative removes.
+  quantity           Int
+  occurredAt         DateTime
+  recordedAt         DateTime        @default(now())
+  source             LedgerSource
+  sourceRef          String?
+  /// Makes replay and re-ingestion safe.
+  idempotencyKey     String          @unique
+  actorId            String?
+  /// Links the two rows of a transfer: negative at source, positive at destination.
+  transferId         String?
+  reason             WriteOffReason?
+  note               String?
+
+  location Location @relation(fields: [locationId], references: [id])
+
+  @@index([variationId, locationId])
+  @@index([warehouseVariantId, locationId])
+  @@index([locationId, occurredAt])
+  @@index([transferId])
+}
+
+enum RequestState {
+  DRAFT
+  OPEN
+  PACKING
+  DISPATCHED
+  ARRIVED
+  CLOSED
+}
+
+enum RequestOrigin {
+  THRESHOLD
+  REVIEW
+  MANUAL
+}
+
+enum BoxState {
+  PACKING
+  DISPATCHED
+  ARRIVED
+  RETURNED
+}
+
+enum ThresholdSource {
+  SEEDED
+  MANUAL
+}
+
+enum UserRole {
+  OWNER
+  WAREHOUSE
+  MARKET_MANAGER
+  OPERATOR
+}
+
+model RestockRequest {
+  id          String        @id @default(cuid())
+  locationId  String
+  state       RequestState  @default(DRAFT)
+  createdFrom RequestOrigin
+  createdById String?
+  createdAt   DateTime      @default(now())
+  closedAt    DateTime?
+
+  location Location             @relation(fields: [locationId], references: [id])
+  lines    RestockRequestLine[]
+  boxes    Box[]
+
+  @@index([locationId, state])
+}
+
+model RestockRequestLine {
+  id                 String  @id @default(cuid())
+  requestId          String
+  variationId        String
+  warehouseVariantId String?
+  qtyRequested       Int
+
+  request          RestockRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  variation        Variation         @relation(fields: [variationId], references: [id])
+  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id])
+
+  @@index([requestId])
+}
+
+/// The QR label encodes qrToken only. Contents live in BoxLine, so a manifest
+/// edited before dispatch never orphans its label. Spec §9.4.
+model Box {
+  id                    String    @id @default(cuid())
+  requestId             String?
+  destinationLocationId String
+  state                 BoxState  @default(PACKING)
+  qrToken               String    @unique
+  packedById            String?
+  packedAt              DateTime?
+  dispatchedAt          DateTime?
+  arrivedAt             DateTime?
+
+  request             RestockRequest? @relation(fields: [requestId], references: [id])
+  destinationLocation Location        @relation(fields: [destinationLocationId], references: [id])
+  lines               BoxLine[]
+  loadBoxes           LoadBox[]
+
+  @@index([destinationLocationId, state])
+}
+
+model BoxLine {
+  id                 String @id @default(cuid())
+  boxId              String
+  warehouseVariantId String
+  quantity           Int
+
+  box              Box              @relation(fields: [boxId], references: [id], onDelete: Cascade)
+  warehouseVariant WarehouseVariant @relation(fields: [warehouseVariantId], references: [id])
+
+  @@index([boxId])
+}
+
+model Load {
+  id                    String    @id @default(cuid())
+  vehicleLabel          String
+  destinationLocationId String
+  createdById           String?
+  createdAt             DateTime  @default(now())
+  dispatchedAt          DateTime?
+
+  destinationLocation Location  @relation(fields: [destinationLocationId], references: [id])
+  boxes               LoadBox[]
+}
+
+model LoadBox {
+  loadId    String
+  boxId     String
+  scannedAt DateTime @default(now())
+
+  load Load @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  box  Box  @relation(fields: [boxId], references: [id])
+
+  @@id([loadId, boxId])
+}
+
+model Threshold {
+  id          String          @id @default(cuid())
+  variationId String
+  locationId  String
+  minLevel    Int
+  source      ThresholdSource @default(SEEDED)
+  updatedById String?
+  updatedAt   DateTime        @updatedAt
+
+  variation Variation @relation(fields: [variationId], references: [id])
+  location  Location  @relation(fields: [locationId], references: [id])
+
+  @@unique([variationId, locationId])
+}
+
+/// Not optional. Both sides can edit a request before packing, and every edit
+/// records who, when, and old to new. Spec §5.7.
+model AuditLog {
+  id       String   @id @default(cuid())
+  entity   String
+  entityId String
+  field    String
+  oldValue String?
+  newValue String?
+  actorId  String?
+  at       DateTime @default(now())
+
+  @@index([entity, entityId])
+}
+
+/// Raw inbound Square payloads. The webhook endpoint writes here and returns
+/// 200; a worker processes later. Spec §7.1.
+model SquareInboxEvent {
+  id            String    @id @default(cuid())
+  squareEventId String    @unique
+  eventType     String
+  payload       Json
+  receivedAt    DateTime  @default(now())
+  processedAt   DateTime?
+  error         String?
+
+  @@index([processedAt])
+}
+
+model SquareSyncCursor {
+  locationId   String    @id
+  lastPolledAt DateTime?
+  cursor       String?
+
+  location Location @relation(fields: [locationId], references: [id])
+}
+
+model User {
+  id       String   @id @default(cuid())
+  email    String   @unique
+  name     String
+  role     UserRole
+  isActive Boolean  @default(true)
+
+  sessions Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model MagicLinkToken {
+  tokenHash  String    @id
+  email      String
+  expiresAt  DateTime
+  consumedAt DateTime?
+
+  @@index([email])
 }
