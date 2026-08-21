@@ -227,3 +227,173 @@ the repo root against a local Docker daemon (colima) to catch obvious
 Dockerfile mistakes before writing this document -- see the plan-06
 report for the exact outcome. No image was pushed anywhere and no
 container was deployed; this was a local build-only sanity check.
+
+---
+
+## 9. Catalog write-path runbook (the flat-item migration)
+
+This is written for whoever runs the real thing, once, nervously, against
+a live store carrying a $2.9M season of sales history across 14 markets.
+Square has no undo. Read this whole section before running anything, not
+just the command block.
+
+**Everything below has been proven in sandbox only** (`catalog-write-guards`
+branch). No production Square token exists yet -- per spec §7.5, Joel has
+to issue one himself in the Square Developer Console (Catalog, Inventory,
+Orders, Merchants scopes), and per the flat-item migration decision record
+("What is still unknown", item 1), the very first thing to do with that
+token is migrate one live, low-volume item (`Socks (Tech)` is the
+recommended subject) and confirm Square's *Item Sales* report still
+aggregates its history correctly -- that is Dashboard-only and cannot be
+checked by any command below. **Do not run the bulk sequence until that
+single-item check is done and signed off.**
+
+### 9.1 What the six guards buy you
+
+| # | Guard | What it stops |
+| --- | --- | --- |
+| 1 | Backup before any write | `catalog-apply` hard-refuses to start unless a backup taken *after* the plan was written exists. This is the rollback path if everything else fails. |
+| 2 | Allowlist enforcement | `catalog-apply` only ever touches the Square object IDs that appear in the plan a human reviewed. If the catalog drifted since the plan was built (something else changed the item), it refuses to write rather than silently dropping or relabelling whatever's new. |
+| 3 | No deletes, ever | `square.catalog.object.delete`, `catalog.batchDelete`, and any upsert that would set `isArchived: true` on an ITEM throw immediately, before any HTTP call, no matter which code path reaches for them. |
+| 4 | Stop on first failure | `catalog-migrate` runs categories in sequence and halts at the first one that fails plan/apply/verify, rather than continuing into the next ones against a catalog now in an unknown state. |
+| 5 | Rollback | `catalog-rollback` reverses an applied plan: archives (hides, never deletes) the added variations and renames the legacy variation back to its original name. Proven end-to-end in sandbox -- see `.superpowers/sdd/catalog-guards-report.md`. |
+| 6 | Preflight | `catalog-preflight` checks token, scopes, `SQUARE_ENV`, location count, and backup presence, and prints a plain go/no-go before anything else runs. |
+
+### 9.2 Command sequence
+
+Run every command from the repo root. `pnpm --filter @winterborn/api <script>` is written out in full below rather than abbreviated, since this is exactly the kind of list you don't want to get wrong by skimming.
+
+```bash
+# 0. One-time per session: confirm the token, scopes, SQUARE_ENV, and
+#    location count are what you expect BEFORE touching anything else.
+pnpm --filter @winterborn/api cli:catalog-preflight -- \
+  --expected-env production --expected-locations 14
+```
+
+**What "go" looks like:** every line printed `[PASS]`, and the summary
+reads `GO -- 0 of 5 check(s) failed`. **What "no-go" looks like:** any
+`[FAIL]` line -- most commonly `SQUARE_ENV matches intent` (you meant to
+run against production but the environment variable still says
+`sandbox`, or vice versa), `token has required scopes` (the token Joel
+issued is missing one of Catalog/Inventory/Orders/Merchants), or `expected
+number of locations visible` (fewer than 14 locations are visible --
+stop and find out why before writing anything; a market missing from the
+token's visibility is a market that will not get priced correctly). **Do
+not proceed past a no-go.** Fix whatever failed and re-run preflight --
+it's read-only, safe to run as many times as you need.
+
+```bash
+# 1. Backup. Always immediately before apply -- see step 3's hard stop.
+pnpm --filter @winterborn/api cli:catalog-backup
+```
+
+Note the path it prints (`data/backups/catalog-backup-<timestamp>.json`).
+Check the `objects backed up:` count against your own rough expectation
+(the sandbox proof run backed up ~70 objects; production will be larger).
+A suspiciously small count is a sign the token can't see the whole
+catalog -- stop and check scopes again, don't proceed to apply.
+
+```bash
+# 2. Plan, one category at a time, in the order spec §8.3/decision record
+#    Consequences item 12 gives: Scarves first (29% of revenue), then
+#    Mittens, Socks, Stuffies, Capes/Wraps. Confirm these are the real
+#    Category.name values before running -- `SELECT name FROM "Category"`
+#    against the production DATABASE_URL -- they will not exactly match
+#    the dev/sandbox database's category names.
+pnpm --filter @winterborn/api cli:catalog-plan -- --category Scarves
+```
+
+**Read the printed diff.** Every item group, every new variation name and
+SKU, every override being reapplied and to which location. This is the
+one point in the whole run where a human is the actual safeguard --
+guard 2 only enforces that the write matches what's on disk in
+`catalog-plan-scarves.json`, not that what's on disk is *correct*. If
+anything looks wrong -- a missing override, a variation name that doesn't
+match the till convention, a SKU collision -- stop here. Nothing has been
+written to Square yet.
+
+```bash
+# 3. Apply. Refuses to start if the backup from step 1 predates this
+#    plan (guard 1) -- if you see that error, go back to step 1, not
+#    around it.
+pnpm --filter @winterborn/api cli:catalog-apply -- --plan catalog-plan-scarves.json
+```
+
+Check the summary line: `applied: N  already-applied: 0  failed: 0`. Any
+`failed` here means guard 2 or 3 caught something, or Square rejected the
+write outright -- read the printed `error:` line for that item group,
+fix the underlying cause (usually catalog drift -- re-run step 2 to get a
+fresh plan), and re-run apply. `catalog-apply` is idempotent: re-running
+it after a partial failure skips whatever already succeeded.
+
+```bash
+# 4. Verify. This is the check that protects pricing at all 14 markets --
+#    it fails the run if any new variation is missing a per-location
+#    override that existed on the legacy row.
+pnpm --filter @winterborn/api cli:catalog-verify -- --plan catalog-plan-scarves.json
+```
+
+**A `FAILED` here is not optional to investigate.** Read every printed
+failure line before doing anything else -- including before considering
+rollback. A missing override means a market is about to sell at the wrong
+price; that's usually fixable by re-running apply once the underlying
+data issue (an override that wasn't captured, e.g.) is fixed, since apply
+is idempotent and re-applies onto whatever's still missing. Only reach for
+rollback (9.3) if verify is failing in a way that isn't a straightforward
+re-apply -- e.g. the item ended up in a state nothing recognises.
+
+Repeat steps 2-4 for each remaining category, in order. Or, once you've
+run this by hand for Scarves and are confident in the shape of the diffs,
+use the orchestrator for the rest:
+
+```bash
+pnpm --filter @winterborn/api cli:catalog-migrate -- \
+  --categories Mittens,Socks,Stuffies,Capes/Wraps
+```
+
+This runs plan → apply → verify per category, still writing every plan to
+disk for the record, and **halts immediately** at the first category that
+fails, printing which one and never touching the categories after it
+(guard 4). If it halts, do not re-run it blindly -- go read the plan and
+result files for the category it stopped on, understand why, and decide
+whether to fix and re-run just that one category by hand (steps 2-4)
+before resuming the rest.
+
+### 9.3 Rollback
+
+If a category needs to be reversed -- verify caught something apply can't
+just fix by re-running, or a decision changes after the fact -- roll back
+against the exact plan file that was applied:
+
+```bash
+pnpm --filter @winterborn/api cli:catalog-rollback -- --plan catalog-plan-scarves.json
+```
+
+This renames the legacy variation back to its original name (recorded in
+the plan at build time) and archives -- hides, `sellable: false`, present
+at zero locations, **never deletes** -- the variations the apply step
+added. Nothing Square-side is destroyed, so the category can be
+re-migrated later if needed. Check the summary: `rolled-back: N
+already-rolled-back: 0 failed: 0`. Re-running `catalog-verify` against
+the same plan afterward will now fail (that's expected -- the plan
+describes the post-migration state, and rollback just undid it); what to
+check instead is that the item reads correctly in the Square Dashboard --
+one sellable variation under the original name, the added colours present
+but hidden.
+
+**If something goes wrong badly enough that rollback itself feels
+unsafe to trust**, the backup from step 1 is the actual ground truth:
+`data/backups/catalog-backup-<timestamp>.json` holds every catalog object
+exactly as it was before this category's apply ran. Restoring from it by
+hand is a last resort (there is no `cli:catalog-restore` -- rebuilding
+from the backup file is a manual, careful, item-by-item read of that JSON
+against the Square Dashboard) but the file exists specifically so that
+option is never unavailable.
+
+### 9.4 Between categories
+
+Before moving to the next category: spot-check the just-migrated item on
+a real till or in the Dashboard if you have access, not just via
+`catalog-verify`'s API-level check. §8.3 step 3's requirement (a
+`sellable: false` row is genuinely hidden from the till grid, not just
+un-purchasable) is a physical-device check no command here can perform.

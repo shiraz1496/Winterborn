@@ -1,6 +1,7 @@
 import type { Square } from 'square'
 import type { PrismaService } from '../prisma/prisma.service.js'
 import { square, assertNoErrors } from './square-client.js'
+import { assertFreshBackup } from './catalog-backup.js'
 
 /**
  * Builds, applies and verifies the flat-item-to-colour-variations catalog
@@ -43,6 +44,16 @@ export type ItemPlan = {
   squareItemId: string
   legacyVariationId: string
   legacyLabel: string
+  /**
+   * The legacy variation's name and flags exactly as they were before
+   * migration -- e.g. `"Regular"`, `sellable: true`. `catalog-rollback`
+   * writes these back verbatim to reverse the relabel step (build guide
+   * guard 5); without capturing them here at plan time, rollback would
+   * have nothing to restore *to*.
+   */
+  originalLegacyName: string
+  originalLegacySellable: boolean
+  originalLegacyStockable: boolean
   /** Read from the legacy variation before migration; reapplied onto every new variation. */
   capturedOverrides: PlanOverride[]
   presentAtLocationIds?: string[]
@@ -135,6 +146,9 @@ export async function buildPlan(prisma: PrismaService, category: string): Promis
       squareItemId,
       legacyVariationId: legacy.id,
       legacyLabel: LEGACY_LABEL,
+      originalLegacyName: legacyData?.name ?? group.name,
+      originalLegacySellable: legacyData?.sellable ?? true,
+      originalLegacyStockable: legacyData?.stockable ?? true,
       capturedOverrides,
       presentAtLocationIds: obj.presentAtLocationIds ?? undefined,
       presentAtAllLocations: obj.presentAtAllLocations ?? undefined,
@@ -143,6 +157,31 @@ export async function buildPlan(prisma: PrismaService, category: string): Promis
   }
 
   return { createdAt: new Date().toISOString(), category, items }
+}
+
+/**
+ * Every Square object ID `applyPlan` is authorised to write, computed once
+ * from the reviewed plan file. Build guide guard 2 ("allowlist
+ * enforcement"): someone read a diff of exactly these objects, and only
+ * what they read is allowed to change.
+ */
+export function buildAllowlist(plan: CatalogPlan): Set<string> {
+  const ids = new Set<string>()
+  for (const item of plan.items) {
+    ids.add(item.squareItemId)
+    ids.add(item.legacyVariationId)
+  }
+  return ids
+}
+
+/** Throws before any Square call is made if `objectId` was not reviewed as part of the plan. */
+export function assertObjectAllowed(objectId: string, allowlist: Set<string>, context: string): void {
+  if (!allowlist.has(objectId)) {
+    throw new Error(
+      `${context}: refusing to write object ${objectId} -- it does not appear in the reviewed plan. ` +
+        `catalog-apply may only touch object IDs a human read in the plan diff.`,
+    )
+  }
 }
 
 export type ApplyOutcome = {
@@ -167,12 +206,28 @@ export type ApplyOutcome = {
  * variation count already matches the plan) so a re-run after a partial
  * failure skips items that already succeeded rather than reprocessing
  * them.
+ *
+ * `backupsDir` defaults to the real `data/backups` -- the only reason to
+ * override it is test isolation (see `test/catalog-guards.spec.ts`).
  */
-export async function applyPlan(plan: CatalogPlan): Promise<ApplyOutcome[]> {
+export async function applyPlan(plan: CatalogPlan, backupsDir = 'data/backups'): Promise<ApplyOutcome[]> {
+  // Build guide guard 1: hard stop, not a warning. This runs before a
+  // single Square call is made, regardless of which caller reached
+  // applyPlan -- the catalog-apply CLI, catalog-migrate's per-category
+  // loop, or a test.
+  assertFreshBackup(plan, backupsDir)
+
+  // Build guide guard 2: every object this run is authorised to touch,
+  // fixed before the first write.
+  const allowlist = buildAllowlist(plan)
+
   const results: ApplyOutcome[] = []
 
   for (const item of plan.items) {
     try {
+      assertObjectAllowed(item.squareItemId, allowlist, `applyPlan (${item.itemGroupName})`)
+      assertObjectAllowed(item.legacyVariationId, allowlist, `applyPlan (${item.itemGroupName})`)
+
       const current = await square.catalog.object.get({ objectId: item.squareItemId })
       assertNoErrors(current, `catalog.object.get (applyPlan read ${item.itemGroupName})`)
       const obj = current.object
@@ -180,6 +235,29 @@ export async function applyPlan(plan: CatalogPlan): Promise<ApplyOutcome[]> {
         throw new Error(`${item.squareItemId} is not a live ITEM`)
       }
       const existing = (obj.itemData.variations ?? []).filter(isItemVariation)
+
+      // Catalog drift since the plan was built: some variation on this item
+      // other than the reviewed legacy variation, and not one of the SKUs
+      // this plan says it creates (which is what a prior successful apply
+      // legitimately leaves behind -- recognised by SKU, since a new
+      // variation's real, server-assigned ID isn't known until after it's
+      // created). Writing here would silently drop whatever that object is
+      // from the item's variation list, or relabel something nobody
+      // reviewed -- refuse instead, per the same allowlist principle as
+      // above: only IDs a human read in the plan diff may be touched.
+      const newSkus = new Set(item.newVariations.map((nv) => nv.sku))
+      const unplanned = existing.filter(
+        (v) => v.id !== item.legacyVariationId && !newSkus.has(v.itemVariationData?.sku ?? '__no_sku__'),
+      )
+      if (unplanned.length > 0) {
+        throw new Error(
+          `applyPlan (${item.itemGroupName}): ${item.squareItemId} carries ${unplanned.length} ` +
+            `variation(s) not accounted for in the plan (${unplanned.map((v) => `${v.id} "${v.itemVariationData?.name}"`).join(', ')}) -- ` +
+            `the catalog has drifted since this plan was built. Refusing to write: a write here would ` +
+            `either drop those variations from the item or relabel something nobody reviewed. Re-run ` +
+            `catalog-plan and review the new diff before applying.`,
+        )
+      }
 
       const alreadyApplied =
         existing.length === 1 + item.newVariations.length &&

@@ -39,6 +39,73 @@ export const square = new SquareClient({
 })
 
 /**
+ * Build guide guard 3 ("no deletes, ever"): this wrapper is the one place
+ * every production catalog write goes through (`catalog-plan.ts`,
+ * `catalog-rollback.ts`, and anything future). Deleting or archiving a
+ * catalog object is exactly the failure mode the flat-item migration is
+ * designed around -- see decision record Decisions 1-2 -- so a delete or
+ * archive attempted through this `square` instance throws *before* any
+ * HTTP call is made, no matter which call site reaches for it, including
+ * ones written after this guard.
+ *
+ * This is intentionally scoped to this file's `square` instance, not to
+ * the SDK globally: `prototypes/src/client.ts` constructs its own,
+ * unguarded `SquareClient` and legitimately deletes objects in sandbox to
+ * prove the negative control in `prototypes/src/verify.test.ts`. That is
+ * sandbox throwaway data on a different code path; this guard belongs on
+ * the one that will eventually run against the live $2.9M catalog.
+ *
+ * Square exposes exactly two ways to make a catalog object disappear
+ * through this SDK:
+ *   1. `catalog.object.delete` / `catalog.batchDelete` -- hard delete.
+ *   2. `catalog.object.upsert` with `itemData.isArchived: true` on an
+ *      ITEM -- Square's own soft-delete/archive, which goes through the
+ *      same upsert endpoint the migration uses for legitimate writes, so
+ *      it has to be inspected per-call rather than blocked wholesale.
+ * Both are covered below.
+ */
+function forbidCatalogDeletion(action: string): never {
+  throw new Error(
+    `Refusing to ${action}. This codebase's production catalog write path only ` +
+      `adds and renames catalog objects -- never deletes or archives one -- per ` +
+      `docs/superpowers/decisions/2026-08-19-flat-item-migration.md (Decisions 1-2). ` +
+      `Square has no undo: a delete or archive here would be irreversible against a ` +
+      `$2.9M season of live sales history across 14 markets. If an object genuinely ` +
+      `needs to go away, that is a deliberate call for Joel to make by hand in the ` +
+      `Square Dashboard, not something this code path performs.`,
+  )
+}
+
+function isArchivingUpsert(request: unknown): boolean {
+  if (typeof request !== 'object' || request === null) return false
+  const obj = (request as { object?: unknown }).object
+  if (typeof obj !== 'object' || obj === null) return false
+  const o = obj as { type?: string; itemData?: { isArchived?: boolean | null } }
+  return o.type === 'ITEM' && o.itemData?.isArchived === true
+}
+
+const objectClient = square.catalog.object as unknown as {
+  upsert: (request: unknown, options?: unknown) => unknown
+  delete: (request: unknown, options?: unknown) => unknown
+}
+const catalogClient = square.catalog as unknown as {
+  batchDelete: (request: unknown, options?: unknown) => unknown
+}
+
+const realUpsert = objectClient.upsert.bind(objectClient)
+
+// `async` throughout, deliberately: every guarded method here replaces one
+// that's typed to return a promise-like (`core.HttpResponsePromise`), and
+// callers use `await`/`.catch()`/`.rejects` against that contract. A bare
+// synchronous throw would break out of that shape instead of rejecting it.
+objectClient.upsert = async (request: unknown, options?: unknown) => {
+  if (isArchivingUpsert(request)) return forbidCatalogDeletion('upsert a catalog object with itemData.isArchived: true')
+  return realUpsert(request, options)
+}
+objectClient.delete = async () => forbidCatalogDeletion('delete a catalog object (catalog.object.delete)')
+catalogClient.batchDelete = async () => forbidCatalogDeletion('batch-delete catalog objects (catalog.batchDelete)')
+
+/**
  * Shape shared by every Square SDK response: a structurally-successful
  * HTTP call can still carry API-level failures in `errors`, without
  * throwing. Callers must check explicitly -- see decision record
