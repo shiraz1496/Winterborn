@@ -1,0 +1,707 @@
+/* ---------------------------------------------------------------------
+   Winterborn Restock -- design tokens
+   ---------------------------------------------------------------------
+   A dark, high-contrast, industrial register on purpose: this runs on a
+   phone at a warehouse bench under fluorescent light, one hand free, often
+   gloved. Dark reduces glare bounce off a phone held under bright warehouse
+   lighting and costs less battery on the OLED phones most staff carry.
+   There is deliberately no light theme toggle -- the audience and the room
+   it's used in are fixed, unlike a general-purpose consumer app.
+
+   The recurring visual signature is the colour swatch: the entire job this
+   software exists for is resolving a colour family ("60 gray") down to
+   real variants ("40 Charcoal, 20 Ash"), so colour is shown as colour --
+   never just as a text label -- on every screen that touches stock.
+   ------------------------------------------------------------------- */
+
+:root {
+  --ink: #14181a;
+  --surface: #1b2124;
+  --surface-raised: #232a2e;
+  --surface-sunken: #101416;
+  --line: #333b40;
+  --line-strong: #454f55;
+
+  --text: #edeae1;
+  --text-dim: #9ba3a6;
+  --text-faint: #6b7478;
+
+  --signal: #e8a33d;
+  --signal-strong: #f2b458;
+  --signal-ink: #1c1408;
+
+  --pine: #5c8a76;
+  --pine-ink: #0b1a14;
+  --rust: #c1502e;
+  --rust-ink: #1c0d08;
+
+  --paper: #ece7dc;
+  --paper-ink: #201d17;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --tap-min: 48px;
+  --tap-primary: 60px;
+
+  --font-display: var(--font-archivo), 'Arial Narrow', sans-serif;
+  --font-body: var(--font-public-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, 'SF Mono', monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.4;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0;
+  text-wrap: balance;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+/* ---- layout shell -------------------------------------------------- */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.app-main {
+  flex: 1;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px 16px calc(var(--tap-primary) + 40px);
+}
+
+.app-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  padding-top: max(14px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--line);
+  background: var(--ink);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.app-topbar-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.05rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.app-topbar-user {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  text-align: right;
+  line-height: 1.3;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* ---- bottom nav (thumb zone) ---------------------------------------- */
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.bottom-nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: var(--tap-primary);
+  padding: 8px 4px;
+  text-decoration: none;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-top: 2px solid transparent;
+}
+
+.bottom-nav-item svg {
+  width: 22px;
+  height: 22px;
+}
+
+.bottom-nav-item.active {
+  color: var(--signal);
+  border-top-color: var(--signal);
+}
+
+/* ---- buttons --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--tap-min);
+  padding: 12px 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  text-decoration: none;
+  transition: transform 0.06s ease, background 0.15s ease;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  min-height: var(--tap-primary);
+  background: var(--signal);
+  border-color: var(--signal);
+  color: var(--signal-ink);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 1rem;
+  width: 100%;
+}
+
+.btn-danger {
+  background: var(--rust);
+  border-color: var(--rust);
+  color: #fff2ec;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+/* ---- cards / lists ----------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  min-height: var(--tap-primary);
+  text-decoration: none;
+  color: var(--text);
+}
+
+.list-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.list-row-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.list-row-meta {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 28px 0 10px;
+}
+
+.section-heading:first-child {
+  margin-top: 0;
+}
+
+.section-heading h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- state chips / badges ------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line-strong);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.chip-pine {
+  color: var(--pine-ink);
+  background: var(--pine);
+  border-color: var(--pine);
+}
+
+.chip-rust {
+  color: #fff2ec;
+  background: var(--rust);
+  border-color: var(--rust);
+}
+
+.chip-signal {
+  color: var(--signal-ink);
+  background: var(--signal);
+  border-color: var(--signal);
+}
+
+/* ---- colour swatches --------------------------------------------------
+   The one deliberate signature motif. A swatch is a small solid square of
+   the family's actual colour; a family with no mapped colour (the
+   catch-all "Multi") gets a diagonal stripe; a variant that has been
+   decided to have genuinely no colour gets a dashed empty outline -- a
+   legitimate, calm answer, not a warning triangle. */
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+}
+
+.swatch-multi {
+  background: repeating-linear-gradient(
+    45deg,
+    #3b5a80 0 6px,
+    #a13d2c 6px 12px,
+    #4a6b4a 12px 18px,
+    #c97a3a 18px 24px
+  );
+}
+
+.swatch-none {
+  border: 1.5px dashed var(--text-faint);
+  background: transparent;
+}
+
+.swatch-lg {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+}
+
+/* ---- forms ------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.field label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.field input,
+.field select {
+  min-height: var(--tap-min);
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-sunken);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--signal);
+}
+
+/* ---- stepper (pack screen) --------------------------------------------- */
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stepper-btn {
+  width: var(--tap-primary);
+  height: var(--tap-primary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 1.5rem;
+  font-family: var(--font-display);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.stepper-btn:active {
+  background: var(--signal);
+  color: var(--signal-ink);
+  border-color: var(--signal);
+}
+
+.stepper-value {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  font-weight: 700;
+  min-width: 52px;
+  text-align: center;
+}
+
+/* ---- printable label ----------------------------------------------------- */
+
+.label-ticket {
+  background: var(--paper);
+  color: var(--paper-ink);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  font-family: var(--font-mono);
+}
+
+.label-ticket .label-dest {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  text-transform: uppercase;
+  line-height: 1.1;
+  margin-bottom: 10px;
+}
+
+.label-ticket .label-token {
+  font-size: 0.8rem;
+  word-break: break-all;
+  padding-top: 10px;
+  margin-top: 10px;
+  border-top: 1px dashed rgba(32, 29, 23, 0.35);
+}
+
+/* ---- scanner ------------------------------------------------------------- */
+
+.scan-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: #000;
+}
+
+.scan-viewport video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.scan-frame {
+  position: absolute;
+  inset: 12%;
+  pointer-events: none;
+}
+
+.scan-frame::before,
+.scan-frame::after,
+.scan-frame > span::before,
+.scan-frame > span::after {
+  content: '';
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--signal);
+}
+
+.scan-frame::before {
+  top: 0;
+  left: 0;
+  border-right: none;
+  border-bottom: none;
+}
+
+.scan-frame::after {
+  top: 0;
+  right: 0;
+  border-left: none;
+  border-bottom: none;
+}
+
+.scan-frame > span::before {
+  bottom: 0;
+  left: 0;
+  border-right: none;
+  border-top: none;
+}
+
+.scan-frame > span::after {
+  bottom: 0;
+  right: 0;
+  border-left: none;
+  border-top: none;
+}
+
+.scan-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  background: var(--surface-raised);
+  border-top: 1px solid var(--line-strong);
+  border-radius: 16px 16px 0 0;
+  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
+}
+
+/* ---- misc ---------------------------------------------------------------- */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 14px 0;
+}
+
+.empty-state {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.empty-state-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.1rem;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.empty-state-body {
+  font-size: 0.9rem;
+}
+
+.error-banner {
+  background: rgba(193, 80, 46, 0.14);
+  border: 1px solid var(--rust);
+  color: #ffcbb8;
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  font-size: 0.88rem;
+  margin-bottom: 16px;
+}
+
+.screen-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--line-strong);
+  border-top-color: var(--signal);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 1.6s;
+  }
+  .btn {
+    transition: none;
+  }
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* ---- login ---------------------------------------------------------- */
+
+.login-screen {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: max(48px, env(safe-area-inset-top)) 24px 48px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  justify-content: center;
+}
+
+.login-mark {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.login-title {
+  font-size: 1.6rem;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.login-sub {
+  color: var(--text-dim);
+  margin: 0 0 28px;
+  font-size: 0.92rem;
+}
+
+.big-number {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 2.4rem;
+  line-height: 1;
+}
+
+@media print {
+  .app-topbar,
+  .bottom-nav,
+  .no-print {
+    display: none !important;
+  }
+  .app-main {
+    padding: 0;
+    max-width: none;
+  }
+  body {
+    background: #fff;
+  }
+}
