@@ -1,0 +1,145 @@
+import type { Square } from 'square'
+import { saleKey, type AppendEventInput, type LedgerSource } from '@winterborn/shared'
+
+/**
+ * One line (sale or return) that could not be mapped to ledger input: no
+ * uid, no catalogObjectId, an unknown catalogObjectId, or a garbage
+ * quantity. Recorded, never thrown, never silently dropped -- spec §7.1.
+ */
+export interface DeadLetter {
+  orderId: string
+  lineUid: string
+  catalogObjectId: string | null
+  reason: string
+}
+
+export interface MapOrderResult {
+  events: AppendEventInput[]
+  deadLetters: DeadLetter[]
+}
+
+/** Square catalog object ID -> our Variation.id, or undefined if unknown. */
+export type VariationResolver = (squareVariationId: string) => string | undefined
+
+/** Square location ID -> our Location.id, or undefined if unknown. */
+export type LocationResolver = (squareLocationId: string) => string | undefined
+
+function parseQuantity(raw: string): number | undefined {
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/**
+ * Pure mapper: a Square Order becomes ledger `AppendEventInput`s. Shared,
+ * unmodified, by both the webhook inbox worker and the reconciliation
+ * poll (spec §7.1/§7.2) -- that sharing is what guarantees the two paths
+ * build identical idempotency keys for the same sale. See `saleKey`'s
+ * docstring in `@winterborn/shared` for why a second implementation here
+ * would be the single most likely way this system corrupts its ledger.
+ *
+ * Sale line items become negative-quantity SALE events keyed
+ * `sale:{orderId}:{lineUid}`. Refund/return line items
+ * (`order.returns[].returnLineItems`) become positive-quantity SALE
+ * events keyed off their own uid -- naturally distinct from the sale
+ * line's key because it is a different uid -- per spec §7.1: "write
+ * correcting SALE events with positive quantity and a distinct
+ * idempotency key."
+ *
+ * A line with no uid, no catalogObjectId, an unresolvable
+ * catalogObjectId, or an unparsable quantity is recorded in
+ * `deadLetters` and excluded from `events` -- never thrown, never
+ * silently skipped.
+ */
+export function mapOrderToLedgerInputs(
+  order: Square.Order,
+  resolveVariationId: VariationResolver,
+  resolveLocationId: LocationResolver,
+  source: LedgerSource,
+): MapOrderResult {
+  const events: AppendEventInput[] = []
+  const deadLetters: DeadLetter[] = []
+
+  const orderId = order.id
+  if (!orderId) return { events, deadLetters }
+
+  // AppendEventInput's occurredAt is typed Date at the z.input level even
+  // though the schema uses z.coerce.date() (zod does not widen a coerced
+  // schema's static input type), so construct a Date here rather than
+  // passing the raw ISO string through.
+  const occurredAt = new Date(order.updatedAt ?? order.createdAt ?? Date.now())
+  const locationId = resolveLocationId(order.locationId)
+
+  const deadLetterLine = (lineUid: string | null | undefined, catalogObjectId: string | null | undefined, reason: string): void => {
+    deadLetters.push({ orderId, lineUid: lineUid ?? '', catalogObjectId: catalogObjectId ?? null, reason })
+  }
+
+  if (!locationId) {
+    for (const line of order.lineItems ?? []) deadLetterLine(line.uid, line.catalogObjectId, `unknown Square location ${order.locationId}`)
+    for (const ret of order.returns ?? []) {
+      for (const line of ret.returnLineItems ?? []) deadLetterLine(line.uid, line.catalogObjectId, `unknown Square location ${order.locationId}`)
+    }
+    return { events, deadLetters }
+  }
+
+  for (const line of order.lineItems ?? []) {
+    const lineUid = line.uid
+    const catalogObjectId = line.catalogObjectId
+    if (!lineUid || !catalogObjectId) {
+      deadLetterLine(lineUid, catalogObjectId, 'missing uid or catalogObjectId')
+      continue
+    }
+    const variationId = resolveVariationId(catalogObjectId)
+    if (!variationId) {
+      deadLetterLine(lineUid, catalogObjectId, 'unmapped catalogObjectId')
+      continue
+    }
+    const quantity = parseQuantity(line.quantity)
+    if (quantity === undefined) {
+      deadLetterLine(lineUid, catalogObjectId, `invalid quantity "${line.quantity}"`)
+      continue
+    }
+    events.push({
+      type: 'SALE',
+      locationId,
+      variationId,
+      quantity: -quantity,
+      occurredAt,
+      source,
+      sourceRef: orderId,
+      idempotencyKey: saleKey(orderId, lineUid),
+    })
+  }
+
+  for (const ret of order.returns ?? []) {
+    for (const line of ret.returnLineItems ?? []) {
+      const lineUid = line.uid
+      const catalogObjectId = line.catalogObjectId
+      if (!lineUid || !catalogObjectId) {
+        deadLetterLine(lineUid, catalogObjectId, 'missing uid or catalogObjectId on return line')
+        continue
+      }
+      const variationId = resolveVariationId(catalogObjectId)
+      if (!variationId) {
+        deadLetterLine(lineUid, catalogObjectId, 'unmapped catalogObjectId on return line')
+        continue
+      }
+      const quantity = parseQuantity(line.quantity)
+      if (quantity === undefined) {
+        deadLetterLine(lineUid, catalogObjectId, `invalid return quantity "${line.quantity}"`)
+        continue
+      }
+      events.push({
+        type: 'SALE',
+        locationId,
+        variationId,
+        quantity,
+        occurredAt,
+        source,
+        sourceRef: orderId,
+        idempotencyKey: saleKey(orderId, lineUid),
+      })
+    }
+  }
+
+  return { events, deadLetters }
+}
