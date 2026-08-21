@@ -12,7 +12,8 @@
     "lint": "echo lint-ok",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy"
+    "db:deploy": "prisma migrate deploy",
+    "cli:import-sortly": "tsx src/cli/import-sortly.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -20,6 +21,7 @@
     "@nestjs/platform-express": "^11.0.0",
     "@prisma/client": "^5.20.0",
     "@winterborn/shared": "workspace:*",
+    "csv-parse": "^7.0.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
