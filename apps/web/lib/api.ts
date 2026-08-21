@@ -10,7 +10,10 @@ import {
   createRequestInputSchema,
   createRequestLineInputSchema,
   currentUserSchema,
+  decisionQueueRowSchema,
   dispatchResultSchema,
+  evaluateAllResultSchema,
+  healthResponseSchema,
   loadDispatchResultSchema,
   loadSchema,
   loadWithBoxesSchema,
@@ -22,6 +25,7 @@ import {
   requestMagicLinkResultSchema,
   restockRequestBaseSchema,
   restockRequestSchema,
+  salesRowSchema,
   stockLevelSchema,
   thresholdSchema,
   transitionRequestInputSchema,
@@ -151,6 +155,26 @@ export function stockByFamily(locationId?: string) {
 
 export function stockByVariant(locationId?: string) {
   return request('GET', `/stock/by-variant${qs({ locationId })}`, z.array(stockLevelSchema))
+}
+
+export function salesSince(locationId?: string, days?: number) {
+  return request('GET', `/stock/sales-since${qs({ locationId, days: days?.toString() })}`, z.array(salesRowSchema))
+}
+
+// ---- thresholds / decision queue -------------------------------------------
+
+export function decisionQueue() {
+  return request('GET', '/thresholds/decision-queue', z.array(decisionQueueRowSchema))
+}
+
+export function evaluateAllThresholds() {
+  return request('POST', '/thresholds/evaluate-all', evaluateAllResultSchema)
+}
+
+// ---- health -------------------------------------------------------------------
+
+export function getHealth() {
+  return request('GET', '/health', healthResponseSchema)
 }
 
 export function listUnassignedColourVariants() {

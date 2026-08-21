@@ -2,11 +2,28 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import type { LocationDto, LowStockRow, RestockRequestDto, StockLevel, VariationSummary } from '@winterborn/shared'
+import type {
+  DecisionQueueRow,
+  LocationDto,
+  LowStockRow,
+  RestockRequestDto,
+  SalesRow,
+  StockLevel,
+  VariationSummary,
+} from '@winterborn/shared'
 import { RequireAuth } from '../components/RequireAuth'
 import { Swatch } from '../components/Swatch'
 import { useAuth } from '../lib/auth-context'
-import { ApiError, listLocations, listRequests, listVariations, lowStock, stockByFamily } from '../lib/api'
+import {
+  ApiError,
+  decisionQueue,
+  listLocations,
+  listRequests,
+  listVariations,
+  lowStock,
+  salesSince,
+  stockByFamily,
+} from '../lib/api'
 
 function DashboardBody() {
   const { user } = useAuth()
@@ -15,6 +32,8 @@ function DashboardBody() {
   const [requests, setRequests] = useState<RestockRequestDto[]>([])
   const [stock, setStock] = useState<StockLevel[]>([])
   const [low, setLow] = useState<LowStockRow[]>([])
+  const [sales, setSales] = useState<SalesRow[]>([])
+  const [queue, setQueue] = useState<DecisionQueueRow[]>([])
   const [locationId, setLocationId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -25,11 +44,18 @@ function DashboardBody() {
     let cancelled = false
     async function load() {
       try {
-        const [locs, vars, reqs] = await Promise.all([listLocations(), listVariations(), listRequests()])
+        const calls: [
+          ReturnType<typeof listLocations>,
+          ReturnType<typeof listVariations>,
+          ReturnType<typeof listRequests>,
+          ReturnType<typeof decisionQueue> | Promise<DecisionQueueRow[]>,
+        ] = [listLocations(), listVariations(), listRequests(), isMarketManager ? Promise.resolve([]) : decisionQueue()]
+        const [locs, vars, reqs, dq] = await Promise.all(calls)
         if (cancelled) return
         setLocations(locs)
         setVariations(vars)
         setRequests(reqs)
+        setQueue(dq)
         const markets = locs.filter((l) => l.kind === 'MARKET')
         const initial = isMarketManager ? (user?.locationId ?? markets[0]?.id ?? null) : (markets[0]?.id ?? null)
         setLocationId(initial)
@@ -48,11 +74,14 @@ function DashboardBody() {
     if (!locationId) return
     let cancelled = false
     setLoading(true)
-    Promise.all([stockByFamily(locationId), lowStock(locationId)])
-      .then(([s, l]) => {
+    // Three bulk reads, never one call per row -- the ledger this derives
+    // over holds 40,000+ events (spec §9.9 / plan-06's hardening bullet).
+    Promise.all([stockByFamily(locationId), lowStock(locationId), salesSince(locationId, 7)])
+      .then(([s, l, sold]) => {
         if (cancelled) return
         setStock(s)
         setLow(l)
+        setSales(sold)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Could not load stock levels.')
@@ -92,6 +121,18 @@ function DashboardBody() {
     [requests],
   )
 
+  const locationById = useMemo(() => new Map(locations.map((l) => [l.id, l])), [locations])
+
+  const salesRows = useMemo(
+    () =>
+      sales
+        .map((s) => ({ ...s, meta: variationById.get(s.variationId) }))
+        .filter((s) => s.meta && s.unitsSold > 0)
+        .sort((a, b) => b.unitsSold - a.unitsSold),
+    [sales, variationById],
+  )
+  const salesTotal = useMemo(() => sales.reduce((sum, s) => sum + s.unitsSold, 0), [sales])
+
   return (
     <div>
       {error && <p className="error-banner">{error}</p>}
@@ -118,6 +159,43 @@ function DashboardBody() {
           </select>
         )}
       </div>
+
+      {!isMarketManager && (
+        <>
+          <div className="section-heading">
+            <h2>Decision queue</h2>
+            <span className="eyebrow">{queue.length}</span>
+          </div>
+          {queue.length === 0 ? (
+            <div className="card">
+              <p style={{ margin: 0, color: 'var(--text-dim)' }}>
+                Nothing auto-drafted and waiting on review. Stage 1 is manual-review: this list only fills when a
+                threshold breach happened and nobody has actioned it yet.
+              </p>
+            </div>
+          ) : (
+            <div className="list">
+              {queue.map((row) => (
+                <Link key={row.requestId} href={`/requests/${row.requestId}`} className="list-row">
+                  <div className="list-row-body">
+                    <div className="list-row-title">{locationById.get(row.locationId)?.name ?? row.locationId}</div>
+                    <div className="list-row-meta">
+                      {row.lines
+                        .map((line) => {
+                          const meta = variationById.get(line.variationId)
+                          const label = meta ? `${meta.itemGroupName} ${meta.colourFamilyName}` : line.variationId
+                          return `${label} (${line.onHand}/${line.minLevel})`
+                        })
+                        .join(' · ')}
+                    </div>
+                  </div>
+                  <span className="chip chip-rust">{row.lines.length} line{row.lines.length === 1 ? '' : 's'}</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       <div className="section-heading">
         <h2>Low on stock</h2>
@@ -148,6 +226,33 @@ function DashboardBody() {
                   <span style={{ color: 'var(--text-faint)' }}> / {row.minLevel}</span>
                 </div>
                 <span className="chip chip-rust">Low</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="section-heading">
+        <h2>Sales this week</h2>
+        <span className="eyebrow">{salesTotal} units</span>
+      </div>
+      {!loading && salesRows.length === 0 ? (
+        <div className="card">
+          <p style={{ margin: 0, color: 'var(--text-dim)' }}>No sales recorded here in the last 7 days.</p>
+        </div>
+      ) : (
+        <div className="list">
+          {salesRows.slice(0, 8).map((row) => (
+            <div key={row.variationId} className="list-row">
+              <Swatch familyName={row.meta?.colourFamilyName} />
+              <div className="list-row-body">
+                <div className="list-row-title">{row.meta?.itemGroupName}</div>
+                <div className="list-row-meta">
+                  {row.meta?.colourFamilyName} · {row.meta?.sizeOptionName}
+                </div>
+              </div>
+              <div className="mono" style={{ fontWeight: 700 }}>
+                {row.unitsSold}
               </div>
             </div>
           ))}

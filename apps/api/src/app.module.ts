@@ -7,6 +7,7 @@ import { RequestsModule } from './requests/requests.module.js'
 import { FulfilmentModule } from './fulfilment/fulfilment.module.js'
 import { CatalogModule } from './catalog/catalog.module.js'
 import { ThresholdsModule } from './thresholds/thresholds.module.js'
+import { HealthModule } from './health/health.module.js'
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { ThresholdsModule } from './thresholds/thresholds.module.js'
     FulfilmentModule,
     CatalogModule,
     ThresholdsModule,
+    HealthModule,
   ],
 })
 export class AppModule {}

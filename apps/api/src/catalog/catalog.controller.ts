@@ -71,4 +71,15 @@ export class CatalogController {
   lowStock(@Query('locationId') locationId?: string) {
     return this.catalog.lowStock(locationId)
   }
+
+  /// Family-level units sold since `now - days` (default 7 -- "this week"
+  /// per spec §9.9). One bulk groupBy in LedgerReadService.salesSince,
+  /// never a per-variation call.
+  @Get('stock/sales-since')
+  salesSince(@Query('locationId') locationId?: string, @Query('days') days?: string) {
+    const parsedDays = days ? Number.parseInt(days, 10) : 7
+    const windowDays = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : 7
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+    return this.ledgerRead.salesSince(since, locationId)
+  }
 }
