@@ -57,8 +57,8 @@ describe('parseSortlyCsv', () => {
   it('captures colour, style and size together when all three are present', () => {
     const { items } = parseSortlyCsv(sample)
     const all = items.find((i) => i.entryName === 'ALL_THREE')
-    expect(all?.colour).toBe('Purple/Pink')
-    expect(all?.style).toBe('Diamond Variant')
+    expect(all?.colour).toBe('Violet/Rose')
+    expect(all?.style).toBe('Lozenge Variant')
     expect(all?.size).toBe('Medium')
   })
 
