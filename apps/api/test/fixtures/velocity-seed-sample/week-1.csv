@@ -1,0 +1,5 @@
+Date,Time,Item,Qty,Price Point Name,Transaction ID,Event Type,Location
+2025-11-08,10:00:00,Scarf (Stripes),2.0,Blue,txn_1,Payment,Denver
+2025-11-08,10:05:00,Scarf (Stripes),1.0,Gray,txn_1,Payment,Denver
+2025-11-08,12:00:00,Scarf (Stripes),1.0,Blue,txn_5,Payment,Boston
+2025-11-09,09:00:00,Unknown Product,4.0,Regular,txn_2,Payment,Denver

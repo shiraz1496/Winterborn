@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { Prisma } from '@prisma/client'
-import type { StockLevel } from '@winterborn/shared'
+import type { SalesRow, StockLevel } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 
 /**
@@ -50,6 +50,32 @@ export class LedgerReadService {
       warehouseVariantId: r.warehouseVariantId,
       locationId: r.locationId,
       onHand: r._sum.quantity ?? 0,
+    }))
+  }
+
+  /**
+   * Family-level units sold since `since`, one bulk `groupBy` covering
+   * every variation and location in a single query -- the same "bulk, not
+   * per-row" discipline as onHandByFamily. Feeds the dashboard's "sales
+   * today / this week" panel (spec §9.9). SALE quantities are stored
+   * negative (stock leaving); this returns the positive count sold, and
+   * ignores every other event type so a dispatch or write-off never shows
+   * up as a "sale".
+   */
+  async salesSince(since: Date, locationId?: string): Promise<SalesRow[]> {
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['variationId', 'locationId'],
+      _sum: { quantity: true },
+      where: {
+        type: 'SALE',
+        occurredAt: { gte: since },
+        ...(locationId ? { locationId } : {}),
+      },
+    })
+    return rows.map((r) => ({
+      variationId: r.variationId,
+      locationId: r.locationId,
+      unitsSold: -(r._sum.quantity ?? 0),
     }))
   }
 

@@ -87,6 +87,17 @@ export const stockLevelSchema = z.object({
 })
 export type StockLevel = z.infer<typeof stockLevelSchema>
 
+/// `GET /stock/sales-since`: family-level units sold in a trailing window
+/// (spec §9.9's "sales today and this week by family"). `unitsSold` is
+/// reported positive -- callers do not want to mentally un-negate a signed
+/// ledger sum to read "we sold 12 of these".
+export const salesRowSchema = z.object({
+  variationId: z.string(),
+  locationId: z.string(),
+  unitsSold: z.number().int(),
+})
+export type SalesRow = z.infer<typeof salesRowSchema>
+
 /**
  * Idempotency-key builders — the only sanctioned way to construct a
  * LedgerEvent idempotencyKey / idempotencyKeyPrefix.

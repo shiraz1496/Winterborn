@@ -1,0 +1,5 @@
+Date,Time,Item,Qty,Price Point Name,Transaction ID,Event Type,Location
+2025-12-14,10:00:00,Scarf (Stripes),4.0,Blue,txn_3,Payment,Denver
+2025-12-14,10:05:00,Scarf (Stripes),3.0,Gray,txn_3,Payment,Denver
+2025-12-15,11:00:00,Scarf (Stripes),2.0,Blue,txn_4,Refund,Denver
+2025-12-14,10:10:00,Scarf (Stripes),3.0,Blue,txn_6,Refund,Chicago

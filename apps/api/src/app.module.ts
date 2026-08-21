@@ -6,8 +6,18 @@ import { AuthModule } from './auth/auth.module.js'
 import { RequestsModule } from './requests/requests.module.js'
 import { FulfilmentModule } from './fulfilment/fulfilment.module.js'
 import { CatalogModule } from './catalog/catalog.module.js'
+import { ThresholdsModule } from './thresholds/thresholds.module.js'
 
 @Module({
-  imports: [PrismaModule, LedgerModule, SquareModule, AuthModule, RequestsModule, FulfilmentModule, CatalogModule],
+  imports: [
+    PrismaModule,
+    LedgerModule,
+    SquareModule,
+    AuthModule,
+    RequestsModule,
+    FulfilmentModule,
+    CatalogModule,
+    ThresholdsModule,
+  ],
 })
 export class AppModule {}
