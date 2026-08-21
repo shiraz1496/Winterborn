@@ -205,10 +205,10 @@ describe('append-only constraint', () => {
     })
 
     await expect(
-      prisma.ledgerEvent.update({ where: { id }, data: { quantity: -2 } }),
+      prisma.ledgerEvent.update({ where: { id }, data: { quantity: -2 } }), // sole-writer-guard:allow-trigger-test
     ).rejects.toThrow(/append-only/)
 
-    await expect(prisma.ledgerEvent.delete({ where: { id } })).rejects.toThrow(/append-only/)
+    await expect(prisma.ledgerEvent.delete({ where: { id } })).rejects.toThrow(/append-only/) // sole-writer-guard:allow-trigger-test
 
     // The row survived both attempts untouched.
     const row = await prisma.ledgerEvent.findUniqueOrThrow({ where: { id } })

@@ -224,8 +224,22 @@ model LedgerEvent {
   note               String?
 
   location         Location          @relation(fields: [locationId], references: [id])
-  variation        Variation         @relation(fields: [variationId], references: [id])
-  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id])
+  /// A Variation with ledger history must be exactly as undeletable as it
+  /// would otherwise be: RESTRICT is a clean FK violation, never an UPDATE
+  /// against LedgerEvent, so it never touches the append-only trigger.
+  variation        Variation         @relation(fields: [variationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Deliberately RESTRICT, not the SET NULL Prisma would default to for an
+  /// optional relation. SET NULL is implemented by Postgres as an UPDATE
+  /// against the child row, which fires the append-only trigger (it has no
+  /// WHEN clause excluding FK-originated updates) and raises. That means a
+  /// delete would today only be blocked as a side effect of a mechanism
+  /// meant for something else — undocumented, fragile, and if it ever did
+  /// succeed it would silently null out the field that distinguishes a
+  /// variant-level movement from a family-level one, permanently and
+  /// invisibly, since append-only forbids fixing it in place. RESTRICT
+  /// makes a WarehouseVariant with ledger history fail the same clean way a
+  /// Variation with ledger history does.
+  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([variationId, locationId])
   @@index([warehouseVariantId, locationId])
@@ -291,8 +305,22 @@ model RestockRequestLine {
   qtyRequested       Int
 
   request          RestockRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  variation        Variation         @relation(fields: [variationId], references: [id])
-  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id])
+  /// A Variation with ledger history must be exactly as undeletable as it
+  /// would otherwise be: RESTRICT is a clean FK violation, never an UPDATE
+  /// against LedgerEvent, so it never touches the append-only trigger.
+  variation        Variation         @relation(fields: [variationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Deliberately RESTRICT, not the SET NULL Prisma would default to for an
+  /// optional relation. SET NULL is implemented by Postgres as an UPDATE
+  /// against the child row, which fires the append-only trigger (it has no
+  /// WHEN clause excluding FK-originated updates) and raises. That means a
+  /// delete would today only be blocked as a side effect of a mechanism
+  /// meant for something else — undocumented, fragile, and if it ever did
+  /// succeed it would silently null out the field that distinguishes a
+  /// variant-level movement from a family-level one, permanently and
+  /// invisibly, since append-only forbids fixing it in place. RESTRICT
+  /// makes a WarehouseVariant with ledger history fail the same clean way a
+  /// Variation with ledger history does.
+  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([requestId])
 }

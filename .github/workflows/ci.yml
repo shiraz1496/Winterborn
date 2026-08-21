@@ -40,15 +40,19 @@ jobs:
           # directly for bulk sale ingestion instead of going through
           # LedgerService.append()/transfer(). If this ever matches outside
           # that one file, the invariant has already been broken.
-          # apps/api/test/ledger-append.spec.ts is also excluded: it deliberately
-          # calls prisma.ledgerEvent.update/delete to prove the database-level
-          # append-only trigger rejects them. That is a test of the trigger,
-          # not a sole-writer violation.
+          # Two lines in apps/api/test/ledger-append.spec.ts are also exempt:
+          # they deliberately call prisma.ledgerEvent.update/delete to prove
+          # the database-level append-only trigger rejects them, which is a
+          # test of the trigger, not a sole-writer violation. Excluding the
+          # whole file would leave it uncovered for everything else it will
+          # grow to contain (the next plan's webhook worker and reconciliation
+          # poll tests land here), so the exemption is a marker comment on
+          # just those two lines, not a path exclusion.
           matches=$(grep -rnE "prisma\.ledgerEvent\.(create|createMany|update|updateMany|delete|deleteMany|upsert)\(" \
             apps/api/src apps/api/test apps/api/prisma \
             --include='*.ts' \
             | grep -v "apps/api/src/ledger/ledger.service.ts" \
-            | grep -v "apps/api/test/ledger-append.spec.ts" || true)
+            | grep -v "sole-writer-guard:allow-trigger-test" || true)
           if [ -n "$matches" ]; then
             echo "LedgerEvent must only ever be written from apps/api/src/ledger/ledger.service.ts."
             echo "Found direct prisma.ledgerEvent writes elsewhere, which breaks the"
