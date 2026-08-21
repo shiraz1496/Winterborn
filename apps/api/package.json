@@ -13,7 +13,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "cli:import-sortly": "tsx src/cli/import-sortly.ts"
+    "cli:import-sortly": "tsx src/cli/import-sortly.ts",
+    "cli:assign-families": "tsx src/cli/assign-families.ts",
+    "cli:archive-photos": "tsx src/cli/archive-photos.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
