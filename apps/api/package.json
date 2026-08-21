@@ -16,7 +16,11 @@
     "cli:import-sortly": "tsx src/cli/import-sortly.ts",
     "cli:assign-families": "tsx src/cli/assign-families.ts",
     "cli:archive-photos": "tsx src/cli/archive-photos.ts",
-    "cli:generate-skus": "tsx src/cli/generate-skus.ts"
+    "cli:generate-skus": "tsx src/cli/generate-skus.ts",
+    "cli:join-square": "tsx src/cli/join-square.ts",
+    "cli:catalog-plan": "tsx src/cli/catalog-plan.ts",
+    "cli:catalog-apply": "tsx src/cli/catalog-apply.ts",
+    "cli:catalog-verify": "tsx src/cli/catalog-verify.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -25,8 +29,10 @@
     "@prisma/client": "^5.20.0",
     "@winterborn/shared": "workspace:*",
     "csv-parse": "^7.0.2",
+    "dotenv": "^16.4.5",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "square": "^43.0.0"
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",
