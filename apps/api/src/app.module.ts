@@ -4,6 +4,7 @@ import { LedgerModule } from './ledger/ledger.module.js'
 import { SquareModule } from './square/square.module.js'
 import { AuthModule } from './auth/auth.module.js'
 import { RequestsModule } from './requests/requests.module.js'
+import { FulfilmentModule } from './fulfilment/fulfilment.module.js'
 
-@Module({ imports: [PrismaModule, LedgerModule, SquareModule, AuthModule, RequestsModule] })
+@Module({ imports: [PrismaModule, LedgerModule, SquareModule, AuthModule, RequestsModule, FulfilmentModule] })
 export class AppModule {}
