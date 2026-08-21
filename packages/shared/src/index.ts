@@ -1,3 +1,5 @@
 export * from './ledger.js'
 export * from './catalog.js'
 export * from './requests.js'
+export * from './fulfilment.js'
+export * from './auth.js'

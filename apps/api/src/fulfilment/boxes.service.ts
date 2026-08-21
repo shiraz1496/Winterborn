@@ -63,6 +63,31 @@ export class BoxesService {
     })
   }
 
+  /// Filters are AND'd together; both are optional so /pack/[requestId] can
+  /// ask "boxes for this request" and a plain box browser can ask "boxes
+  /// headed to this market" without two endpoints.
+  async list(filter: { requestId?: string; destinationLocationId?: string }) {
+    return this.prisma.box.findMany({
+      where: {
+        ...(filter.requestId ? { requestId: filter.requestId } : {}),
+        ...(filter.destinationLocationId ? { destinationLocationId: filter.destinationLocationId } : {}),
+      },
+      include: { lines: true },
+      orderBy: { packedAt: 'desc' },
+    })
+  }
+
+  async get(id: string) {
+    return this.prisma.box.findUniqueOrThrow({ where: { id }, include: { lines: true } })
+  }
+
+  /// The QR label encodes `qrToken` only (spec §9.4) -- this is how a scan
+  /// resolves that opaque string back to the box and its manifest, for the
+  /// human to confirm before /scan calls dispatch.
+  async getByToken(qrToken: string) {
+    return this.prisma.box.findUniqueOrThrow({ where: { qrToken }, include: { lines: true } })
+  }
+
   async addLine(boxId: string, input: PackBoxLineInput) {
     if (input.quantity <= 0) throw new BadRequestException('box line quantity must be positive')
     const box = await this.prisma.box.findUniqueOrThrow({ where: { id: boxId } })

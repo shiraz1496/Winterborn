@@ -5,6 +5,9 @@ import { SquareModule } from './square/square.module.js'
 import { AuthModule } from './auth/auth.module.js'
 import { RequestsModule } from './requests/requests.module.js'
 import { FulfilmentModule } from './fulfilment/fulfilment.module.js'
+import { CatalogModule } from './catalog/catalog.module.js'
 
-@Module({ imports: [PrismaModule, LedgerModule, SquareModule, AuthModule, RequestsModule, FulfilmentModule] })
+@Module({
+  imports: [PrismaModule, LedgerModule, SquareModule, AuthModule, RequestsModule, FulfilmentModule, CatalogModule],
+})
 export class AppModule {}

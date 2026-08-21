@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -15,6 +15,21 @@ export class BoxesController {
   @Post()
   pack(@Body() body: PackBoxInput, @CurrentUser() user: CurrentUserPayload) {
     return this.boxes.pack(body, user)
+  }
+
+  @Get()
+  list(@Query('requestId') requestId?: string, @Query('destinationLocationId') destinationLocationId?: string) {
+    return this.boxes.list({ requestId, destinationLocationId })
+  }
+
+  @Get('by-token/:qrToken')
+  getByToken(@Param('qrToken') qrToken: string) {
+    return this.boxes.getByToken(qrToken)
+  }
+
+  @Get(':id')
+  get(@Param('id') id: string) {
+    return this.boxes.get(id)
   }
 
   @Post(':id/lines')

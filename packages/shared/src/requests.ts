@@ -34,3 +34,34 @@ export type UpdateRequestLineInput = z.infer<typeof updateRequestLineInputSchema
 
 export const transitionRequestInputSchema = z.object({ state: requestStateSchema })
 export type TransitionRequestInput = z.infer<typeof transitionRequestInputSchema>
+
+/// Response shapes -- what `RequestsController` actually returns, not the
+/// input schemas above. `qtyRequested` round-trips through JSON as a plain
+/// number since Prisma's Int maps straight to it.
+export const requestLineSchema = z.object({
+  id: z.string(),
+  requestId: z.string(),
+  variationId: z.string(),
+  warehouseVariantId: z.string().nullable(),
+  qtyRequested: z.number().int(),
+})
+export type RequestLineDto = z.infer<typeof requestLineSchema>
+
+/// Fields common to every response shape. `transition()` returns exactly
+/// this -- Prisma's bare `update()` result, with no `lines` relation loaded
+/// -- while create/list/get include `lines` on top (see restockRequestSchema).
+export const restockRequestBaseSchema = z.object({
+  id: z.string(),
+  locationId: z.string(),
+  state: requestStateSchema,
+  createdFrom: requestOriginSchema,
+  createdById: z.string().nullable(),
+  createdAt: z.coerce.date(),
+  closedAt: z.coerce.date().nullable(),
+})
+export type RestockRequestBaseDto = z.infer<typeof restockRequestBaseSchema>
+
+export const restockRequestSchema = restockRequestBaseSchema.extend({
+  lines: z.array(requestLineSchema),
+})
+export type RestockRequestDto = z.infer<typeof restockRequestSchema>

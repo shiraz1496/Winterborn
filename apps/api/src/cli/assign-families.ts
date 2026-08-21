@@ -1,6 +1,9 @@
 import { PrismaService } from '../prisma/prisma.service.js'
 import { assignFamily } from '../catalog/family-assigner.js'
+import { Prisma } from '@prisma/client'
 import type { FamilyAssignmentSource } from '@prisma/client'
+
+const UNIQUE_VIOLATION = 'P2002'
 
 /**
  * Reassigns every `ColourVariant` from the per-category `Unassigned`
@@ -82,14 +85,6 @@ async function run(prisma: PrismaService): Promise<RunResult> {
       continue
     }
 
-    if (assignment.source === 'LEXICAL') {
-      counts.lexical++
-      distinctLexical.add(row.sortlyName)
-    } else if (assignment.source === 'SYNONYM') {
-      counts.synonym++
-      distinctSynonym.add(row.sortlyName)
-    }
-
     const cacheKey = `${categoryId}::${assignment.family}`
     let familyId = familyIdCache.get(cacheKey)
     if (!familyId) {
@@ -115,14 +110,42 @@ async function run(prisma: PrismaService): Promise<RunResult> {
       familyIdCache.set(cacheKey, familyId)
     }
 
-    await prisma.colourVariant.update({
-      where: { id: row.id },
-      data: {
-        colourFamilyId: familyId,
-        familyAssignmentSource: assignment.source as FamilyAssignmentSource,
-        familyConfidence: assignment.confidence,
-      },
-    })
+    try {
+      await prisma.colourVariant.update({
+        where: { id: row.id },
+        data: {
+          colourFamilyId: familyId,
+          familyAssignmentSource: assignment.source as FamilyAssignmentSource,
+          familyConfidence: assignment.confidence,
+        },
+      })
+    } catch (err) {
+      // Two distinct ColourVariant rows -- different category, or a name
+      // collision the raw export never intended to be the same physical
+      // item -- can lexically resolve to the same (family, name) pair.
+      // ColourVariant is unique on (colourFamilyId, name), so the second
+      // one to arrive cannot silently move in on top of the first: that
+      // would merge two different warehouse SKUs' colour identity. Fall
+      // back to the residual queue instead of crashing the whole run --
+      // exactly where a value the lexicon can't safely place already goes
+      // (see assignFamily's docstring) -- so a human decides on
+      // /admin/colours rather than the mismatch being decided by import
+      // order.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
+        counts.residual++
+        residualValues.add(row.sortlyName)
+        continue
+      }
+      throw err
+    }
+
+    if (assignment.source === 'LEXICAL') {
+      counts.lexical++
+      distinctLexical.add(row.sortlyName)
+    } else if (assignment.source === 'SYNONYM') {
+      counts.synonym++
+      distinctSynonym.add(row.sortlyName)
+    }
 
     if (!familySetsByCategory.has(categoryName)) familySetsByCategory.set(categoryName, new Set())
     familySetsByCategory.get(categoryName)!.add(assignment.family)

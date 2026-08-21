@@ -4,6 +4,10 @@ import { Prisma } from '@prisma/client'
 import { PrismaModule } from '../prisma/prisma.module.js'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { parseSortlyCsv, type ParsedSortlyItem, type SkippedRow } from './sortly-parser.js'
+import { AuthModule } from '../auth/auth.module.js'
+import { LedgerModule } from '../ledger/ledger.module.js'
+import { CatalogReadService } from './catalog-read.service.js'
+import { CatalogController } from './catalog.controller.js'
 
 const UNIQUE_VIOLATION = 'P2002'
 
@@ -334,8 +338,9 @@ export class SortlyImportService {
 }
 
 @Module({
-  imports: [PrismaModule],
-  providers: [SortlyImportService],
-  exports: [SortlyImportService],
+  imports: [PrismaModule, AuthModule, LedgerModule],
+  controllers: [CatalogController],
+  providers: [SortlyImportService, CatalogReadService],
+  exports: [SortlyImportService, CatalogReadService],
 })
 export class CatalogModule {}

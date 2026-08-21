@@ -1,0 +1,74 @@
+import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common'
+import type { AssignColourFamilyInput } from '@winterborn/shared'
+import { JwtGuard } from '../auth/jwt.guard.js'
+import { RolesGuard } from '../auth/roles.guard.js'
+import { Roles } from '../auth/roles.decorator.js'
+import { CatalogReadService } from './catalog-read.service.js'
+import { LedgerReadService } from '../ledger/ledger-read.service.js'
+
+/// Read-only catalog/stock/location surface for the frontend, plus the one
+/// write the /admin/colours screen needs. Everyone authenticated may read
+/// (a market manager deciding what to request needs family names and stock
+/// just as much as the warehouse does); only warehouse-side roles may
+/// reassign a colour family.
+@Controller()
+@UseGuards(JwtGuard, RolesGuard)
+export class CatalogController {
+  constructor(
+    private readonly catalog: CatalogReadService,
+    private readonly ledgerRead: LedgerReadService,
+  ) {}
+
+  @Get('locations')
+  locations() {
+    return this.catalog.listLocations()
+  }
+
+  @Get('catalog/variations')
+  variations() {
+    return this.catalog.listVariations()
+  }
+
+  @Get('catalog/warehouse-variants')
+  warehouseVariants(@Query('variationId') variationId?: string) {
+    return this.catalog.listWarehouseVariants(variationId)
+  }
+
+  @Get('catalog/thresholds')
+  thresholds(@Query('locationId') locationId?: string) {
+    return this.catalog.listThresholds(locationId)
+  }
+
+  @Get('catalog/colour-variants/unassigned')
+  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  unassignedColourVariants() {
+    return this.catalog.listUnassignedColourVariants()
+  }
+
+  @Get('catalog/colour-families')
+  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  colourFamilies(@Query('categoryId') categoryId: string) {
+    return this.catalog.listColourFamilies(categoryId)
+  }
+
+  @Patch('catalog/colour-variants/:id')
+  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  assignColourFamily(@Param('id') id: string, @Body() body: AssignColourFamilyInput) {
+    return this.catalog.assignColourFamily(id, body.colourFamilyId)
+  }
+
+  @Get('stock/by-family')
+  stockByFamily(@Query('locationId') locationId?: string) {
+    return this.ledgerRead.onHandByFamily(locationId)
+  }
+
+  @Get('stock/by-variant')
+  stockByVariant(@Query('locationId') locationId?: string) {
+    return this.ledgerRead.onHandByVariant(locationId)
+  }
+
+  @Get('stock/low')
+  lowStock(@Query('locationId') locationId?: string) {
+    return this.catalog.lowStock(locationId)
+  }
+}

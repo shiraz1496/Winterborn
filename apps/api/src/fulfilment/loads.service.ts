@@ -35,6 +35,14 @@ export class LoadsService {
     })
   }
 
+  async list() {
+    return this.prisma.load.findMany({ orderBy: { createdAt: 'desc' } })
+  }
+
+  async get(id: string) {
+    return this.prisma.load.findUniqueOrThrow({ where: { id }, include: { boxes: true } })
+  }
+
   async scanBox(loadId: string, boxId: string) {
     const load = await this.prisma.load.findUniqueOrThrow({ where: { id: loadId } })
     const box = await this.prisma.box.findUniqueOrThrow({ where: { id: boxId } })

@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -15,6 +15,16 @@ export class LoadsController {
   @Post()
   create(@Body() body: CreateLoadInput, @CurrentUser() user: CurrentUserPayload) {
     return this.loads.create(body, user)
+  }
+
+  @Get()
+  list() {
+    return this.loads.list()
+  }
+
+  @Get(':id')
+  get(@Param('id') id: string) {
+    return this.loads.get(id)
   }
 
   @Post(':id/scan')
