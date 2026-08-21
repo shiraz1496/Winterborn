@@ -183,6 +183,7 @@ model Location {
   loads           Load[]
   thresholds      Threshold[]
   syncCursor      SquareSyncCursor?
+  users           User[]
 
   @@index([kind])
 }
@@ -439,7 +440,11 @@ model User {
   name     String
   role     UserRole
   isActive Boolean  @default(true)
+  /// Only meaningful for MARKET_MANAGER: scopes them to one location. Null
+  /// for the other three roles, which see everything.
+  locationId String?
 
+  location Location? @relation(fields: [locationId], references: [id])
   sessions Session[]
 }
 
