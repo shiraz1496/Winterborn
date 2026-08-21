@@ -226,6 +226,20 @@ describe('replay property', () => {
             .join('\n')
 
         expect(norm(replayed)).toBe(norm(incremental))
+
+        // Same generated history, same round, independent granularity: the
+        // variant-level pair (onHandByVariant / recomputeByVariant) must
+        // agree just as the family-level pair does.
+        const incrementalByVariant = await read.onHandByVariant()
+        const replayedByVariant = await read.recomputeByVariant()
+
+        const normByVariant = (rows: typeof incrementalByVariant) =>
+          rows
+            .map((r) => `${r.warehouseVariantId}|${r.locationId}|${r.onHand}`)
+            .sort()
+            .join('\n')
+
+        expect(normByVariant(replayedByVariant)).toBe(normByVariant(incrementalByVariant))
       }
     } catch (err) {
       console.error(

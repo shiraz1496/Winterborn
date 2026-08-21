@@ -31,20 +31,27 @@ jobs:
       - run: pnpm test
       - name: Enforce LedgerEvent sole-writer invariant
         run: |
-          # LedgerService is the only code allowed to insert into ledger_event.
+          # LedgerService is the only code allowed to write to ledger_event.
           # That single-writer discipline is what makes the derivation in
           # LedgerReadService trustworthy: every row got there through one
           # code path with one set of idempotency and transfer-pairing rules.
           # Plan 4 adds a webhook worker and a reconciliation poll, both of
-          # which will be tempted to call prisma.ledgerEvent.create directly
-          # instead of going through LedgerService.append()/transfer(). If
-          # this ever matches outside that one file, the invariant has
-          # already been broken.
-          matches=$(grep -rn "prisma\.ledgerEvent\.create" apps/api/src apps/api/test apps/api/prisma \
-            --include='*.ts' | grep -v "apps/api/src/ledger/ledger.service.ts" || true)
+          # which will be tempted to call prisma.ledgerEvent.createMany
+          # directly for bulk sale ingestion instead of going through
+          # LedgerService.append()/transfer(). If this ever matches outside
+          # that one file, the invariant has already been broken.
+          # apps/api/test/ledger-append.spec.ts is also excluded: it deliberately
+          # calls prisma.ledgerEvent.update/delete to prove the database-level
+          # append-only trigger rejects them. That is a test of the trigger,
+          # not a sole-writer violation.
+          matches=$(grep -rnE "prisma\.ledgerEvent\.(create|createMany|update|updateMany|delete|deleteMany|upsert)\(" \
+            apps/api/src apps/api/test apps/api/prisma \
+            --include='*.ts' \
+            | grep -v "apps/api/src/ledger/ledger.service.ts" \
+            | grep -v "apps/api/test/ledger-append.spec.ts" || true)
           if [ -n "$matches" ]; then
-            echo "LedgerEvent must only ever be created from apps/api/src/ledger/ledger.service.ts."
-            echo "Found direct prisma.ledgerEvent.create calls elsewhere, which breaks the"
+            echo "LedgerEvent must only ever be written from apps/api/src/ledger/ledger.service.ts."
+            echo "Found direct prisma.ledgerEvent writes elsewhere, which breaks the"
             echo "sole-writer invariant the whole derivation model depends on:"
             echo "$matches"
             exit 1

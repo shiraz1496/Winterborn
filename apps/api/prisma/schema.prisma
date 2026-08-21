@@ -105,6 +105,7 @@ model Variation {
   warehouseVariants WarehouseVariant[]
   thresholds        Threshold[]
   requestLines      RestockRequestLine[]
+  ledgerEvents      LedgerEvent[]
 
   @@unique([itemGroupId, colourFamilyId, sizeOptionId])
 }
@@ -129,6 +130,7 @@ model WarehouseVariant {
   variation     Variation             @relation(fields: [variationId], references: [id])
   boxLines      BoxLine[]
   requestLines  RestockRequestLine[]
+  ledgerEvents  LedgerEvent[]
 
   @@unique([itemGroupId, colourVariantId, sizeOptionId])
   @@index([variationId])
@@ -212,13 +214,18 @@ model LedgerEvent {
   sourceRef          String?
   /// Makes replay and re-ingestion safe.
   idempotencyKey     String          @unique
+  /// No relation on purpose: ledger rows must survive a user being deleted,
+  /// and a required User relation would either block that deletion or
+  /// cascade into the event log. Do not "fix" this into a relation.
   actorId            String?
   /// Links the two rows of a transfer: negative at source, positive at destination.
   transferId         String?
   reason             WriteOffReason?
   note               String?
 
-  location Location @relation(fields: [locationId], references: [id])
+  location         Location          @relation(fields: [locationId], references: [id])
+  variation        Variation         @relation(fields: [variationId], references: [id])
+  warehouseVariant WarehouseVariant? @relation(fields: [warehouseVariantId], references: [id])
 
   @@index([variationId, locationId])
   @@index([warehouseVariantId, locationId])

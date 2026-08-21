@@ -39,6 +39,25 @@ describe('append', () => {
     expect(rows).toHaveLength(1)
   })
 
+  it('rejects a ledger row referencing a variation that does not exist', async () => {
+    // Before the FK existed this inserted silently, skewed every derivation
+    // that touched the variation, and could not be deleted because of the
+    // append-only trigger. The only remedy was an offsetting CORRECTION plus
+    // a permanent orphan in the event stream.
+    await expect(
+      ledger.append({
+        type: 'SALE',
+        locationId: seed.denverId,
+        variationId: 'var_does_not_exist',
+        quantity: -1,
+        occurredAt: new Date(),
+        source: 'WEBHOOK',
+        idempotencyKey: saleKey('order_orphan', 'line_1'),
+      }),
+    ).rejects.toThrow()
+    expect(await prisma.ledgerEvent.count()).toBe(0)
+  })
+
   it('rejects a SALE carrying a warehouseVariantId', async () => {
     await expect(
       ledger.append({

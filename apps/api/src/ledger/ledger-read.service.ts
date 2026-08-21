@@ -92,4 +92,28 @@ export class LedgerReadService {
       onHand: Number(r.onHand),
     }))
   }
+
+  /**
+   * Variant-level counterpart to recompute(). Hand-written SQL against the
+   * table, so it and onHandByVariant() are two independent implementations
+   * that must always agree. Same reasoning as recompute(): a derivation-logic
+   * bug in either is caught by their disagreement.
+   */
+  async recomputeByVariant(locationId?: string): Promise<StockLevel[]> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ warehouseVariantId: string; variationId: string; locationId: string; onHand: bigint }>
+    >`
+      SELECT "warehouseVariantId", "variationId", "locationId", SUM("quantity")::bigint AS "onHand"
+      FROM "LedgerEvent"
+      WHERE "warehouseVariantId" IS NOT NULL
+      ${locationId ? Prisma.sql`AND "locationId" = ${locationId}` : Prisma.empty}
+      GROUP BY "warehouseVariantId", "variationId", "locationId"
+    `
+    return rows.map((r) => ({
+      variationId: r.variationId,
+      warehouseVariantId: r.warehouseVariantId,
+      locationId: r.locationId,
+      onHand: Number(r.onHand),
+    }))
+  }
 }
