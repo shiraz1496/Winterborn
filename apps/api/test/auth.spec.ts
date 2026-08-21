@@ -1,6 +1,6 @@
 import 'reflect-metadata'
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { createHash } from 'node:crypto'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
+import { hash as hashArgon2 } from '@node-rs/argon2'
 import { Test } from '@nestjs/testing'
 import type { INestApplication, ExecutionContext } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -12,11 +12,12 @@ import { SESSION_COOKIE_NAME } from '../src/auth/cookies.js'
 import { seedDevCatalog, type DevSeed } from '../prisma/seed-dev.js'
 
 process.env.JWT_SECRET = 'test-jwt-secret'
-process.env.MAIL_TRANSPORT = 'console'
 
 const prisma = new PrismaService()
 const auth = new AuthService(prisma)
 let seed: DevSeed
+
+const PLAINTEXT_PASSWORD = 'correct horse battery staple'
 
 beforeAll(async () => {
   await prisma.$connect()
@@ -28,47 +29,73 @@ beforeEach(async () => {
   seed = await seedDevCatalog(prisma)
 })
 
-async function createUser(email: string, role: 'OWNER' | 'WAREHOUSE' | 'MARKET_MANAGER' | 'OPERATOR', locationId: string | null = null) {
-  return prisma.user.create({ data: { email, name: email, role, locationId } })
+async function createUser(
+  email: string,
+  role: 'OWNER' | 'WAREHOUSE' | 'MARKET_MANAGER' | 'OPERATOR',
+  locationId: string | null = null,
+  password: string | null = PLAINTEXT_PASSWORD,
+) {
+  const passwordHash = password === null ? null : await hashArgon2(password)
+  return prisma.user.create({ data: { email, name: email, role, locationId, passwordHash } })
 }
 
-describe('AuthService.requestMagicLink / verifyMagicLink', () => {
-  it('stores only the SHA-256 hash of the token, never the raw value', async () => {
+describe('AuthService.login', () => {
+  it('returns a session for correct credentials', async () => {
     await createUser('owner@test.local', 'OWNER')
-    const result = await auth.requestMagicLink('owner@test.local')
-    expect(result.devLink).toBeDefined()
-    const token = new URL(result.devLink as string).searchParams.get('token') as string
-
-    const rows = await prisma.magicLinkToken.findMany({ where: { email: 'owner@test.local' } })
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.tokenHash).not.toBe(token)
-    expect(rows[0]?.tokenHash).toBe(createHash('sha256').update(token).digest('hex'))
+    const result = await auth.login('owner@test.local', PLAINTEXT_PASSWORD)
+    expect(result.user.email).toBe('owner@test.local')
+    expect(result.jwt).toEqual(expect.any(String))
   })
 
-  it('is single-use: a second verify of the same token is rejected', async () => {
+  it('rejects a wrong password without revealing whether the email exists', async () => {
     await createUser('warehouse@test.local', 'WAREHOUSE')
-    const { devLink } = await auth.requestMagicLink('warehouse@test.local')
-    const token = new URL(devLink as string).searchParams.get('token') as string
 
-    const first = await auth.verifyMagicLink(token)
-    expect(first.user.email).toBe('warehouse@test.local')
+    const wrongPassword = auth.login('warehouse@test.local', 'not-the-password').catch((e) => e)
+    const unknownEmail = auth.login('nobody-here@test.local', 'anything').catch((e) => e)
+    const [wrongPasswordErr, unknownEmailErr] = await Promise.all([wrongPassword, unknownEmail])
 
-    await expect(auth.verifyMagicLink(token)).rejects.toThrow()
+    expect(wrongPasswordErr).toBeInstanceOf(Error)
+    expect(unknownEmailErr).toBeInstanceOf(Error)
+    // Same message either way -- nothing in the response distinguishes
+    // "wrong password" from "no such user".
+    expect((wrongPasswordErr as Error).message).toBe((unknownEmailErr as Error).message)
+    expect((wrongPasswordErr as Error).message.toLowerCase()).not.toContain('no such user')
+    expect((wrongPasswordErr as Error).message.toLowerCase()).not.toContain('not found')
   })
 
-  it('rejects an expired token', async () => {
-    await createUser('operator@test.local', 'OPERATOR')
-    const { devLink } = await auth.requestMagicLink('operator@test.local')
-    const token = new URL(devLink as string).searchParams.get('token') as string
-
-    const hash = createHash('sha256').update(token).digest('hex')
-    await prisma.magicLinkToken.update({ where: { tokenHash: hash }, data: { expiresAt: new Date(Date.now() - 1000) } })
-
-    await expect(auth.verifyMagicLink(token)).rejects.toThrow()
+  it('rejects a user with no passwordHash set', async () => {
+    await createUser('operator@test.local', 'OPERATOR', null, null)
+    await expect(auth.login('operator@test.local', 'anything')).rejects.toThrow()
   })
 
-  it('rejects a token that was never issued', async () => {
-    await expect(auth.verifyMagicLink('not-a-real-token')).rejects.toThrow()
+  it('never persists or logs the plaintext password', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await createUser('plaintext-check@test.local', 'OWNER')
+      await auth.login('plaintext-check@test.local', PLAINTEXT_PASSWORD)
+      // A failed attempt too -- a rejected login is exactly the path most
+      // likely to end up in an exception log with the request body attached.
+      await auth.login('plaintext-check@test.local', 'wrong-guess').catch(() => {})
+
+      const row = await prisma.user.findUniqueOrThrow({ where: { email: 'plaintext-check@test.local' } })
+      expect(row.passwordHash).not.toBeNull()
+      expect(row.passwordHash).not.toBe(PLAINTEXT_PASSWORD)
+      expect(row.passwordHash?.startsWith('$argon2')).toBe(true)
+
+      const allLoggedText = [...logSpy.mock.calls, ...errorSpy.mock.calls, ...warnSpy.mock.calls]
+        .flat()
+        .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+        .join('\n')
+      expect(allLoggedText).not.toContain(PLAINTEXT_PASSWORD)
+      expect(allLoggedText).not.toContain('wrong-guess')
+    } finally {
+      logSpy.mockRestore()
+      errorSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
   })
 })
 
@@ -109,7 +136,7 @@ describe('RolesGuard', () => {
   })
 })
 
-describe('GET /auth/me', () => {
+describe('POST /auth/login + GET /auth/me', () => {
   let app: INestApplication
   let baseUrl: string
 
@@ -129,18 +156,16 @@ describe('GET /auth/me', () => {
     expect(res.status).toBe(401)
   })
 
-  it('returns the user for a valid session cookie set by /auth/verify', async () => {
+  it('sets a session cookie for correct credentials, and /auth/me then resolves', async () => {
     await createUser('me@test.local', 'OWNER')
-    const { devLink } = await auth.requestMagicLink('me@test.local')
-    const token = new URL(devLink as string).searchParams.get('token') as string
 
-    const verifyRes = await fetch(`${baseUrl}/auth/verify`, {
+    const loginRes = await fetch(`${baseUrl}/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ email: 'me@test.local', password: PLAINTEXT_PASSWORD }),
     })
-    expect(verifyRes.status).toBe(200)
-    const setCookie = verifyRes.headers.get('set-cookie') as string
+    expect(loginRes.status).toBe(200)
+    const setCookie = loginRes.headers.get('set-cookie') as string
     expect(setCookie).toContain(SESSION_COOKIE_NAME)
     expect(setCookie.toLowerCase()).toContain('httponly')
     const cookieValue = setCookie.split(';')[0] as string
@@ -149,5 +174,39 @@ describe('GET /auth/me', () => {
     expect(meRes.status).toBe(200)
     const body = (await meRes.json()) as { user: { email: string } }
     expect(body.user.email).toBe('me@test.local')
+  })
+
+  it('rejects a wrong password with 401 and no session cookie', async () => {
+    await createUser('reject@test.local', 'WAREHOUSE')
+
+    const res = await fetch(`${baseUrl}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'reject@test.local', password: 'wrong' }),
+    })
+    expect(res.status).toBe(401)
+    expect(res.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('logout clears the cookie and the session stops working', async () => {
+    await createUser('logout@test.local', 'OWNER')
+
+    const loginRes = await fetch(`${baseUrl}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'logout@test.local', password: PLAINTEXT_PASSWORD }),
+    })
+    const cookieValue = (loginRes.headers.get('set-cookie') as string).split(';')[0] as string
+
+    const logoutRes = await fetch(`${baseUrl}/auth/logout`, {
+      method: 'POST',
+      headers: { cookie: cookieValue },
+    })
+    expect(logoutRes.status).toBe(200)
+    const clearedCookie = logoutRes.headers.get('set-cookie') as string
+    expect(clearedCookie).toContain(SESSION_COOKIE_NAME)
+
+    const meRes = await fetch(`${baseUrl}/auth/me`, { headers: { cookie: cookieValue } })
+    expect(meRes.status).toBe(401)
   })
 })

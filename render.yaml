@@ -48,8 +48,6 @@ services:
         sync: false # the Vercel production URL for apps/web -- see docs/DEPLOY.md
       - key: JWT_SECRET
         generateValue: true # Render generates and stores this; nobody needs to know the value
-      - key: MAGIC_LINK_TTL_MINUTES
-        value: 15
       - key: SQUARE_ENV
         value: production
       - key: SQUARE_APPLICATION_ID
@@ -60,12 +58,6 @@ services:
         sync: false # set AFTER first deploy, once this service's public URL exists -- see docs/DEPLOY.md
       - key: SQUARE_WEBHOOK_NOTIFICATION_URL
         sync: false # https://<this-service>.onrender.com/square/webhook -- must byte-for-byte match what's registered with Square (webhook.controller.ts signs against it)
-      - key: MAIL_TRANSPORT
-        value: console # flip to a real transport once a sending domain is verified -- see docs/DEPLOY.md
-      - key: RESEND_API_KEY
-        sync: false
-      - key: MAIL_FROM
-        sync: false
 
   - type: worker
     name: winterborn-inbox-worker

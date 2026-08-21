@@ -443,6 +443,10 @@ model User {
   /// Only meaningful for MARKET_MANAGER: scopes them to one location. Null
   /// for the other three roles, which see everything.
   locationId String?
+  /// Argon2id hash (@node-rs/argon2). Nullable so the migration adding this
+  /// column applies cleanly to existing rows; cli:seed-users backfills it.
+  /// A null passwordHash cannot log in -- see AuthService.login.
+  passwordHash String?
 
   location Location? @relation(fields: [locationId], references: [id])
   sessions Session[]
@@ -456,13 +460,4 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-}
-
-model MagicLinkToken {
-  tokenHash  String    @id
-  email      String
-  expiresAt  DateTime
-  consumedAt DateTime?
-
-  @@index([email])
 }

@@ -18,11 +18,11 @@ import {
   loadSchema,
   loadWithBoxesSchema,
   locationSchema,
+  loginResponseSchema,
   lowStockRowSchema,
   meResponseSchema,
   packBoxInputSchema,
   requestLineSchema,
-  requestMagicLinkResultSchema,
   restockRequestBaseSchema,
   restockRequestSchema,
   salesRowSchema,
@@ -32,7 +32,6 @@ import {
   unassignedColourVariantSchema,
   updateRequestLineInputSchema,
   variationSummarySchema,
-  verifyResponseSchema,
   warehouseVariantSummarySchema,
   type AssignColourFamilyInput,
   type CreateLoadInput,
@@ -109,12 +108,12 @@ function qs(params: Record<string, string | undefined>): string {
 
 // ---- auth ----------------------------------------------------------------
 
-export function requestMagicLink(email: string) {
-  return request('POST', '/auth/magic-link', requestMagicLinkResultSchema, { email })
+export async function login(email: string, password: string) {
+  return (await request('POST', '/auth/login', loginResponseSchema, { email, password })).user
 }
 
-export async function verifyMagicLink(token: string) {
-  return (await request('POST', '/auth/verify', verifyResponseSchema, { token })).user
+export async function logout() {
+  await request('POST', '/auth/logout', z.object({ ok: z.literal(true) }))
 }
 
 export async function getMe() {

@@ -17,7 +17,7 @@ export async function seedDevCatalog(prisma: PrismaClient): Promise<DevSeed> {
     TRUNCATE TABLE
       "LedgerEvent","BoxLine","LoadBox","Box","Load",
       "RestockRequestLine","RestockRequest","Threshold","AuditLog",
-      "SquareInboxEvent","SquareSyncCursor","Session","MagicLinkToken","User",
+      "SquareInboxEvent","SquareSyncCursor","Session","User",
       "WarehouseVariant","Variation","ColourVariant","ColourFamily",
       "SizeOption","ItemGroup","Category","Location"
     RESTART IDENTITY CASCADE

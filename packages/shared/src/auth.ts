@@ -15,13 +15,11 @@ export type CurrentUserDto = z.infer<typeof currentUserSchema>
 export const meResponseSchema = z.object({ user: currentUserSchema })
 export type MeResponse = z.infer<typeof meResponseSchema>
 
-export const verifyResponseSchema = z.object({ user: currentUserSchema })
-export type VerifyResponse = z.infer<typeof verifyResponseSchema>
+export const loginResponseSchema = z.object({ user: currentUserSchema })
+export type LoginResponse = z.infer<typeof loginResponseSchema>
 
-export const requestMagicLinkResultSchema = z.object({
-  ok: z.literal(true),
-  /// Only present when MAIL_TRANSPORT=console -- dev/sandbox only. See
-  /// AuthService.requestMagicLink.
-  devLink: z.string().optional(),
+export const loginInputSchema = z.object({
+  email: z.string(),
+  password: z.string(),
 })
-export type RequestMagicLinkResult = z.infer<typeof requestMagicLinkResultSchema>
+export type LoginInput = z.infer<typeof loginInputSchema>

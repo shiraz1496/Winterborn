@@ -4,7 +4,7 @@ import { AuthController } from './auth.controller.js'
 import { JwtGuard } from './jwt.guard.js'
 import { RolesGuard } from './roles.guard.js'
 
-/// Owns magic-link auth, JWT sessions and the two guards every other
+/// Owns password auth, JWT sessions and the two guards every other
 /// authenticated module (requests, fulfilment) depends on.
 @Module({
   controllers: [AuthController],

@@ -12,6 +12,13 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../')
 const PHOTOS_DIR = resolve(REPO_ROOT, 'data/photos')
 
 async function bootstrap(): Promise<void> {
+  // Fail at boot rather than on the first login attempt -- a missing
+  // secret would otherwise surface as a confusing 500 on someone's first
+  // POST /auth/login, long after this service claimed to be up.
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is not set. Add it to .env before starting the API.')
+  }
+
   // rawBody: true exposes req.rawBody (the exact bytes Square sent)
   // alongside Nest's normal JSON-parsed req.body. The webhook signature is
   // HMAC-SHA256 over notificationUrl + rawBody -- a re-serialised JSON

@@ -70,17 +70,22 @@ value comes from, and who can produce it.
 | `DATABASE_URL` | Postgres connection string | Render/Neon dashboard | No |
 | `NODE_ENV` | `production` flips the session cookie's `Secure` flag on (`auth.controller.ts`) | Set literally in `render.yaml` | No |
 | `API_PORT` | Port the Nest app listens on | Set literally (3001) | No |
-| `WEB_ORIGIN` | CORS allow-origin + the domain magic links point at (`main.ts`, `auth.service.ts`) | The deployed `apps/web` URL, known only once that Vercel project exists | No, but sequenced -- see §5 |
+| `WEB_ORIGIN` | CORS allow-origin (`main.ts`) | The deployed `apps/web` URL, known only once that Vercel project exists | No, but sequenced -- see §5 |
 | `JWT_SECRET` | Signs session JWTs | `generateValue: true` in `render.yaml` -- Render generates and stores it, nobody needs to know the value | No |
-| `MAGIC_LINK_TTL_MINUTES` | Magic-link expiry | Set literally (15) | No |
 | `SQUARE_ENV` | `sandbox` or `production` | Literal, flipped once at cutover | No |
 | `SQUARE_APPLICATION_ID` | Square app identity | Square Developer Console | **YES -- see §4** |
 | `SQUARE_ACCESS_TOKEN` | Square API auth | Square Developer Console | **YES -- see §4** |
 | `SQUARE_WEBHOOK_SIGNATURE_KEY` | Verifies every inbound webhook (`webhook.controller.ts`, constant-time HMAC compare) | Square Developer Console, created against this service's real URL | **YES -- see §4** |
 | `SQUARE_WEBHOOK_NOTIFICATION_URL` | Must byte-for-byte match the URL registered with Square -- the signature is HMAC'd over `notificationUrl + body` | `https://<render-service>.onrender.com/square/webhook` | No, but easy to get wrong -- trailing slash or `http` vs `https` silently fails every webhook until the 20-minute poll self-heals it |
-| `MAIL_TRANSPORT` | Which mail transport `auth.service.ts` uses | Literal, `console` today | No -- but see the blocking gap in §5 |
-| `RESEND_API_KEY`, `MAIL_FROM` | Reserved for a real mail transport | Not yet consumed by any code -- see §5 | N/A until implemented |
 | `INBOX_DRAIN_INTERVAL_MS` | Poll interval for `cli:drain-inbox` | Literal, defaults to 10000 if unset | No |
+
+Auth is password-based (`auth.service.ts`, Argon2id via `@node-rs/argon2`)
+-- no mail transport, no sending domain, no `MAIL_TRANSPORT`/`RESEND_API_KEY`
+env vars. Login has no external dependency; the API refuses to boot at all
+without `JWT_SECRET` (`main.ts`). Staff accounts (four to six people on a
+seasonal team) are created and password-reset the same way: re-run
+`cli:seed-users` with `SEED_*_PASSWORD` set on the target environment.
+There is deliberately no self-service password reset flow.
 
 ### apps/web (Vercel)
 
@@ -110,9 +115,10 @@ deployment -- they require Joel's own Square Developer Console access:
    console, against the real `SQUARE_WEBHOOK_NOTIFICATION_URL` above --
    this has to happen *after* `winterborn-api` has a real public URL, so
    it's a second owner-gated step, not bundled with the token.
-3. **A sending domain for real magic-link email**, if/when `MAIL_TRANSPORT`
-   moves off `console` -- DNS records (SPF/DKIM) on a domain Joel
-   controls. See §5's mail gap before this becomes urgent.
+
+Auth needs nothing from Joel: login is a password checked against
+`User.passwordHash`, with no sending domain, no DNS record, and no third
+party in the path.
 
 Everything else in the table above (`JWT_SECRET`, `DATABASE_URL`,
 `WEB_ORIGIN`, ports, timeouts) can be produced by whoever runs the
@@ -120,30 +126,23 @@ deploy, no owner involvement needed.
 
 ---
 
-## 5. Production cutover order, and two things that must not be skipped
+## 5. Production cutover order, and one thing that must not be skipped
 
 1. Deploy `apps/api` to Render (this blueprint) against **sandbox**
-   Square credentials, `MAIL_TRANSPORT=console`. Confirm `GET /health`
-   reports `database.connected: true` and an empty inbox backlog.
+   Square credentials. Confirm `GET /health` reports
+   `database.connected: true` and an empty inbox backlog.
 2. Deploy `apps/web` to Vercel, `NEXT_PUBLIC_API_URL` pointing at the
    Render URL from step 1. Confirm the dashboard renders (see the
    verification note in this repo's plan-06 report for what "renders"
    was checked against).
 3. Set `WEB_ORIGIN` on `winterborn-api` to the real Vercel URL from step
-   2 and redeploy -- CORS and magic links are wrong until this points at
-   the actual deployed web app, not `localhost:3000`.
-4. **BLOCKING GAP -- implement a real mail transport before this system
-   ever has real staff logins.** `auth.service.ts`'s `MAIL_TRANSPORT`
-   only implements `'console'` today (anything else throws), and in
-   `'console'` mode the magic link is not just logged -- it is *returned
-   in the API response* to whoever called `POST /auth/magic-link`, and
-   `apps/web`'s `/login` page displays it inline. That's correct and
-   necessary for dev with no sending domain verified, but shipped as-is
-   in production it means **anyone who knows a staff member's email can
-   read their login link directly from the API response and sign in as
-   them, with no email involved at all.** This is application code work
-   (a Resend or equivalent transport in `auth.service.ts`), out of scope
-   for this configuration pass -- flagging it here so it isn't missed.
+   2 and redeploy -- CORS is wrong until this points at the actual
+   deployed web app, not `localhost:3000`.
+4. Run `cli:seed-users` against the production `DATABASE_URL` with real
+   `SEED_*_PASSWORD` values (not the dev defaults) so staff have accounts
+   to log in with. Hand the printed email/password pairs to staff over a
+   channel you trust; the CLI prints them once, to your terminal, and
+   they are not retrievable afterward except by re-running the seeder.
 5. **BLOCKING GAP -- the session cookie will not survive Vercel + Render
    being on different domains, as currently coded.** `auth.controller.ts`
    sets the session cookie `SameSite: 'lax'`. A `Lax` cookie is not sent
