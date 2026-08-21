@@ -20,7 +20,9 @@
     "cli:join-square": "tsx src/cli/join-square.ts",
     "cli:catalog-plan": "tsx src/cli/catalog-plan.ts",
     "cli:catalog-apply": "tsx src/cli/catalog-apply.ts",
-    "cli:catalog-verify": "tsx src/cli/catalog-verify.ts"
+    "cli:catalog-verify": "tsx src/cli/catalog-verify.ts",
+    "cli:poll-orders": "tsx src/cli/poll-orders.ts",
+    "cli:replay-season": "tsx src/cli/replay-season.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
