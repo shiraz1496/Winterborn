@@ -1,0 +1,44 @@
+# Keep the build context small and, more importantly, keep secrets and
+# client business data from ever being sent to the Docker daemon -- a
+# missing .dockerignore means a bare `COPY . .` (or the context upload
+# itself) can pick up files no Dockerfile instruction ever names.
+
+# secrets -- never send these to a build context, image, or registry
+.env
+.env.*
+!.env.example
+
+# client business data: real sales history, catalog export, warehouse
+# export. apps/api/Dockerfile copies ONLY data/photos explicitly; nothing
+# else under data/ belongs in an image.
+data/*
+!data/photos
+claude-code-asks/
+*.pdf
+claude-web-chat-export.md
+upwork-chat.md
+
+# deps / build output -- reinstalled and rebuilt inside the image, never
+# copied in from the host (a host node_modules can carry the wrong OS/arch
+# native bindings, e.g. from a Mac dev machine into a Linux image)
+node_modules/
+**/node_modules/
+.next/
+dist/
+build/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# not part of any deployed image
+prototypes/
+docs/
+.superpowers/
+.git/
+.github/
+
+# os / editor
+.DS_Store
+*.log
+.vscode/
+.idea/

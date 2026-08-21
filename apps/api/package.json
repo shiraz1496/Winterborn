@@ -22,6 +22,7 @@
     "cli:catalog-apply": "tsx src/cli/catalog-apply.ts",
     "cli:catalog-verify": "tsx src/cli/catalog-verify.ts",
     "cli:poll-orders": "tsx src/cli/poll-orders.ts",
+    "cli:drain-inbox": "tsx src/cli/drain-inbox.ts",
     "cli:replay-season": "tsx src/cli/replay-season.ts",
     "cli:seed-users": "tsx src/cli/seed-users.ts",
     "cli:seed-thresholds": "tsx src/cli/seed-thresholds.ts"
