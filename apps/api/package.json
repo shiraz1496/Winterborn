@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm db:generate && tsc -p tsconfig.build.json",
-    "dev": "tsx watch src/main.ts",
+    "dev": "node --import @swc-node/register/esm-register --watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run --passWithNoTests",
     "typecheck": "pnpm db:generate && tsc -p tsconfig.json --noEmit",
@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",
+    "@swc-node/register": "^1.12.1",
     "@swc/core": "^1.16.1",
     "@types/node": "^22.0.0",
     "@winterborn/config": "workspace:*",
