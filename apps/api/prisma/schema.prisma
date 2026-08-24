@@ -277,9 +277,10 @@ enum ThresholdSource {
 
 enum UserRole {
   OWNER
-  WAREHOUSE
+  WAREHOUSE_MANAGER
+  WAREHOUSE_OPERATOR
   MARKET_MANAGER
-  OPERATOR
+  SALES
 }
 
 model RestockRequest {

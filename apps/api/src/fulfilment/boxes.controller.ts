@@ -8,7 +8,7 @@ import { BoxesService, type PackBoxInput, type PackBoxLineInput } from './boxes.
 
 @Controller('boxes')
 @UseGuards(JwtGuard, RolesGuard)
-@Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+@Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
 export class BoxesController {
   constructor(private readonly boxes: BoxesService) {}
 

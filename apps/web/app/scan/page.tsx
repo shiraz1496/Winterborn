@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { BoxDto, LocationDto, LoadWithBoxesDto } from '@winterborn/shared'
+import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
 import {
   ApiError,
@@ -184,6 +185,12 @@ function ScanBody() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Optional confirmation"
+        title="Scan"
+        description="Scan a box's QR code to attach it to a van (Load a van), or to look up its manifest at a glance (Quick check). Scanning is a convenience — the dispatch ledger already updates when you click Dispatch on the pack screen."
+      />
+
       <div className="row" style={{ marginBottom: 18 }}>
         <button
           className="chip"
@@ -374,7 +381,7 @@ function ScanBody() {
 
 export default function ScanPage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE', 'OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']}>
       <ScanBody />
     </RequireAuth>
   )

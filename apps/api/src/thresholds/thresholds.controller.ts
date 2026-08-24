@@ -34,7 +34,7 @@ export class ThresholdsController {
   }
 
   @Post('evaluate-all')
-  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
   evaluateAll() {
     return this.thresholds.evaluateAll()
   }

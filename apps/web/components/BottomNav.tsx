@@ -40,6 +40,13 @@ const ICONS = {
       <rect x="13" y="13" width="7" height="7" rx="1.5" strokeDasharray="3 2" />
     </svg>
   ),
+  intake: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 3v12" />
+      <path d="M7 10l5 5 5-5" />
+      <path d="M4 19h16" />
+    </svg>
+  ),
 }
 
 interface Tab {
@@ -48,12 +55,16 @@ interface Tab {
   icon: keyof typeof ICONS
 }
 
+const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
+const APP_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
+
 const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
-  { href: '/', label: 'Home', icon: 'dashboard' },
-  { href: '/requests', label: 'Requests', icon: 'requests' },
-  { href: '/pack', label: 'Pack', icon: 'pack', roles: ['OWNER', 'WAREHOUSE', 'OPERATOR'] },
-  { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'WAREHOUSE', 'OPERATOR'] },
-  { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE', 'OPERATOR'] },
+  { href: '/', label: 'Home', icon: 'dashboard', roles: APP_ROLES },
+  { href: '/requests', label: 'Requests', icon: 'requests', roles: APP_ROLES },
+  { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
+  { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
+  { href: '/scan', label: 'Scan', icon: 'scan', roles: WAREHOUSE_ROLES },
+  { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
 ]
 
 export function BottomNav({ role }: { role: CurrentUserDto['role'] }) {

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import { Archivo, Public_Sans, IBM_Plex_Mono } from 'next/font/google'
 import { AuthProvider } from '../lib/auth-context'
+import { ToastProvider } from '../lib/toast'
 import { Shell } from '../components/Shell'
 import './globals.css'
 
@@ -56,7 +57,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${archivo.variable} ${publicSans.variable} ${plexMono.variable}`}>
       <body>
         <AuthProvider>
-          <Shell>{children}</Shell>
+          <ToastProvider>
+            <Shell>{children}</Shell>
+          </ToastProvider>
         </AuthProvider>
       </body>
     </html>

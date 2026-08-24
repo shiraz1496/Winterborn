@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: winterborn
       POSTGRES_PASSWORD: winterborn
       POSTGRES_DB: winterborn
-    ports: ['5432:5432']
+    ports: ['55432:5432']
     volumes: ['winterborn_pg:/var/lib/postgresql/data']
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U winterborn']

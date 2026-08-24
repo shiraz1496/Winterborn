@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import type { LocationDto, RestockRequestDto } from '@winterborn/shared'
+import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
 import { ApiError, listLocations, listRequests } from '../../lib/api'
 
@@ -55,11 +56,18 @@ function RequestsBody() {
 
   return (
     <div>
-      {error && <p className="error-banner">{error}</p>}
+      <PageHeader
+        eyebrow={`${requests.length} total`}
+        title="Requests"
+        description="Every restock request across every market. Tap one to review its lines, adjust quantities, and move it through packing to dispatch. Filter with the chips below."
+        actions={
+          <Link href="/requests/new" className="btn">
+            + New
+          </Link>
+        }
+      />
 
-      <Link href="/requests/new" className="btn btn-primary" style={{ marginBottom: 20 }}>
-        + New request
-      </Link>
+      {error && <p className="error-banner">{error}</p>}
 
       <div className="row" style={{ overflowX: 'auto', paddingBottom: 4, marginBottom: 16 }}>
         {STATE_FILTERS.map((s) => (
@@ -87,15 +95,29 @@ function RequestsBody() {
       ) : filtered.length === 0 ? (
         <div className="empty-state">
           <p className="empty-state-title">Nothing here</p>
-          <p className="empty-state-body">No requests match this filter yet.</p>
+          <p className="empty-state-body">
+            {filter === 'ALL'
+              ? 'No requests yet. Create one when a market needs stock.'
+              : `No requests in the ${filter.toLowerCase()} state right now.`}
+          </p>
+          {filter === 'ALL' && (
+            <Link href="/requests/new" className="empty-state-cta">
+              + New request
+            </Link>
+          )}
         </div>
       ) : (
-        <div className="list">
+        <div className="stock-grid">
           {filtered.map((r) => (
-            <Link key={r.id} href={`/requests/${r.id}`} className="list-row">
-              <div className="list-row-body">
-                <div className="list-row-title">{locationName(r.locationId)}</div>
-                <div className="list-row-meta">
+            <Link
+              key={r.id}
+              href={`/requests/${r.id}`}
+              className="stock-tile"
+              style={{ textDecoration: 'none', color: 'inherit' }}
+            >
+              <div className="stock-tile-body">
+                <div className="stock-tile-title">{locationName(r.locationId)}</div>
+                <div className="stock-tile-meta">
                   {r.lines.length} line{r.lines.length === 1 ? '' : 's'} ·{' '}
                   {new Date(r.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                 </div>

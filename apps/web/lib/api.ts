@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import {
+  adminUserSchema,
+  adminUserWithPasswordSchema,
   assignColourFamilyInputSchema,
   boxLabelSchema,
   boxLineSchema,
@@ -14,6 +16,8 @@ import {
   dispatchResultSchema,
   evaluateAllResultSchema,
   healthResponseSchema,
+  intakeInputSchema,
+  intakeResultSchema,
   loadDispatchResultSchema,
   loadSchema,
   loadWithBoxesSchema,
@@ -22,6 +26,7 @@ import {
   lowStockRowSchema,
   meResponseSchema,
   packBoxInputSchema,
+  requestLineAnalysisSchema,
   requestLineSchema,
   restockRequestBaseSchema,
   restockRequestSchema,
@@ -34,10 +39,13 @@ import {
   variationSummarySchema,
   warehouseVariantSummarySchema,
   type AssignColourFamilyInput,
+  type CreateAdminUserInput,
   type CreateLoadInput,
   type CreateRequestInput,
   type CreateRequestLineInput,
+  type IntakeInput,
   type PackBoxInput,
+  type UpdateAdminUserInput,
   type UpdateRequestLineInput,
 } from '@winterborn/shared'
 
@@ -219,6 +227,10 @@ export function transitionRequest(requestId: string, state: string) {
   return request('POST', `/requests/${requestId}/transition`, restockRequestBaseSchema, input)
 }
 
+export function getRequestAnalysis(requestId: string) {
+  return request('GET', `/requests/${requestId}/analysis`, z.array(requestLineAnalysisSchema))
+}
+
 // ---- boxes ------------------------------------------------------------------
 
 export function packBox(input: PackBoxInput) {
@@ -273,4 +285,25 @@ export function scanBoxOntoLoad(loadId: string, boxId: string) {
 
 export function dispatchLoad(id: string) {
   return request('POST', `/loads/${id}/dispatch`, loadDispatchResultSchema)
+}
+
+// ---- intake -------------------------------------------------------------------
+
+export function receiveIntake(input: IntakeInput) {
+  intakeInputSchema.parse(input)
+  return request('POST', '/intake', intakeResultSchema, input)
+}
+
+// ---- admin (owner-only) ------------------------------------------------------
+
+export function listAdminUsers() {
+  return request('GET', '/admin/users', z.array(adminUserSchema))
+}
+
+export function createAdminUser(input: CreateAdminUserInput) {
+  return request('POST', '/admin/users', adminUserWithPasswordSchema, input)
+}
+
+export function updateAdminUser(id: string, input: UpdateAdminUserInput) {
+  return request('PATCH', `/admin/users/${id}`, adminUserWithPasswordSchema, input)
 }

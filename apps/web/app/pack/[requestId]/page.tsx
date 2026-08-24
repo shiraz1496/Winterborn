@@ -1,17 +1,22 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import type { BoxDto, BoxLabelDto, RestockRequestDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
+import type { BoxDto, BoxLabelDto, LocationDto, RestockRequestDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
+import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Swatch } from '../../../components/Swatch'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { useToast } from '../../../lib/toast'
 import {
   ApiError,
   dispatchBox,
   getBoxLabel,
   getRequest,
   listBoxes,
+  listLocations,
+  listRequests,
   listVariations,
   listWarehouseVariants,
   packBox,
@@ -27,7 +32,10 @@ interface DraftEntry {
 
 function PackBody() {
   const params = useParams<{ requestId: string }>()
+  const toast = useToast()
   const [request, setRequest] = useState<RestockRequestDto | null>(null)
+  const [siblings, setSiblings] = useState<RestockRequestDto[]>([])
+  const [locationName, setLocationName] = useState<string | null>(null)
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [variantsByLine, setVariantsByLine] = useState<Record<string, WarehouseVariantSummary[]>>({})
   const [boxes, setBoxes] = useState<BoxDto[]>([])
@@ -60,6 +68,23 @@ function PackBody() {
       setVariations(await listVariations())
 
       setBoxes(await listBoxes({ requestId: req.id }))
+
+      // Doc 3 §3.5: same destination, other open packable requests. Shown
+      // as a hint so the packer can combine into one dispatch run instead
+      // of packing this then walking back to pack another for the same
+      // market. Fetched in parallel with everything else and never blocks
+      // the pack flow.
+      const [allRequests, allLocations] = await Promise.all([listRequests(), listLocations()])
+      const others = allRequests
+        .filter(
+          (r) =>
+            r.id !== req.id &&
+            r.locationId === req.locationId &&
+            (r.state === 'OPEN' || r.state === 'PACKING'),
+        )
+      setSiblings(others)
+      const loc = allLocations.find((l: LocationDto) => l.id === req.locationId)
+      setLocationName(loc?.name ?? null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load this request for packing.')
     } finally {
@@ -122,8 +147,11 @@ function PackBody() {
       })
       setDraft(new Map())
       setBoxes(await listBoxes({ requestId: request.id }))
+      toast.success('Box packed')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not pack that box.')
+      const msg = err instanceof ApiError ? err.message : 'Could not pack that box.'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setBusy(false)
     }
@@ -153,8 +181,11 @@ function PackBody() {
     try {
       await dispatchBox(boxId)
       setBoxes(await listBoxes({ requestId: request.id }))
+      toast.success('Box dispatched — ledger updated')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not dispatch that box.')
+      const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
+      setError(msg)
+      toast.error(msg)
     } finally {
       setBusy(false)
     }
@@ -173,7 +204,34 @@ function PackBody() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow={locationName ? `Packing for ${locationName}` : 'Packing'}
+        title="Pack this request"
+        description="For each family below, expand and add units of the actual warehouse SKU. Fill a box, click Pack this box, then Dispatch when the truck's ready. Dispatch writes the stock movement to the ledger — no scanner required."
+      />
+
       {error && <p className="error-banner">{error}</p>}
+
+      {siblings.length > 0 && (
+        <div className="card" style={{ marginBottom: 20, borderColor: 'var(--pine)' }}>
+          <div className="row-between" style={{ marginBottom: 8 }}>
+            <strong>Also headed to {locationName ?? 'this destination'}</strong>
+            <span className="chip chip-pine">
+              {siblings.length} other{siblings.length === 1 ? '' : 's'} open
+            </span>
+          </div>
+          <p style={{ margin: '0 0 10px', color: 'var(--text-dim)' }}>
+            Combine into one dispatch run rather than sending two boxes to the same market.
+          </p>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {siblings.map((s) => (
+              <Link key={s.id} href={`/pack/${s.id}`} className="chip" style={{ cursor: 'pointer' }}>
+                {s.state.toLowerCase()} · {s.lines.length} line{s.lines.length === 1 ? '' : 's'}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="section-heading">
         <h2>Resolve to variants</h2>
@@ -302,7 +360,7 @@ function PackBody() {
 
 export default function PackPage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE', 'OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']}>
       <PackBody />
     </RequireAuth>
   )

@@ -136,6 +136,28 @@ export function intakeKey(ref: string): string {
   return `intake:${ref}`
 }
 
+/// POST /intake input. Doc 3 §3.1: warehouse receives goods against a known
+/// warehouse variant. Client generates `idempotencyToken` once per intent
+/// (e.g. a UUID captured on the confirm click) so a retried submit lands one
+/// row, not two. `note` is free text kept for later audit; nothing derives
+/// off it.
+export const intakeInputSchema = z.object({
+  warehouseVariantId: z.string().min(1),
+  quantity: z.number().int().positive(),
+  idempotencyToken: z.string().min(1),
+  note: z.string().max(500).optional(),
+})
+export type IntakeInput = z.infer<typeof intakeInputSchema>
+
+export const intakeResultSchema = z.object({
+  eventId: z.string(),
+  created: z.boolean(),
+  onHand: z.number().int(),
+  warehouseVariantId: z.string(),
+  variationId: z.string(),
+})
+export type IntakeResult = z.infer<typeof intakeResultSchema>
+
 /// `originalIdempotencyKey` is the key of the event being corrected, so the
 /// correction's own key stays traceable back to what it corrects.
 export function correctionKey(originalIdempotencyKey: string): string {

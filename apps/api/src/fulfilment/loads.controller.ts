@@ -8,7 +8,7 @@ import { LoadsService, type CreateLoadInput } from './loads.service.js'
 
 @Controller('loads')
 @UseGuards(JwtGuard, RolesGuard)
-@Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+@Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
 export class LoadsController {
   constructor(private readonly loads: LoadsService) {}
 

@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type { LocationDto, VariationSummary } from '@winterborn/shared'
+import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Swatch } from '../../../components/Swatch'
 import { useAuth } from '../../../lib/auth-context'
 import { ApiError, createRequest, listLocations, listVariations } from '../../../lib/api'
+import { useToast } from '../../../lib/toast'
 
 interface DraftLine {
   variationId: string
@@ -18,6 +20,7 @@ interface DraftLine {
 function NewRequestBody() {
   const { user } = useAuth()
   const router = useRouter()
+  const toast = useToast()
   const isMarketManager = user?.role === 'MARKET_MANAGER'
 
   const [locations, setLocations] = useState<LocationDto[]>([])
@@ -84,15 +87,24 @@ function NewRequestBody() {
         createdFrom: 'MANUAL',
         lines: lines.map((l) => ({ variationId: l.variationId, qtyRequested: l.qty })),
       })
+      toast.success(`Request created with ${lines.length} line${lines.length === 1 ? '' : 's'}`)
       router.replace(`/requests/${created.id}`)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not create the request.')
+      const msg = err instanceof ApiError ? err.message : 'Could not create the request.'
+      setError(msg)
+      toast.error(msg)
       setBusy(false)
     }
   }
 
   return (
     <div>
+      <PageHeader
+        eyebrow={isMarketManager ? 'For your market' : 'Manual request'}
+        title="New request"
+        description="Pick the destination market, search for items you want shipped, tap to add each one, then set the quantity. Create the request when everything is on the list."
+      />
+
       {error && <p className="error-banner">{error}</p>}
 
       {!isMarketManager && (

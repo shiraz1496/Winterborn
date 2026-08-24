@@ -53,3 +53,28 @@ export const decisionQueueRowSchema = z.object({
   lines: z.array(decisionQueueLineSchema),
 })
 export type DecisionQueueRow = z.infer<typeof decisionQueueRowSchema>
+
+/// Doc 3 §3.7: label existing threshold data as one of these zones rather
+/// than a bare number. Derived, never stored -- the underlying data is
+/// still `onHand` and `minLevel`.
+export const stockStatusSchema = z.enum(['HEALTHY', 'LOW', 'CRITICAL', 'OUT_OF_STOCK'])
+export type StockStatus = z.infer<typeof stockStatusSchema>
+
+/// One classifier used everywhere on the dashboard so a line never disagrees
+/// with itself between sections. `minLevel === null` (no threshold configured
+/// at this location) reports HEALTHY unless the shelf is genuinely empty --
+/// there is nothing to breach.
+export function classifyStock(onHand: number, minLevel: number | null): StockStatus {
+  if (onHand <= 0) return 'OUT_OF_STOCK'
+  if (minLevel == null || minLevel <= 0) return 'HEALTHY'
+  if (onHand <= Math.floor(minLevel / 2)) return 'CRITICAL'
+  if (onHand <= minLevel) return 'LOW'
+  return 'HEALTHY'
+}
+
+export const STOCK_STATUS_LABEL: Record<StockStatus, string> = {
+  HEALTHY: 'Healthy',
+  LOW: 'Low',
+  CRITICAL: 'Critical',
+  OUT_OF_STOCK: 'Out of stock',
+}

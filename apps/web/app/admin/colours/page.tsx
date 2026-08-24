@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import type { ColourFamilyDto, UnassignedColourVariant } from '@winterborn/shared'
+import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Swatch } from '../../../components/Swatch'
 import { NO_COLOUR_FAMILY_NAME } from '../../../lib/colours'
@@ -59,6 +60,12 @@ function ColourQueueBody() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Warehouse manager only"
+        title="Colour queue"
+        description="Warehouse colours that haven't been mapped to a till colour family yet. Look at the photo, then tap the family the till should show for this shade. &ldquo;No colour&rdquo; is a deliberate answer, not a skip."
+      />
+
       {error && <p className="error-banner">{error}</p>}
       <p className="eyebrow" style={{ marginBottom: 18 }}>
         {queue.length} to review
@@ -70,7 +77,7 @@ function ColourQueueBody() {
           <p className="empty-state-body">Every warehouse colour has a family, or a deliberate &ldquo;no colour&rdquo;.</p>
         </div>
       ) : (
-        <div className="stack">
+        <div className="stack colour-grid">
           {queue.map((variant) => {
             const families = (familiesByCategory[variant.categoryId] ?? []).filter(
               (f) => f.name !== NO_COLOUR_FAMILY_NAME,
@@ -180,7 +187,7 @@ function ColourQueueBody() {
 
 export default function ColourQueuePage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE', 'OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER']}>
       <ColourQueueBody />
     </RequireAuth>
   )

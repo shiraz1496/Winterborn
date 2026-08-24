@@ -40,19 +40,19 @@ export class CatalogController {
   }
 
   @Get('catalog/colour-variants/unassigned')
-  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
   unassignedColourVariants() {
     return this.catalog.listUnassignedColourVariants()
   }
 
   @Get('catalog/colour-families')
-  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
   colourFamilies(@Query('categoryId') categoryId: string) {
     return this.catalog.listColourFamilies(categoryId)
   }
 
   @Patch('catalog/colour-variants/:id')
-  @Roles('OWNER', 'WAREHOUSE', 'OPERATOR')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
   assignColourFamily(@Param('id') id: string, @Body() body: AssignColourFamilyInput) {
     return this.catalog.assignColourFamily(id, body.colourFamilyId)
   }

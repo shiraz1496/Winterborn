@@ -40,11 +40,18 @@ const USERS: SeedUserSpec[] = [
     defaultEmail: 'owner@example.com',
   },
   {
-    envEmail: 'SEED_WAREHOUSE_EMAIL',
-    envPassword: 'SEED_WAREHOUSE_PASSWORD',
-    role: 'WAREHOUSE',
-    name: 'Warehouse',
-    defaultEmail: 'warehouse@example.com',
+    envEmail: 'SEED_WAREHOUSE_MANAGER_EMAIL',
+    envPassword: 'SEED_WAREHOUSE_MANAGER_PASSWORD',
+    role: 'WAREHOUSE_MANAGER',
+    name: 'Warehouse Manager',
+    defaultEmail: 'warehouse-manager@example.com',
+  },
+  {
+    envEmail: 'SEED_WAREHOUSE_OPERATOR_EMAIL',
+    envPassword: 'SEED_WAREHOUSE_OPERATOR_PASSWORD',
+    role: 'WAREHOUSE_OPERATOR',
+    name: 'Warehouse Operator',
+    defaultEmail: 'warehouse-operator@example.com',
   },
   {
     envEmail: 'SEED_MARKET_MANAGER_EMAIL',
@@ -55,11 +62,11 @@ const USERS: SeedUserSpec[] = [
     scopedToMarket: true,
   },
   {
-    envEmail: 'SEED_OPERATOR_EMAIL',
-    envPassword: 'SEED_OPERATOR_PASSWORD',
-    role: 'OPERATOR',
-    name: 'Operator',
-    defaultEmail: 'operator@example.com',
+    envEmail: 'SEED_SALES_EMAIL',
+    envPassword: 'SEED_SALES_PASSWORD',
+    role: 'SALES',
+    name: 'Sales Operator',
+    defaultEmail: 'sales@example.com',
   },
 ]
 
