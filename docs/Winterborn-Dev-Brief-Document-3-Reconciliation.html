@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Winterborn Restock System — Development Brief, Document 3</title>
+<title>Winterborn Restock System - Development Brief, Document 3</title>
 <style>
   @page { size: A4; margin: 22mm 18mm; }
   * { box-sizing: border-box; }
@@ -50,152 +50,152 @@
 <body>
 
 <h1>Winterborn Restock System</h1>
-<p class="subtitle">Development Brief — Document 3: Reconciliation with the 22 Aug 2026 CEO Voice Note</p>
+<p class="subtitle">Development Brief, Document 3: Scope Reconciliation</p>
 <div class="meta">
   Internal document for the build team. Not client-facing.<br>
-  <b>Reconciles:</b> <code>Winterborn-Dev-Brief-Document-2.pdf</code> against <code>Latest-CEO-Transcript-Summary.md</code><br>
-  <b>Authority order set by the project owner, 24 Aug 2026:</b> where the two conflict, the voice note wins. Where Document 2 is silent or the two agree, Document 2 stands. Nothing here overrides the technical facts established by real client data (the Square and Sortly exports) or the proven safety design in the catalog migration decision record.
+  <b>Reconciles:</b> the original development brief (Document 2) against a later scope review.<br>
+  <b>Authority order:</b> where the two sources conflict, the later scope review takes precedence. Where Document 2 is silent or the two agree, Document 2 stands. Nothing here overrides the technical facts established by real client data or the proven safety design in the catalog migration decision record.
 </div>
 
 <div class="callout">
-This is a scope document, mirroring Document 2's own role. It answers <i>what</i> changes and <i>why</i>. For implementation detail see
+This is a scope document, mirroring Document 2's own role. It answers what changes and why. For implementation detail see
 <code>docs/superpowers/specs/2026-08-19-winterborn-restock-system-design.md</code> and the six build plans under <code>docs/superpowers/plans/</code>.
 </div>
 
 <h2>1. What has not changed</h2>
-<p>The voice note independently re-derives the same core architecture Document 2 already specified — in places, almost word for word. This is a strong signal the underlying design was right, not a reason to redesign it. The following stand exactly as written in Document 2:</p>
+<p>The later scope review independently re-derives the same core architecture Document 2 already specified, in places almost identically. This is a strong signal the underlying design was right, not a reason to redesign it. The following stand exactly as written in Document 2:</p>
 <ul>
-  <li><b>Inventory is a derivation, never a stored number.</b> Voice note §13: <i>"The platform must therefore maintain a reliable inventory movement ledger rather than simply maintaining one global stock number."</i> This is our exact architecture, described independently by the client.</li>
-  <li><b>Location-level inventory, not company-wide totals.</b> Voice note §43 states this as "the most important design principle." It already was ours.</li>
-  <li><b>Two-tier colour model</b> — till sees family only ("Blue"), warehouse holds full detail. Voice note §5.2, §9 match this design exactly, down to the same worked example (a range of blue shades collapsing to one till option).</li>
-  <li><b>PWA, not native apps.</b> Voice note §12 confirms this explicitly.</li>
-  <li><b>No inventory writes into Square in v1</b>; Square remains the sales record, read via webhook and reconciliation poll. Voice note §15 describes exactly this flow.</li>
-  <li><b>Catalog restructuring protocol</b> (§4 of Document 2) — prototype first, read-modify-write, preserve <code>item_id</code>, the Sept 12 freeze. Untouched. Already built and proven against Square sandbox; see the migration decision record.</li>
-  <li><b>No colour-level demand prediction this season.</b> 2025 data carries colour on 4.8% of revenue. This stays forbidden regardless of the voice note (see §4 below on why Smart Shipments does not conflict with this).</li>
-  <li><b>All six catalog write-safety guards</b> — backup-before-write, allowlist, no-delete, stop-on-failure, rollback, preflight. Untouched.</li>
+  <li><b>Inventory is a derivation, never a stored number.</b> The system must maintain an inventory movement ledger rather than a single global stock figure. This is the exact architecture already built.</li>
+  <li><b>Location-level inventory, not company-wide totals.</b> Stated as the single most important design principle in both sources.</li>
+  <li><b>Two-tier colour model.</b> The till sees a family only ("Blue"), the warehouse holds the full colour detail. Both sources describe this identically, down to the same worked example of several blue shades collapsing to one till option.</li>
+  <li><b>Installable web app, not native apps.</b> Confirmed in both.</li>
+  <li><b>No inventory writes into Square this season.</b> Square remains the sales record, read via webhook and reconciliation poll. Both sources describe the same sync flow.</li>
+  <li><b>Catalog restructuring protocol.</b> Prototype first, preserve the item's identity on write, the mid-September catalog freeze. Untouched. Already built and proven against a Square sandbox account.</li>
+  <li><b>No colour-level demand prediction this season.</b> Last season's data carries colour on under 5% of revenue. This stays out of scope regardless (see Section 4 on why the new restock-suggestion item does not conflict with this).</li>
+  <li><b>All six catalog write-safety guards</b>: automatic backup before any change, a strict allow-list of what can be touched, no deletion permitted at the code level, a hard stop on the first failure, a tested rollback, and a pre-flight check before anything runs. Untouched.</li>
 </ul>
 
 <h2 class="section-break">2. Reconciliation summary</h2>
 <table>
-<tr><th style="width:20%">Area</th><th style="width:32%">Document 2</th><th style="width:32%">Voice note</th><th style="width:16%">Decision</th></tr>
+<tr><th style="width:20%">Area</th><th style="width:32%">Document 2</th><th style="width:32%">Later scope review</th><th style="width:16%">Decision</th></tr>
 
-<tr><td>Warehouse intake / Sortly replacement</td>
-<td>Stage 2, ~12 hrs, late October</td>
-<td>§10–11: detailed receiving workflow, camera capture, described as core to daily operation. Independently, the project owner was asked directly by the CEO to review Sortly "today" and "replace this tool."</td>
-<td><span class="tag tag-v1">PULLED TO v1</span></td></tr>
+<tr><td>Warehouse intake, replacing the current warehouse tool</td>
+<td>Deferred, targeted for late in the season</td>
+<td>Described as a core daily workflow, priced as needed sooner rather than later</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span></td></tr>
 
 <tr><td>Automated low-stock alerting</td>
-<td>Stage 1 explicit: <i>"thresholds exist but alerts are manual-review only... Stage 2 turns automated alerts on."</i></td>
-<td>§16, §33: system should proactively flag without a human noticing first.</td>
-<td><span class="tag tag-v1">PULLED TO v1</span> (detection layer — see §4.2)</td></tr>
+<td>Explicit: thresholds exist, but alerts stay manual-review only until later</td>
+<td>The system should flag proactively rather than waiting for someone to check</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span> (detection layer, see 3.2)</td></tr>
 
 <tr><td>Restock quantity suggestion</td>
 <td>Not specified; requests carry only the requested quantity</td>
-<td>§18, §20–23 "Smart Shipments": recommend a quantity from historical velocity, current stock, remaining season days</td>
-<td><span class="tag tag-v1">PULLED TO v1</span> — style level only, see §4.3</td></tr>
+<td>Recommend a quantity from historical velocity, current stock, and remaining season days</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span>, style level only, see 3.3</td></tr>
 
 <tr><td>Overallocation across markets</td>
 <td>Not specified</td>
-<td>§19: cap a request when fulfilling it in full would starve another location</td>
-<td><span class="tag tag-v1">PULLED TO v1</span></td></tr>
+<td>Cap a request when fulfilling it in full would starve another location</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span></td></tr>
 
 <tr><td>Shipment consolidation</td>
 <td>Not specified</td>
-<td>§24: bundle nearby restock needs into one dispatch run</td>
-<td><span class="tag tag-v1">PULLED TO v1</span></td></tr>
+<td>Bundle nearby restock needs into one dispatch run</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span></td></tr>
 
 <tr><td>Roles</td>
 <td>Four: Owner, Warehouse, Market Manager, Operator</td>
-<td>§26: five, splitting Warehouse into Manager/Operator tiers, adding a Square-only Sales Operator</td>
-<td><span class="tag tag-v1">PULLED TO v1</span></td></tr>
+<td>Five: splits Warehouse into a manager and an operator tier, adds a Square-only sales role</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span></td></tr>
 
 <tr><td>Dashboard status</td>
 <td>Low-stock list, decision queue</td>
-<td>§17, §25: explicit Healthy / Low / Critical / Out-of-Stock zones</td>
-<td><span class="tag tag-v1">PULLED TO v1</span> — labelling on existing data</td></tr>
+<td>Explicit Healthy / Low / Critical / Out-of-Stock labelling</td>
+<td><span class="tag tag-v1">MOVED EARLIER</span>, labelling on existing data</td></tr>
 
 <tr><td>QR box tracking</td>
-<td>Core to dispatch: one label per box, scan at the warehouse door</td>
-<td>§14 explicit: <i>"QR-based box tracking is optional... mandatory QR scanning is unnecessary"</i> unless discrepancies later prove it's needed</td>
-<td><span class="tag tag-softened">SOFTENED</span> — see §5</td></tr>
+<td>Core to dispatch: one label per box, scanned at the warehouse door</td>
+<td>Made optional. Confirm accuracy first using shipment records, location inventory, and Square sales alone; introduce scanning later only if needed</td>
+<td><span class="tag tag-softened">SOFTENED</span>, see Section 4</td></tr>
 
 <tr><td>Physical warehouse tiers</td>
-<td>Hard constraint: <i>"all discipline lives at ONE warehouse"</i></td>
-<td>§6–7: describes an optional Chicago → market-level sub-warehouse → booth chain, hedged as <i>"not every market necessarily requires a separate warehouse"</i></td>
-<td><span class="tag tag-open">NEEDS ONE FACT</span> — see §6.1</td></tr>
+<td>Hard constraint: all discipline lives at one warehouse</td>
+<td>Describes an optional intermediate storage tier between the main warehouse and a market, noted as not needed everywhere</td>
+<td><span class="tag tag-open">NEEDS ONE FACT</span>, see Section 5</td></tr>
 
-<tr><td>AI image recognition at intake</td>
+<tr><td>Image recognition at intake</td>
 <td>Not specified</td>
-<td>§11, the voice note's own words: <i>"may later help"</i></td>
-<td><span class="tag tag-stage2">STAYS STAGE 2</span> — deferred by the source itself</td></tr>
+<td>Noted as a possible later addition, not needed now</td>
+<td><span class="tag tag-stage2">STAYS LATER</span></td></tr>
 
-<tr><td>New-market cold start (weather, demographics, population)</td>
+<tr><td>New-market forecasting from external data</td>
 <td>Not specified</td>
-<td>§22, listed as a possible future input for markets with no history</td>
-<td><span class="tag tag-stage2">STAYS STAGE 2</span> — no data pipeline exists; premature</td></tr>
+<td>Listed as a possible future input for markets with no history</td>
+<td><span class="tag tag-stage2">STAYS LATER</span>, no data pipeline exists; premature</td></tr>
 
 <tr><td>Write-off flow, season-close reconciliation</td>
-<td>Stage 2</td>
+<td>Deferred</td>
 <td>Not mentioned</td>
 <td><span class="tag tag-unchanged">UNCHANGED</span></td></tr>
 
 </table>
 
-<h2 class="section-break">3. Why these pull forward safely</h2>
-<p>None of the items below need new architecture. Each is additive to what already exists, verified against the current codebase rather than assumed.</p>
+<h2 class="section-break">3. Why these move earlier safely</h2>
+<p>None of the items below need new architecture. Each is additive to what already exists.</p>
 
-<h3>3.1 Warehouse intake — the most urgent item on this document</h3>
+<h3>3.1 Warehouse intake</h3>
 <div class="callout urgent">
-This has two independent signals pointing the same direction: the voice note's detailed receiving workflow (§10–11), and the CEO's direct message asking for a Sortly review "today" specifically because "we have to replace this tool." Treat this as the priority, not a background Stage-2 line.
+This is the priority item on this document, not a background line.
 </div>
-<p>Scope, per voice note §10: open app → select "Receive Inventory" → optional photo → select product/category → select attributes → enter quantity → confirm. If the product doesn't exist, an authorised user creates it — this is exactly the controlled-vocabulary gate already designed in the spec's colour model (§6.4), so no new mechanism is needed, only a screen.</p>
-<p><b>Explicitly not in this pass:</b> AI-assisted photo recognition (§11) — the voice note itself calls this a "later" feature.</p>
+<p>Scope: open the app, select "Receive Inventory," optionally take a photo, select the product and its attributes, enter a quantity, confirm. If the product does not already exist, an authorised user creates it, using the same controlled-vocabulary check already designed into the colour model, so no new mechanism is needed, only a screen.</p>
+<p>Not included in this pass: automatic photo-based product recognition. Treated as a later addition by design.</p>
 
 <h3>3.2 Automated low-stock alerting</h3>
-<p>The detection half of this is already built: <code>ThresholdsService.evaluate()</code> auto-drafts a restock request the moment stock crosses a threshold, deduplicated so a busy weekend cannot flood the queue. What Document 2's Stage 1 explicitly withheld was <i>surfacing</i> — requiring a human to check the dashboard rather than being told. Pulling this forward means the dashboard leads with what's flagged, prominently, by default.</p>
+<p>The detection half of this already exists: a restock request drafts itself automatically the moment stock crosses a threshold, deduplicated so a busy weekend cannot flood the queue. What stayed withheld until now was surfacing it clearly, rather than requiring someone to check a dashboard. Moving this earlier means the dashboard leads with what is flagged, by default.</p>
 <div class="callout">
-<b>Open question, not a blocker:</b> proactive push/email/SMS delivery needs a channel decision (a mail or SMS provider) that hasn't been made. Detection and on-screen surfacing move to v1 now; off-screen delivery is scoped once a channel is chosen, so this isn't silently promised before it can be honestly built.
+Open question, not a blocker: sending an alert outside the app (email, text) needs a delivery channel to be chosen. Detection and on-screen surfacing move earlier now; off-screen delivery is scoped once a channel is picked, so it is not promised before it can honestly be built.
 </div>
 
-<h3>3.3 Restock quantity suggestion ("Smart Shipments", scoped to what v1 can support)</h3>
-<p>More of this already exists than the voice note's ask implies. <code>VelocitySeeder</code> already computes real weekly sell-through per item per location from the 2025 season data, and deliberately stops at style level — never colour — for exactly the reason Document 2 states: 2025 colour data covers 4.8% of revenue and building on it would be building on fantasy.</p>
-<p>The voice note's own worked example (§20) is style-level too — "1,500 requested, 1,000–1,200 historically sold, recommend ~1,200" — no colour anywhere in it. So the v1 version is: when a request is raised, show the system-recommended quantity alongside the requested one, computed from that same velocity data plus current stock and remaining season days. This is surfacing existing data, not a new prediction engine.</p>
-<p><b>Explicitly not in this pass:</b> cross-market historical comparison, new-market cold-start modelling (§22), safety-buffer tuning beyond a simple fixed margin. Those need more history than one season provides.</p>
+<h3>3.3 Restock quantity suggestion</h3>
+<p>More of this already exists than it first appears. Last season's real weekly sell-through per product per location is already computed, and deliberately stops at the product-style level, never colour, for the same reason colour prediction stays out of scope: last season's colour data covers under 5% of revenue, and building on it would be building on too little.</p>
+<p>The requested feature's own worked example is style level too, no colour involved. So the version that ships now is: when a request is raised, show a system-recommended quantity next to the requested one, computed from that same historical data plus current stock and the remaining days in the season. This surfaces data already derived; it does not add a new prediction engine.</p>
+<p>Not included in this pass: cross-market historical comparison, forecasting for brand-new markets with no history, or tuned safety margins. Those need more than one season of data.</p>
 
 <h3>3.4 Overallocation guard</h3>
-<p>When evaluating an open request, sum every other open request against the same warehouse stock and flag — not silently cap — if fulfilling this one in full would leave another location short. The recommended-vs-requested split from §3.3 is the natural place this surfaces.</p>
+<p>When evaluating an open request, sum every other open request against the same warehouse stock and flag, not silently cap, if fulfilling this one in full would leave another location short.</p>
 
 <h3>3.5 Shipment consolidation</h3>
-<p>At pack time, show other open or soon-due requests for the same destination so a packer can combine boxes into one dispatch rather than two. A view on existing data, not a new subsystem.</p>
+<p>At pack time, show other open or soon-due requests for the same destination so a box can be combined rather than sent twice. A view on existing data, not a new subsystem.</p>
 
 <h3>3.6 Roles</h3>
-<p>Split the single <code>WAREHOUSE</code> role into <code>WAREHOUSE_MANAGER</code> (create shipments, adjust stock, approve requests) and <code>WAREHOUSE_OPERATOR</code> (receive, pack, cannot create products or touch the catalog) — mirroring the same shared-login problem the original Square audit found and flagging it as the reason. Add <code>SALES_OPERATOR</code> for staff who only need Square, never the app, so the smallest-privilege principle Document 2 already argued for actually holds for every role, not just some.</p>
+<p>Split the single warehouse role into a manager tier (create shipments, adjust stock, approve requests) and an operator tier (receive, pack, cannot create products or touch the catalog). Add a sales-only role for staff who only need the till, never the app, so the smallest-privilege principle already agreed holds for every role, not only some.</p>
 
 <h3>3.7 Dashboard status zones</h3>
-<p>Label existing threshold data as Healthy / Low / Critical / Out-of-Stock rather than a bare number. No new computation — a presentation layer on data already derived.</p>
+<p>Label existing threshold data as Healthy, Low, Critical, or Out of Stock rather than a bare number. No new computation, a presentation layer on data already derived.</p>
 
 <h2 class="section-break">4. What softened</h2>
-<h3>4.1 QR box tracking: mandatory → optional</h3>
-<p>Verified directly against the code before writing this: <code>dispatch()</code> already takes a box ID and posts the transfer to the ledger — it has never required a scan to run. The <code>/scan</code> screen is a convenience for finding that ID quickly, layered on top of the ledger transfer, not load-bearing underneath it. <b>No rework is needed.</b> The system already satisfies the voice note's own test in §14: shipment records, location inventory and Square sales deductions are the mechanism; scanning is optional confirmation on top, exactly as asked.</p>
+<h3>4.1 QR box tracking: required to optional</h3>
+<p>Verified directly against the build: dispatching a box already posts the movement to the ledger on its own, and has never required a scan to run. The scan screen is a convenience for finding a box quickly, layered on top of the underlying movement record, not load-bearing beneath it. No rework is needed. The system already meets the stated bar: shipment records, location inventory, and Square sales are the mechanism; scanning is optional confirmation on top.</p>
 
 <h2 class="section-break">5. The one item that needs a fact, not a decision</h2>
-<h3>5.1 Does any market physically operate a sub-warehouse today?</h3>
-<p>Document 2's "one warehouse" rule was a specific, verified observation about how this client's markets actually run — chaotic, staff grabbing stock freely, nothing counted on site. The voice note's three-tier idea (Chicago → market warehouse → booth) is explicitly hedged: <i>"not every market necessarily requires a separate warehouse, but the system should support this structure."</i></p>
+<h3>5.1 Does any market operate a second storage tier today</h3>
+<p>The single-warehouse rule in Document 2 was a specific, verified observation about how this business's markets actually run: informal, staff drawing stock freely, nothing counted on site. The later scope review's optional intermediate tier (main warehouse to a market's own storage to the selling point) is explicitly hedged as not needed everywhere.</p>
 <div class="callout evidence">
-<b>Checked against the schema:</b> this does not require a new data model. A location already has a <code>kind</code> of <code>MARKET</code> or <code>WAREHOUSE</code>, and a transfer already takes any two locations as endpoints — nothing about the ledger assumes exactly one warehouse exists. A market's local storage, if one is real, is simply a second <code>WAREHOUSE</code>-kind location, and Chicago → that location → the market's Square location is two ordinary transfers, not a new mechanism.
+Checked against the data model: this does not require a new design. A location is already either a market or a warehouse, and a stock transfer already takes any two locations as its endpoints; nothing assumes exactly one warehouse exists. A market's local storage, if one is real, is simply a second warehouse-type location, and main warehouse to that location to the market's till is two ordinary transfers, not a new mechanism.
 </div>
-<p><b>So this is designed-for already, not a build item.</b> The only reason it isn't active today is that no second real warehouse has been confirmed to exist. Ask directly: does any market run a physical sub-warehouse right now, or is this the CEO future-proofing for growth? If real, it's a data entry — add the location, no code change. If aspirational, leave it exactly as designed and revisit when it's true.</p>
+<p>So this is already designed for, not a build item. The only reason it is inactive today is that no second real storage location has been confirmed. The one fact that resolves this: does any market run physical storage of its own right now, or is this planning ahead for growth. If real, it is a data entry, no code change. If not yet real, it stays exactly as designed and gets activated when it is.</p>
 
 <h2 class="section-break">6. What this document deliberately leaves alone</h2>
 <ul>
-  <li>Sept 12 catalog freeze, Sept 18 pilot target — unchanged</li>
-  <li>The single catalog write window before the season, and every safety guard around it — unchanged</li>
-  <li>No colour-level prediction, this season or next, until a full season of family-level sell-through exists to train on</li>
-  <li>Write-off flow and season-close reconciliation — Stage 2, not mentioned in the voice note, no reason to move</li>
-  <li>AI-assisted photo recognition — deferred by the voice note's own wording</li>
+  <li>The mid-September catalog freeze and the pilot market target date, unchanged</li>
+  <li>The single catalog write window before the season, and every safety guard around it, unchanged</li>
+  <li>No colour-level prediction, this season or next, until a full season of family-level sell-through exists to build on</li>
+  <li>Write-off flow and season-close reconciliation, deferred, not mentioned in the later review, no reason to move</li>
+  <li>Photo-based product recognition, deferred by the same review that raised it</li>
 </ul>
 
-<p class="footer-note">Prepared by the build team, 24 Aug 2026, reconciling Document 2 against the CEO voice-note transcript per explicit instruction that the transcript carries higher authority on scope questions where the two disagree.</p>
+<p class="footer-note">Prepared by the build team, reconciling Document 2 against a later scope review under instruction that the later review carries precedence on scope questions where the two disagree.</p>
 
 </body>
 </html>
