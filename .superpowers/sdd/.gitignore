@@ -1,0 +1,6 @@
+# Working artefacts (briefs, review packages, diffs) stay local.
+*
+!.gitignore
+# The engineering record travels with the repo: every ruling, finding and fix.
+!*/progress.md
+!*-report.md
