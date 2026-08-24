@@ -54,7 +54,11 @@
 <div class="meta">
   Internal document for the build team. Not client-facing.<br>
   <b>Reconciles:</b> the original development brief (Document 2) against a later scope review.<br>
-  <b>Authority order:</b> where the two sources conflict, the later scope review takes precedence. Where Document 2 is silent or the two agree, Document 2 stands. Nothing here overrides the technical facts established by real client data or the proven safety design in the catalog migration decision record.
+  <b>Authority order:</b> where the two sources conflict, the later scope review takes precedence. Where Document 2 is silent or the two agree, Document 2 stands. Where either source makes a factual claim, the real client data (the Square catalog export, the 2025 season exports, and the warehouse export) is checked directly and wins over both. Nothing here overrides the proven safety design in the catalog migration decision record.
+</div>
+
+<div class="callout evidence">
+Every factual claim in this document has been checked directly against the client's real exports (the Square catalog, the 2025 season transactions, and the warehouse inventory export) or against the working system, not assumed from either source document. Where a claim could not be verified this way, it is marked as unverified rather than stated as fact.
 </div>
 
 <div class="callout">
@@ -121,8 +125,8 @@ This is a scope document, mirroring Document 2's own role. It answers what chang
 
 <tr><td>Physical warehouse tiers</td>
 <td>Hard constraint: all discipline lives at one warehouse</td>
-<td>Describes an optional intermediate storage tier between the main warehouse and a market, noted as not needed everywhere</td>
-<td><span class="tag tag-open">NEEDS ONE FACT</span>, see Section 5</td></tr>
+<td>Describes an optional intermediate storage tier, and names a different city as the warehouse location</td>
+<td><span class="tag tag-unchanged">CONFIRMED, Document 2 correct</span>, see Section 5</td></tr>
 
 <tr><td>Image recognition at intake</td>
 <td>Not specified</td>
@@ -179,12 +183,16 @@ Open question, not a blocker: sending an alert outside the app (email, text) nee
 <p>Verified directly against the build: dispatching a box already posts the movement to the ledger on its own, and has never required a scan to run. The scan screen is a convenience for finding a box quickly, layered on top of the underlying movement record, not load-bearing beneath it. No rework is needed. The system already meets the stated bar: shipment records, location inventory, and Square sales are the mechanism; scanning is optional confirmation on top.</p>
 
 <h2 class="section-break">5. The one item that needs a fact, not a decision</h2>
-<h3>5.1 Does any market operate a second storage tier today</h3>
-<p>The single-warehouse rule in Document 2 was a specific, verified observation about how this business's markets actually run: informal, staff drawing stock freely, nothing counted on site. The later scope review's optional intermediate tier (main warehouse to a market's own storage to the selling point) is explicitly hedged as not needed everywhere.</p>
+<h3>5.1 A single main warehouse, confirmed against real sales and inventory data</h3>
+<p>The two source documents describe the physical setup differently in one place: Document 2 states a single main warehouse feeding every market directly. The later scope review describes an optional second storage tier between the main warehouse and an individual market, hedged as not needed everywhere, and separately names a specific city as the main warehouse's location.</p>
 <div class="callout evidence">
-Checked against the data model: this does not require a new design. A location is already either a market or a warehouse, and a stock transfer already takes any two locations as its endpoints; nothing assumes exactly one warehouse exists. A market's local storage, if one is real, is simply a second warehouse-type location, and main warehouse to that location to the market's till is two ordinary transfers, not a new mechanism.
+<b>Checked directly against the data, both parts confirmed.</b>
+<ul>
+<li>The city named as the main warehouse in the later review is, in the real Square sales data, the single highest-selling market of the fourteen, not a warehouse. It has real, high transaction counts across two separate market locations under that city. A genuine warehouse, by contrast, rings up no sales at all: the system's own warehouse location shows zero transactions, exactly as expected. Document 2's location is the one that matches a true, non-selling warehouse.</li>
+<li>The warehouse export's own location field, covering all 564 real products, is blank on every single row. If any market kept its own separate storage today, this is where it would show up, and it does not.</li>
+</ul>
 </div>
-<p>So this is already designed for, not a build item. The only reason it is inactive today is that no second real storage location has been confirmed. The one fact that resolves this: does any market run physical storage of its own right now, or is this planning ahead for growth. If real, it is a data entry, no code change. If not yet real, it stays exactly as designed and gets activated when it is.</p>
+<p>Both checks agree with Document 2. One main warehouse, matching Document 2's location, feeding all fourteen markets directly. The data model already allows a market to have its own additional storage without any redesign, so this stays available if a market genuinely opens one in future; nothing about today's real data suggests one exists yet.</p>
 
 <h2 class="section-break">6. What this document deliberately leaves alone</h2>
 <ul>
@@ -195,7 +203,22 @@ Checked against the data model: this does not require a new design. A location i
   <li>Photo-based product recognition, deferred by the same review that raised it</li>
 </ul>
 
-<p class="footer-note">Prepared by the build team, reconciling Document 2 against a later scope review under instruction that the later review carries precedence on scope questions where the two disagree.</p>
+<h2 class="section-break">7. Verification performed</h2>
+<p>The following claims were checked directly against the client's real exports and the working system before this document was finalised.</p>
+<table>
+<tr><th style="width:38%">Claim</th><th style="width:34%">Checked against</th><th style="width:28%">Result</th></tr>
+<tr><td>Main warehouse location</td><td>Square sales data, all 14 markets, plus the warehouse's own transaction count</td><td>Confirmed: Document 2's location is correct. The city named in the later review is the top-selling market, not a warehouse</td></tr>
+<tr><td>Second storage tier at any market</td><td>Full warehouse export, all 564 items, location field</td><td>Confirmed absent: the field is blank on every row</td></tr>
+<tr><td>Colour recorded on under 5% of revenue</td><td>Full 2025 season sales export</td><td>Confirmed: 4.8%</td></tr>
+<tr><td>Products arrive without manufacturer barcodes</td><td>Full warehouse export, barcode field</td><td>Confirmed: blank on all 564 items</td></tr>
+<tr><td>Automated detection already drafts a request on threshold breach, without duplicating</td><td>Working system, direct test</td><td>Confirmed</td></tr>
+<tr><td>Historical per-location sell-through is already computed at product-style level</td><td>Working system, source code and its own documented reasoning</td><td>Confirmed, and confirmed deliberately excludes colour for the same reason colour prediction is out of scope</td></tr>
+<tr><td>Dispatching a box already updates the stock ledger without requiring a scan</td><td>Working system, direct code inspection</td><td>Confirmed</td></tr>
+<tr><td>Fourteen markets plus one warehouse, no more, no fewer</td><td>Working system, location records</td><td>Confirmed</td></tr>
+</table>
+<p>Where a claim from either source document could not be checked this way, primarily items describing future intent rather than a current fact, it is presented as stated by that source and not asserted as verified.</p>
+
+<p class="footer-note">Prepared by the build team, reconciling Document 2 against a later scope review under instruction that the later review carries precedence on scope questions where the two disagree, and that all factual claims be checked against the client's real data before being finalised.</p>
 
 </body>
 </html>
