@@ -33,18 +33,18 @@ const ICONS = {
       <path d="M12 13v8" />
     </svg>
   ),
-  scan: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M4 8V5a1 1 0 0 1 1-1h3M4 16v3a1 1 0 0 0 1 1h3M20 8V5a1 1 0 0 0-1-1h-3M20 16v3a1 1 0 0 1-1 1h-3" />
-      <path d="M4 12h16" />
-    </svg>
-  ),
   admin: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="4" y="4" width="7" height="7" rx="1.5" />
       <rect x="13" y="4" width="7" height="7" rx="1.5" />
       <rect x="4" y="13" width="7" height="7" rx="1.5" />
       <rect x="13" y="13" width="7" height="7" rx="1.5" strokeDasharray="3 2" />
+    </svg>
+  ),
+  bell: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z" />
+      <path d="M10 20a2 2 0 0 0 4 0" />
     </svg>
   ),
   users: (
@@ -72,7 +72,7 @@ const TABS: Tab[] = [
   { href: '/requests', label: 'Requests', icon: 'requests', roles: APP_ROLES },
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
-  { href: '/scan', label: 'Scan', icon: 'scan', roles: WAREHOUSE_ROLES },
+  { href: '/notifications', label: 'Notifications', icon: 'bell', roles: APP_ROLES },
   { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
 ]

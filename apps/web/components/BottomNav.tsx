@@ -26,12 +26,6 @@ const ICONS = {
       <path d="M12 13v8" />
     </svg>
   ),
-  scan: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M4 8V5a1 1 0 0 1 1-1h3M4 16v3a1 1 0 0 0 1 1h3M20 8V5a1 1 0 0 0-1-1h-3M20 16v3a1 1 0 0 1-1 1h-3" />
-      <path d="M4 12h16" />
-    </svg>
-  ),
   admin: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="4" y="4" width="7" height="7" rx="1.5" />
@@ -45,6 +39,12 @@ const ICONS = {
       <path d="M12 3v12" />
       <path d="M7 10l5 5 5-5" />
       <path d="M4 19h16" />
+    </svg>
+  ),
+  bell: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z" />
+      <path d="M10 20a2 2 0 0 0 4 0" />
     </svg>
   ),
 }
@@ -63,7 +63,7 @@ const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/requests', label: 'Requests', icon: 'requests', roles: APP_ROLES },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
-  { href: '/scan', label: 'Scan', icon: 'scan', roles: WAREHOUSE_ROLES },
+  { href: '/notifications', label: 'Alerts', icon: 'bell', roles: APP_ROLES },
   { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
 ]
 

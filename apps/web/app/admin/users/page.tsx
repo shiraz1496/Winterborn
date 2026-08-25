@@ -94,7 +94,7 @@ function UsersBody() {
       {error && <p className="error-banner">{error}</p>}
 
       {flashPassword && (
-        <div className="card" style={{ marginBottom: 20, borderColor: 'var(--signal)', background: 'rgba(232,163,61,0.06)' }}>
+        <div className="card" style={{ marginBottom: 20, borderColor: 'var(--signal)', background: 'rgba(210,137,42,0.08)' }}>
           <div className="row-between" style={{ marginBottom: 6 }}>
             <strong>Share this password once — it won&apos;t be shown again</strong>
             <button

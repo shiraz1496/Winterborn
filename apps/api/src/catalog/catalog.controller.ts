@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput } from '@winterborn/shared'
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
+import type { AssignColourFamilyInput, CreateWarehouseVariantInput } from '@winterborn/shared'
+import { createWarehouseVariantInputSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -32,6 +33,23 @@ export class CatalogController {
   @Get('catalog/warehouse-variants')
   warehouseVariants(@Query('variationId') variationId?: string) {
     return this.catalog.listWarehouseVariants(variationId)
+  }
+
+  @Post('catalog/warehouse-variants')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  createWarehouseVariant(@Body() body: CreateWarehouseVariantInput) {
+    const parsed = createWarehouseVariantInputSchema.parse(body)
+    return this.catalog.createWarehouseVariant(parsed)
+  }
+
+  @Get('catalog/categories')
+  categories() {
+    return this.catalog.listCategories()
+  }
+
+  @Get('catalog/size-options')
+  sizeOptions(@Query('categoryId') categoryId?: string) {
+    return this.catalog.listSizeOptions(categoryId)
   }
 
   @Get('catalog/thresholds')

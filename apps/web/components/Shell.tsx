@@ -11,7 +11,7 @@ const TITLES: Record<string, string> = {
   '/requests': 'Requests',
   '/intake': 'Receive inventory',
   '/pack': 'Pack',
-  '/scan': 'Scan',
+  '/notifications': 'Notifications',
   '/admin/colours': 'Colours',
   '/admin/users': 'Users',
 }

@@ -1,5 +1,4 @@
 import type { BoxLabelDto } from '@winterborn/shared'
-import { QrCode } from './QrCode'
 
 export function BoxLabel({ label }: { label: BoxLabelDto }) {
   return (
@@ -9,7 +8,12 @@ export function BoxLabel({ label }: { label: BoxLabelDto }) {
       </div>
       <div className="label-dest">{label.destinationLocationName}</div>
       <div className="row-between">
-        <QrCode value={label.qrToken} size={168} />
+        <div>
+          <div style={{ fontSize: '0.8rem', opacity: 0.7 }}>box id</div>
+          <div style={{ fontSize: '1.1rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+            {label.qrToken.slice(0, 12).toUpperCase()}
+          </div>
+        </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontSize: '0.8rem', opacity: 0.7 }}>lines</div>
           <div style={{ fontSize: '1.6rem', fontWeight: 700 }}>{label.lineCount}</div>

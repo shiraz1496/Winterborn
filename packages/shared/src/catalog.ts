@@ -59,6 +59,37 @@ export const colourFamilySchema = z.object({
 })
 export type ColourFamilyDto = z.infer<typeof colourFamilySchema>
 
+/// Controlled-vocabulary rows the "create new product" flow picks from.
+/// Doc 3 §3.1: an authorised user creates a missing product using the
+/// existing vocabulary rather than free-typing a fresh spelling.
+export const categorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+})
+export type CategoryDto = z.infer<typeof categorySchema>
+
+export const sizeOptionSchema = z.object({
+  id: z.string(),
+  categoryId: z.string(),
+  name: z.string(),
+})
+export type SizeOptionDto = z.infer<typeof sizeOptionSchema>
+
+/// POST /catalog/warehouse-variants: everything needed to spin up a new
+/// product during intake. Category / family / size are IDs from the
+/// controlled vocabulary; item group and colour variant are free-text names
+/// that reuse the existing row if there is one already, otherwise create
+/// it. Warehouse SKU is generated server-side so a Sunday operator never
+/// invents a colliding one by hand.
+export const createWarehouseVariantInputSchema = z.object({
+  categoryId: z.string().min(1),
+  itemGroupName: z.string().trim().min(1).max(120),
+  colourFamilyId: z.string().min(1),
+  colourVariantName: z.string().trim().min(1).max(120),
+  sizeOptionId: z.string().min(1),
+})
+export type CreateWarehouseVariantInput = z.infer<typeof createWarehouseVariantInputSchema>
+
 /// One row of the /admin/colours residual queue: a warehouse colour value
 /// that has never been assigned a real till family.
 export const unassignedColourVariantSchema = z.object({

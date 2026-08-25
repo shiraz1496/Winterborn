@@ -6,8 +6,10 @@ import {
   boxLabelSchema,
   boxLineSchema,
   boxSchema,
+  categorySchema,
   colourFamilySchema,
   colourVariantSchema,
+  createWarehouseVariantInputSchema,
   createLoadInputSchema,
   createRequestInputSchema,
   createRequestLineInputSchema,
@@ -25,12 +27,14 @@ import {
   loginResponseSchema,
   lowStockRowSchema,
   meResponseSchema,
+  notificationsListSchema,
   packBoxInputSchema,
   requestLineAnalysisSchema,
   requestLineSchema,
   restockRequestBaseSchema,
   restockRequestSchema,
   salesRowSchema,
+  sizeOptionSchema,
   stockLevelSchema,
   thresholdSchema,
   transitionRequestInputSchema,
@@ -43,6 +47,7 @@ import {
   type CreateLoadInput,
   type CreateRequestInput,
   type CreateRequestLineInput,
+  type CreateWarehouseVariantInput,
   type IntakeInput,
   type PackBoxInput,
   type UpdateAdminUserInput,
@@ -148,6 +153,19 @@ export function listWarehouseVariants(variationId?: string) {
   )
 }
 
+export function createWarehouseVariant(input: CreateWarehouseVariantInput) {
+  createWarehouseVariantInputSchema.parse(input)
+  return request('POST', '/catalog/warehouse-variants', warehouseVariantSummarySchema, input)
+}
+
+export function listCategories() {
+  return request('GET', '/catalog/categories', z.array(categorySchema))
+}
+
+export function listSizeOptions(categoryId?: string) {
+  return request('GET', `/catalog/size-options${qs({ categoryId })}`, z.array(sizeOptionSchema))
+}
+
 export function listThresholds(locationId?: string) {
   return request('GET', `/catalog/thresholds${qs({ locationId })}`, z.array(thresholdSchema))
 }
@@ -246,10 +264,6 @@ export function getBox(id: string) {
   return request('GET', `/boxes/${id}`, boxSchema)
 }
 
-export function getBoxByToken(token: string) {
-  return request('GET', `/boxes/by-token/${encodeURIComponent(token)}`, boxSchema)
-}
-
 export function addBoxLine(boxId: string, input: { warehouseVariantId: string; quantity: number }) {
   return request('POST', `/boxes/${boxId}/lines`, boxLineSchema, input)
 }
@@ -277,12 +291,6 @@ export function getLoad(id: string) {
   return request('GET', `/loads/${id}`, loadWithBoxesSchema)
 }
 
-export function scanBoxOntoLoad(loadId: string, boxId: string) {
-  return request('POST', `/loads/${loadId}/scan`, z.object({ loadId: z.string(), boxId: z.string(), scannedAt: z.coerce.date() }), {
-    boxId,
-  })
-}
-
 export function dispatchLoad(id: string) {
   return request('POST', `/loads/${id}/dispatch`, loadDispatchResultSchema)
 }
@@ -292,6 +300,12 @@ export function dispatchLoad(id: string) {
 export function receiveIntake(input: IntakeInput) {
   intakeInputSchema.parse(input)
   return request('POST', '/intake', intakeResultSchema, input)
+}
+
+// ---- notifications -----------------------------------------------------------
+
+export function listNotifications() {
+  return request('GET', '/notifications', notificationsListSchema)
 }
 
 // ---- admin (owner-only) ------------------------------------------------------

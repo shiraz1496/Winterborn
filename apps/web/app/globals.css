@@ -1,12 +1,11 @@
 /* ---------------------------------------------------------------------
    Winterborn Restock -- design tokens
    ---------------------------------------------------------------------
-   A dark, high-contrast, industrial register on purpose: this runs on a
-   phone at a warehouse bench under fluorescent light, one hand free, often
-   gloved. Dark reduces glare bounce off a phone held under bright warehouse
-   lighting and costs less battery on the OLED phones most staff carry.
-   There is deliberately no light theme toggle -- the audience and the room
-   it's used in are fixed, unlike a general-purpose consumer app.
+   A high-contrast, industrial register on purpose: this runs on a phone
+   at a warehouse bench, one hand free, often gloved. The palette is a
+   warm paper cream with strong ink text so labels, chips, and numeric
+   values stay legible under fluorescent light or daylight through the
+   loading bay.
 
    The recurring visual signature is the colour swatch: the entire job this
    software exists for is resolving a colour family ("60 gray") down to
@@ -15,19 +14,19 @@
    ------------------------------------------------------------------- */
 
 :root {
-  --ink: #14181a;
-  --surface: #1b2124;
-  --surface-raised: #232a2e;
-  --surface-sunken: #101416;
-  --line: #333b40;
-  --line-strong: #454f55;
+  --ink: #f5f2ea;
+  --surface: #ffffff;
+  --surface-raised: #fbfaf6;
+  --surface-sunken: #ebe7dc;
+  --line: #d9d3c6;
+  --line-strong: #b6ad9b;
 
-  --text: #edeae1;
-  --text-dim: #9ba3a6;
-  --text-faint: #6b7478;
+  --text: #14181a;
+  --text-dim: #545c60;
+  --text-faint: #8a9195;
 
-  --signal: #e8a33d;
-  --signal-strong: #f2b458;
+  --signal: #d2892a;
+  --signal-strong: #b8741d;
   --signal-ink: #1c1408;
 
   --pine: #5c8a76;
@@ -49,7 +48,7 @@
   --font-body: var(--font-public-sans), system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, 'SF Mono', monospace;
 
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * {
@@ -572,81 +571,6 @@ textarea {
   border-top: 1px dashed rgba(32, 29, 23, 0.35);
 }
 
-/* ---- scanner ------------------------------------------------------------- */
-
-.scan-viewport {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 3 / 4;
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  background: #000;
-}
-
-.scan-viewport video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.scan-frame {
-  position: absolute;
-  inset: 12%;
-  pointer-events: none;
-}
-
-.scan-frame::before,
-.scan-frame::after,
-.scan-frame > span::before,
-.scan-frame > span::after {
-  content: '';
-  position: absolute;
-  width: 28px;
-  height: 28px;
-  border: 3px solid var(--signal);
-}
-
-.scan-frame::before {
-  top: 0;
-  left: 0;
-  border-right: none;
-  border-bottom: none;
-}
-
-.scan-frame::after {
-  top: 0;
-  right: 0;
-  border-left: none;
-  border-bottom: none;
-}
-
-.scan-frame > span::before {
-  bottom: 0;
-  left: 0;
-  border-right: none;
-  border-top: none;
-}
-
-.scan-frame > span::after {
-  bottom: 0;
-  right: 0;
-  border-left: none;
-  border-top: none;
-}
-
-.scan-sheet {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 40;
-  background: var(--surface-raised);
-  border-top: 1px solid var(--line-strong);
-  border-radius: 16px 16px 0 0;
-  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
-  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
-}
-
 /* ---- misc ---------------------------------------------------------------- */
 
 .stack {
@@ -693,9 +617,9 @@ textarea {
 }
 
 .error-banner {
-  background: rgba(193, 80, 46, 0.14);
+  background: rgba(193, 80, 46, 0.1);
   border: 1px solid var(--rust);
-  color: #ffcbb8;
+  color: #7a2e14;
   border-radius: var(--radius-md);
   padding: 12px 14px;
   font-size: 0.88rem;
@@ -707,6 +631,8 @@ textarea {
   align-items: center;
   justify-content: center;
   min-height: 60vh;
+  width: 100%;
+  flex: 1;
 }
 
 .spinner {
@@ -982,7 +908,7 @@ textarea {
   color: var(--text);
   font-size: 0.82rem;
   line-height: 1.4;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 10px 30px rgba(20, 24, 26, 0.1);
 }
 
 .info-tip-bubble::before {
@@ -1026,7 +952,7 @@ textarea {
   background: var(--surface-raised);
   border: 1px solid var(--line-strong);
   color: var(--text);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 40px rgba(20, 24, 26, 0.12);
   font-size: 0.9rem;
   max-width: 480px;
   width: 100%;
@@ -1186,7 +1112,7 @@ textarea {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(20, 24, 26, 0.35);
   backdrop-filter: blur(2px);
   z-index: 60;
   display: flex;
@@ -1203,7 +1129,7 @@ textarea {
   width: 100%;
   max-width: 480px;
   padding: 20px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 20px 60px rgba(20, 24, 26, 0.18);
   margin-top: min(6vh, 60px);
 }
 
@@ -1629,8 +1555,8 @@ textarea {
 
   .app-sidebar-item.active {
     color: var(--signal);
-    background: rgba(232, 163, 61, 0.08);
-    border-color: rgba(232, 163, 61, 0.3);
+    background: rgba(210, 137, 42, 0.1);
+    border-color: rgba(210, 137, 42, 0.35);
   }
 
   .app-sidebar-foot {

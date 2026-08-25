@@ -1,9 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash } from 'node:crypto'
 import type {
+  CategoryDto,
   ColourFamilyDto,
+  CreateWarehouseVariantInput,
   LocationDto,
   LowStockRow,
+  SizeOptionDto,
   ThresholdDto,
   UnassignedColourVariant,
   VariationSummary,
@@ -61,6 +64,129 @@ export class CatalogReadService {
       sizeOptionName: r.sizeOption.name,
       tillSku: r.tillSku,
     }))
+  }
+
+  async listCategories(): Promise<CategoryDto[]> {
+    const rows = await this.prisma.category.findMany({ orderBy: { name: 'asc' } })
+    return rows.map((r) => ({ id: r.id, name: r.name }))
+  }
+
+  async listSizeOptions(categoryId?: string): Promise<SizeOptionDto[]> {
+    const rows = await this.prisma.sizeOption.findMany({
+      where: categoryId ? { categoryId } : undefined,
+      orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+    })
+    return rows.map((r) => ({ id: r.id, categoryId: r.categoryId, name: r.name }))
+  }
+
+  /// Doc 3 §3.1's "authorised user creates the missing product" branch of
+  /// intake. Category, family, and size are picked from the controlled
+  /// vocabulary (existing rows). Item group and colour variant reuse an
+  /// existing row if one already matches on the schema's unique keys,
+  /// otherwise a new row is created -- the same find-or-create pattern the
+  /// Sortly importer uses. Warehouse SKU is generated server-side so a
+  /// Sunday operator never invents a colliding one by hand.
+  async createWarehouseVariant(input: CreateWarehouseVariantInput): Promise<WarehouseVariantSummary> {
+    return this.prisma.$transaction(async (tx) => {
+      const category = await tx.category.findUnique({ where: { id: input.categoryId } })
+      if (!category) throw new NotFoundException(`category ${input.categoryId} not found`)
+
+      const colourFamily = await tx.colourFamily.findUnique({ where: { id: input.colourFamilyId } })
+      if (!colourFamily) throw new NotFoundException(`colour family ${input.colourFamilyId} not found`)
+      if (colourFamily.categoryId !== category.id) {
+        throw new BadRequestException(`colour family belongs to a different category`)
+      }
+
+      const sizeOption = await tx.sizeOption.findUnique({ where: { id: input.sizeOptionId } })
+      if (!sizeOption) throw new NotFoundException(`size option ${input.sizeOptionId} not found`)
+      if (sizeOption.categoryId !== category.id) {
+        throw new BadRequestException(`size option belongs to a different category`)
+      }
+
+      const itemGroupName = input.itemGroupName.trim()
+      const colourVariantName = input.colourVariantName.trim()
+
+      const itemGroup = await upsertByUnique(
+        () => tx.itemGroup.findUnique({ where: { categoryId_name: { categoryId: category.id, name: itemGroupName } } }),
+        () => tx.itemGroup.create({ data: { categoryId: category.id, name: itemGroupName, brand: 'OWN' } }),
+      )
+
+      const colourVariant = await upsertByUnique(
+        () =>
+          tx.colourVariant.findUnique({
+            where: { colourFamilyId_name: { colourFamilyId: colourFamily.id, name: colourVariantName } },
+          }),
+        () =>
+          tx.colourVariant.create({
+            data: {
+              colourFamilyId: colourFamily.id,
+              name: colourVariantName,
+              normalisedName: colourVariantName.toLowerCase(),
+              familyAssignmentSource: 'MANUAL',
+              familyConfidence: 1,
+            },
+          }),
+      )
+
+      const variationSeed = `${category.name}-${itemGroupName}-${colourFamily.name}-${sizeOption.name}`
+      const variation = await upsertByUnique(
+        () =>
+          tx.variation.findUnique({
+            where: {
+              itemGroupId_colourFamilyId_sizeOptionId: {
+                itemGroupId: itemGroup.id,
+                colourFamilyId: colourFamily.id,
+                sizeOptionId: sizeOption.id,
+              },
+            },
+          }),
+        () =>
+          tx.variation.create({
+            data: {
+              itemGroupId: itemGroup.id,
+              colourFamilyId: colourFamily.id,
+              sizeOptionId: sizeOption.id,
+              tillSku: `${slugify(colourFamily.name)}-${shortHash(variationSeed)}`,
+            },
+          }),
+      )
+
+      const existingWv = await tx.warehouseVariant.findUnique({
+        where: {
+          itemGroupId_colourVariantId_sizeOptionId: {
+            itemGroupId: itemGroup.id,
+            colourVariantId: colourVariant.id,
+            sizeOptionId: sizeOption.id,
+          },
+        },
+      })
+      if (existingWv) {
+        throw new BadRequestException(
+          `this product already exists (warehouse SKU ${existingWv.warehouseSku}) -- search for it instead`,
+        )
+      }
+
+      const warehouseSkuSeed = `${itemGroup.id}-${colourVariant.id}-${sizeOption.id}`
+      const warehouseSku = `WV-${slugify(colourVariantName)}-${shortHash(warehouseSkuSeed)}`
+      const created = await tx.warehouseVariant.create({
+        data: {
+          itemGroupId: itemGroup.id,
+          colourVariantId: colourVariant.id,
+          sizeOptionId: sizeOption.id,
+          variationId: variation.id,
+          warehouseSku,
+        },
+      })
+
+      return {
+        id: created.id,
+        variationId: variation.id,
+        itemGroupName: itemGroup.name,
+        colourVariantName: colourVariant.name,
+        sizeOptionName: sizeOption.name,
+        warehouseSku: created.warehouseSku,
+      }
+    })
   }
 
   async listWarehouseVariants(variationId?: string): Promise<WarehouseVariantSummary[]> {
@@ -200,6 +326,12 @@ export class CatalogReadService {
       return updated
     })
   }
+}
+
+async function upsertByUnique<T>(find: () => Promise<T | null>, create: () => Promise<T>): Promise<T> {
+  const existing = await find()
+  if (existing) return existing
+  return create()
 }
 
 function slugify(value: string): string {

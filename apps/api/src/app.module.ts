@@ -10,6 +10,7 @@ import { ThresholdsModule } from './thresholds/thresholds.module.js'
 import { HealthModule } from './health/health.module.js'
 import { IntakeModule } from './intake/intake.module.js'
 import { AdminModule } from './admin/admin.module.js'
+import { NotificationsModule } from './notifications/notifications.module.js'
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { AdminModule } from './admin/admin.module.js'
     HealthModule,
     IntakeModule,
     AdminModule,
+    NotificationsModule,
   ],
 })
 export class AppModule {}
