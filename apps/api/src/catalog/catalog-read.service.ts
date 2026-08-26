@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import type {
   CategoryDto,
@@ -7,6 +8,7 @@ import type {
   LocationDto,
   LowStockRow,
   SizeOptionDto,
+  SquareMappingRow,
   ThresholdDto,
   UnassignedColourVariant,
   VariationSummary,
@@ -62,7 +64,6 @@ export class CatalogReadService {
       categoryName: r.itemGroup.category.name,
       colourFamilyName: r.colourFamily.name,
       sizeOptionName: r.sizeOption.name,
-      tillSku: r.tillSku,
     }))
   }
 
@@ -146,7 +147,6 @@ export class CatalogReadService {
               itemGroupId: itemGroup.id,
               colourFamilyId: colourFamily.id,
               sizeOptionId: sizeOption.id,
-              tillSku: `${slugify(colourFamily.name)}-${shortHash(variationSeed)}`,
             },
           }),
       )
@@ -309,10 +309,8 @@ export class CatalogReadService {
           if (existing) {
             variationId = existing.id
           } else {
-            const seed = `${wv.itemGroupId}-${colourFamilyId}-${wv.sizeOptionId}`
-            const tillSku = `${slugify(family.name)}-${shortHash(seed)}`
             const created = await tx.variation.create({
-              data: { itemGroupId: wv.itemGroupId, colourFamilyId, sizeOptionId: wv.sizeOptionId, tillSku },
+              data: { itemGroupId: wv.itemGroupId, colourFamilyId, sizeOptionId: wv.sizeOptionId },
             })
             variationId = created.id
           }
@@ -325,6 +323,72 @@ export class CatalogReadService {
 
       return updated
     })
+  }
+
+  /// One row per Variation with the two Square IDs the sales-webhook path
+  /// depends on. The ItemGroup ID is denormalised in so a paste on the
+  /// item-level field can hit the right row without a second lookup, and
+  /// the item-level squareItemId is bubbled up from ItemGroup so the whole
+  /// row shows current state after either PATCH.
+  async listSquareMapping(): Promise<SquareMappingRow[]> {
+    const rows = await this.prisma.variation.findMany({
+      include: {
+        itemGroup: { include: { category: true } },
+        colourFamily: true,
+        sizeOption: true,
+      },
+      orderBy: [{ itemGroup: { name: 'asc' } }, { colourFamily: { name: 'asc' } }, { sizeOption: { name: 'asc' } }],
+    })
+    return rows.map((r) => ({
+      variationId: r.id,
+      itemGroupId: r.itemGroupId,
+      itemGroupName: r.itemGroup.name,
+      categoryName: r.itemGroup.category.name,
+      colourFamilyName: r.colourFamily.name,
+      sizeOptionName: r.sizeOption.name,
+      squareItemId: r.itemGroup.squareItemId,
+      squareVariationId: r.squareVariationId,
+    }))
+  }
+
+  /// Set or clear ItemGroup.squareItemId. Uniqueness collisions on the
+  /// column surface as ConflictException so the UI can render "already
+  /// assigned to <other item>" instead of a raw 500.
+  async setItemGroupSquareId(itemGroupId: string, squareId: string | null) {
+    const existing = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
+    if (!existing) throw new NotFoundException(`item group ${itemGroupId} not found`)
+    try {
+      return await this.prisma.itemGroup.update({
+        where: { id: itemGroupId },
+        data: { squareItemId: squareId },
+        select: { id: true, name: true, squareItemId: true },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`squareItemId "${squareId}" is already assigned to another item group`)
+      }
+      throw err
+    }
+  }
+
+  /// Set or clear Variation.squareVariationId. Same P2002 handling as
+  /// setItemGroupSquareId -- a single Square variation can only feed one
+  /// local Variation, otherwise a sale of 1 would decrement N rows.
+  async setVariationSquareId(variationId: string, squareId: string | null) {
+    const existing = await this.prisma.variation.findUnique({ where: { id: variationId } })
+    if (!existing) throw new NotFoundException(`variation ${variationId} not found`)
+    try {
+      return await this.prisma.variation.update({
+        where: { id: variationId },
+        data: { squareVariationId: squareId },
+        select: { id: true, squareVariationId: true },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`squareVariationId "${squareId}" is already assigned to another variation`)
+      }
+      throw err
+    }
   }
 }
 

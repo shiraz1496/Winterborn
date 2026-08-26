@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { transferKeyPrefix } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
@@ -100,15 +100,19 @@ export class BoxesService {
   }
 
   /**
-   * Posts the box's manifest to the ledger as one paired transfer per line
-   * (negative at the warehouse, positive at the destination) and marks the
-   * box DISPATCHED.
+   * Doc §6.4 — dispatch is now HALF a transfer. It writes only the
+   * negative-at-source ledger row. The positive-at-destination row is
+   * written later by `receiveForRequest()` when the market manager
+   * confirms arrival. Stock that has left the warehouse but not yet been
+   * received is "in transit": it is decremented at the warehouse but is
+   * not yet counted at the market, so a market's on-hand only reflects
+   * what the market physically has.
    *
-   * Idempotent by construction: each line's idempotencyKeyPrefix is
-   * `transferKeyPrefix('dispatch', boxId, warehouseVariantId)`, stable
-   * across calls, so re-dispatching an already-dispatched box calls
-   * LedgerService.transfer() again but it resolves to `created: false` for
-   * every line -- a no-op, not a double-count.
+   * Idempotency: each line's DISPATCH row uses the key
+   * `dispatch:${boxId}:${wvId}:from`, stable across calls. A re-dispatch
+   * of the same box is a no-op, not a double-decrement. The matching
+   * INTAKE row uses `dispatch:${boxId}:${wvId}:to` so the two rows share
+   * a transferId and can be joined later.
    */
   async dispatch(boxId: string, actor?: CurrentUserPayload) {
     const box = await this.prisma.box.findUnique({ where: { id: boxId }, include: { lines: true } })
@@ -117,29 +121,117 @@ export class BoxesService {
     const warehouse = await this.prisma.location.findFirstOrThrow({ where: { kind: 'WAREHOUSE' } })
     const now = new Date()
 
-    const transfers: { warehouseVariantId: string; transferId: string; created: boolean }[] = []
+    // One transferId per box, so both the DISPATCH row (now) and the
+    // eventual INTAKE row (on receive) can be joined.
+    const transferId = box.dispatchedAt ? undefined : randomUUID()
+
+    const posted: { warehouseVariantId: string; created: boolean }[] = []
     for (const line of box.lines) {
       const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
-      const result = await this.ledger.transfer({
-        fromLocationId: warehouse.id,
-        toLocationId: box.destinationLocationId,
+      const result = await this.ledger.append({
+        type: 'DISPATCH',
+        locationId: warehouse.id,
         variationId: wv.variationId,
         warehouseVariantId: wv.id,
-        quantity: line.quantity,
+        quantity: -line.quantity,
         occurredAt: now,
         source: 'UI',
-        idempotencyKeyPrefix: transferKeyPrefix('dispatch', boxId, wv.id),
-        type: 'DISPATCH',
+        sourceRef: boxId,
+        idempotencyKey: `${transferKeyPrefix('dispatch', boxId, wv.id)}:from`,
         actorId: actor?.id,
+        transferId,
       })
-      transfers.push({ warehouseVariantId: wv.id, ...result })
+      posted.push({ warehouseVariantId: wv.id, created: result.created })
     }
 
     if (box.state !== 'DISPATCHED') {
       await this.prisma.box.update({ where: { id: boxId }, data: { state: 'DISPATCHED', dispatchedAt: now } })
     }
 
-    return { boxId, transfers }
+    // Auto-advance the parent request to DISPATCHED on first box send.
+    if (box.requestId) {
+      const request = await this.prisma.restockRequest.findUnique({ where: { id: box.requestId } })
+      if (request && request.state === 'PACKING') {
+        await this.prisma.$transaction([
+          this.prisma.restockRequest.update({
+            where: { id: box.requestId },
+            data: { state: 'DISPATCHED' },
+          }),
+          this.prisma.auditLog.create({
+            data: {
+              entity: 'RestockRequest',
+              entityId: box.requestId,
+              field: 'state',
+              oldValue: 'PACKING',
+              newValue: 'DISPATCHED',
+              actorId: actor?.id ?? null,
+            },
+          }),
+        ])
+      }
+    }
+
+    return { boxId, dispatched: posted }
+  }
+
+  /**
+   * Doc §6.4 — arrival confirmation. Called when the market manager
+   * clicks "Received & close" on a dispatched request. For each of the
+   * request's boxes that were dispatched, writes the positive-at-
+   * destination INTAKE row with the SAME transferId the DISPATCH row
+   * used, so the two rows can be joined and the market's on-hand
+   * finally reflects the delivered stock. Also marks each box ARRIVED.
+   *
+   * Idempotent: the INTAKE row uses key `dispatch:${boxId}:${wvId}:to`.
+   * Re-receiving the same request is a no-op. This means a box that was
+   * dispatched under the OLD atomic-transfer code (which wrote both
+   * rows at dispatch time using the same keys) will be recognised here
+   * as already received -- no double-add.
+   */
+  async receiveForRequest(requestId: string, actor?: CurrentUserPayload): Promise<{ boxesReceived: number; linesPosted: number }> {
+    const boxes = await this.prisma.box.findMany({
+      where: { requestId, state: { in: ['DISPATCHED', 'ARRIVED'] } },
+      include: { lines: true },
+    })
+
+    let boxesReceived = 0
+    let linesPosted = 0
+    const now = new Date()
+
+    for (const box of boxes) {
+      // The transferId lives on the DISPATCH row already appended for this
+      // box. Fish one out to reuse it, so DISPATCH and INTAKE stay paired.
+      const existing = await this.prisma.ledgerEvent.findFirst({
+        where: { sourceRef: box.id, type: 'DISPATCH' },
+        select: { transferId: true },
+      })
+      const transferId = existing?.transferId ?? undefined
+
+      for (const line of box.lines) {
+        const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
+        const result = await this.ledger.append({
+          type: 'INTAKE',
+          locationId: box.destinationLocationId,
+          variationId: wv.variationId,
+          warehouseVariantId: wv.id,
+          quantity: line.quantity,
+          occurredAt: now,
+          source: 'UI',
+          sourceRef: box.id,
+          idempotencyKey: `${transferKeyPrefix('dispatch', box.id, wv.id)}:to`,
+          actorId: actor?.id,
+          transferId,
+        })
+        if (result.created) linesPosted++
+      }
+
+      if (box.state !== 'ARRIVED') {
+        await this.prisma.box.update({ where: { id: box.id }, data: { state: 'ARRIVED', arrivedAt: now } })
+      }
+      boxesReceived++
+    }
+
+    return { boxesReceived, linesPosted }
   }
 
   async getLabel(boxId: string): Promise<BoxLabel> {

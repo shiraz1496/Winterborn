@@ -29,6 +29,7 @@
     "cli:drain-inbox": "tsx src/cli/drain-inbox.ts",
     "cli:replay-season": "tsx src/cli/replay-season.ts",
     "cli:seed-users": "tsx src/cli/seed-users.ts",
+    "cli:seed-locations": "tsx src/cli/seed-locations.ts",
     "cli:seed-thresholds": "tsx src/cli/seed-thresholds.ts"
   },
   "dependencies": {

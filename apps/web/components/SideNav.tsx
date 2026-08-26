@@ -55,10 +55,20 @@ const ICONS = {
       <path d="M15 14c2.6.4 4.5 2.2 4.5 5" strokeLinecap="round" />
     </svg>
   ),
+  square: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="16" height="16" rx="3" />
+      <path d="M9 9h6v6H9z" />
+    </svg>
+  ),
 }
 
 const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
-const APP_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
+// Every non-SALES role sees Requests + Notifications. SALES is Square-
+// terminal focused; they only need read-only Dashboard visibility for
+// on-hand context.
+const REQUEST_VIEW_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
+const ALL_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER', 'SALES']
 
 interface Tab {
   href: string
@@ -68,12 +78,14 @@ interface Tab {
 }
 
 const TABS: Tab[] = [
-  { href: '/', label: 'Dashboard', icon: 'dashboard', roles: APP_ROLES },
-  { href: '/requests', label: 'Requests', icon: 'requests', roles: APP_ROLES },
+  { href: '/', label: 'Dashboard', icon: 'dashboard', roles: ALL_ROLES },
+  { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
-  { href: '/notifications', label: 'Notifications', icon: 'bell', roles: APP_ROLES },
+  { href: '/notifications', label: 'Notifications', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
 ]
 

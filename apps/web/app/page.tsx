@@ -12,6 +12,7 @@ import type {
   StockStatus,
   ThresholdDto,
   VariationSummary,
+  WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { classifyStock } from '@winterborn/shared'
 import { PageHeader } from '../components/PageHeader'
@@ -27,9 +28,11 @@ import {
   listRequests,
   listThresholds,
   listVariations,
+  listWarehouseVariants,
   lowStock,
   salesSince,
   stockByFamily,
+  stockByVariant,
 } from '../lib/api'
 
 function DashboardBody() {
@@ -43,10 +46,18 @@ function DashboardBody() {
   const [sales, setSales] = useState<SalesRow[]>([])
   const [queue, setQueue] = useState<DecisionQueueRow[]>([])
   const [locationId, setLocationId] = useState<string | null>(null)
+  const [warehouseStock, setWarehouseStock] = useState<StockLevel[]>([])
+  const [warehouseVariantStock, setWarehouseVariantStock] = useState<StockLevel[]>([])
+  const [warehouseVariantCatalog, setWarehouseVariantCatalog] = useState<WarehouseVariantSummary[]>([])
+  const [warehouseDrawerOpen, setWarehouseDrawerOpen] = useState(false)
+  const [warehouseOpenVariationId, setWarehouseOpenVariationId] = useState<string | null>(null)
+  const [marketDrawerOpen, setMarketDrawerOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   const isMarketManager = user?.role === 'MARKET_MANAGER'
+  const isOwner = user?.role === 'OWNER'
+  const isWarehouseManager = user?.role === 'WAREHOUSE_MANAGER'
 
   useEffect(() => {
     let cancelled = false
@@ -57,7 +68,7 @@ function DashboardBody() {
           ReturnType<typeof listVariations>,
           ReturnType<typeof listRequests>,
           ReturnType<typeof decisionQueue> | Promise<DecisionQueueRow[]>,
-        ] = [listLocations(), listVariations(), listRequests(), isMarketManager ? Promise.resolve([]) : decisionQueue()]
+        ] = [listLocations(), listVariations(), listRequests(), (isOwner || isWarehouseManager) ? decisionQueue() : Promise.resolve([])]
         const [locs, vars, reqs, dq] = await Promise.all(calls)
         if (cancelled) return
         setLocations(locs)
@@ -181,6 +192,101 @@ function DashboardBody() {
   const salesTotal = useMemo(() => sales.reduce((sum, s) => sum + s.unitsSold, 0), [sales])
 
   const canWarehouse = user?.role === 'OWNER' || user?.role === 'WAREHOUSE_MANAGER' || user?.role === 'WAREHOUSE_OPERATOR'
+  // Only MM (for their market) and OWNER file restocks. WM/WO fulfil,
+  // SALES is read-only — none of them see the New request shortcut.
+  const canRequest = user?.role === 'MARKET_MANAGER' || user?.role === 'OWNER'
+  // Decision queue is threshold-driven review work: OWNER + WM only.
+  // WO packs what's approved; MM sees their own market not the queue;
+  // SALES never reviews restocks.
+  const canReviewQueue = user?.role === 'OWNER' || user?.role === 'WAREHOUSE_MANAGER'
+  // Warehouse total card is the "how much do we have to ship" pulse.
+  // OWNER + WM only — WO sees warehouse work from the Pack screen, MM
+  // shouldn't be looking over the warehouse's shoulder.
+  const canSeeWarehouseTotal = canReviewQueue
+
+  const warehouse = useMemo(() => locations.find((l) => l.kind === 'WAREHOUSE'), [locations])
+
+  useEffect(() => {
+    if (!canSeeWarehouseTotal || !warehouse) return
+    let cancelled = false
+    // Three fetches so the drawer can show:
+    //   1. Family totals (stockByFamily) — the summary number.
+    //   2. Per-variant stock (stockByVariant) — the expanded breakdown.
+    //   3. The full warehouse-variant catalog (listWarehouseVariants) —
+    //      so variants with zero movement still appear as "0", instead
+    //      of being invisible until they've had a ledger event.
+    Promise.all([stockByFamily(warehouse.id), stockByVariant(warehouse.id), listWarehouseVariants()])
+      .then(([byFamily, byVariant, variantsCatalog]) => {
+        if (cancelled) return
+        setWarehouseStock(byFamily)
+        setWarehouseVariantStock(byVariant)
+        setWarehouseVariantCatalog(variantsCatalog)
+      })
+      .catch(() => {
+        // Non-fatal — the rest of the dashboard shouldn't break because
+        // the warehouse tile can't load. Leaves the card at 0/loading.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [canSeeWarehouseTotal, warehouse])
+
+  // On-hand per (variation, warehouse) — includes 0-stock items via
+  // the catalog, not just those with ledger movement. And per-family
+  // rows carry their variant breakdown so the drawer can expand each.
+  const warehouseRows = useMemo(() => {
+    const onHandByVariation = new Map(warehouseStock.map((s) => [s.variationId, s.onHand]))
+    const onHandByVariant = new Map(
+      warehouseVariantStock
+        .filter((s) => s.warehouseVariantId)
+        .map((s) => [s.warehouseVariantId as string, s.onHand]),
+    )
+    const variantsByVariation = new Map<string, WarehouseVariantSummary[]>()
+    for (const wv of warehouseVariantCatalog) {
+      const list = variantsByVariation.get(wv.variationId) ?? []
+      list.push(wv)
+      variantsByVariation.set(wv.variationId, list)
+    }
+    for (const [, list] of variantsByVariation) {
+      list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
+    }
+    return variations
+      .map((meta) => ({
+        variationId: meta.id,
+        meta,
+        onHand: onHandByVariation.get(meta.id) ?? 0,
+        variants: (variantsByVariation.get(meta.id) ?? []).map((wv) => ({
+          ...wv,
+          onHand: onHandByVariant.get(wv.id) ?? 0,
+        })),
+      }))
+      // Highest stock first, then alphabetical for the long 0 tail.
+      .sort((a, b) => {
+        if (b.onHand !== a.onHand) return b.onHand - a.onHand
+        return a.meta.itemGroupName.localeCompare(b.meta.itemGroupName)
+      })
+  }, [variations, warehouseStock, warehouseVariantStock, warehouseVariantCatalog])
+  const warehouseTotal = useMemo(() => warehouseRows.reduce((s, r) => s + r.onHand, 0), [warehouseRows])
+  const warehouseDistinctItems = warehouseRows.length
+
+  // Market drawer rows: every catalog family with its on-hand at the
+  // current market. Zero-stock items are kept in the tail so an MM can
+  // see what they COULD request. Sorted highest-first, then alphabetical.
+  const marketDrawerRows = useMemo(() => {
+    const onHandByVariation = new Map(stockRows.map((r) => [r.variationId, r.onHand]))
+    return variations
+      .map((meta) => ({
+        variationId: meta.id,
+        meta,
+        onHand: onHandByVariation.get(meta.id) ?? 0,
+      }))
+      .sort((a, b) => {
+        if (b.onHand !== a.onHand) return b.onHand - a.onHand
+        return a.meta.itemGroupName.localeCompare(b.meta.itemGroupName)
+      })
+  }, [variations, stockRows])
+  const marketTotal = useMemo(() => marketDrawerRows.reduce((s, r) => s + r.onHand, 0), [marketDrawerRows])
+  const marketDistinctItems = marketDrawerRows.length
 
   return (
     <div>
@@ -220,14 +326,16 @@ function DashboardBody() {
       {error && <p className="error-banner">{error}</p>}
 
       <div className="quick-actions">
-        <Link href="/requests/new" className="quick-action">
-          <svg className="quick-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="4" y="3" width="12" height="18" rx="2" />
-            <path d="M8 8h8M8 12h5M15 15h4M17 13v4" strokeLinecap="round" />
-          </svg>
-          <div className="quick-action-label">New request</div>
-          <div className="quick-action-desc">Ask the warehouse to send stock to a market.</div>
-        </Link>
+        {canRequest && (
+          <Link href="/requests/new" className="quick-action">
+            <svg className="quick-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="4" y="3" width="12" height="18" rx="2" />
+              <path d="M8 8h8M8 12h5M15 15h4M17 13v4" strokeLinecap="round" />
+            </svg>
+            <div className="quick-action-label">New request</div>
+            <div className="quick-action-desc">Ask the warehouse to send stock to a market.</div>
+          </Link>
+        )}
         {canWarehouse && (
           <>
             <Link href="/intake" className="quick-action">
@@ -248,6 +356,67 @@ function DashboardBody() {
               <div className="quick-action-desc">Fulfil an open request into physical boxes.</div>
             </Link>
           </>
+        )}
+        {canSeeWarehouseTotal && (
+          <button
+            type="button"
+            onClick={() => setWarehouseDrawerOpen(true)}
+            className="quick-action"
+            style={{
+              textAlign: 'left',
+              cursor: 'pointer',
+              border: '1px solid var(--signal)',
+              background: 'var(--surface-sunken)',
+            }}
+          >
+            <svg className="quick-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 21V9l9-6 9 6v12" strokeLinejoin="round" />
+              <path d="M9 21v-8h6v8" />
+              <path d="M3 21h18" strokeLinecap="round" />
+            </svg>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+              <div className="quick-action-label" style={{ fontSize: '1.4rem' }}>
+                {warehouseTotal.toLocaleString()}
+              </div>
+              <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                units in warehouse
+              </div>
+            </div>
+            <div className="quick-action-desc">
+              {warehouseDistinctItems} product{warehouseDistinctItems === 1 ? '' : 's'} in catalog · tap to see the
+              per-variant breakdown
+            </div>
+          </button>
+        )}
+        {isMarketManager && currentMarket && (
+          <button
+            type="button"
+            onClick={() => setMarketDrawerOpen(true)}
+            className="quick-action"
+            style={{
+              textAlign: 'left',
+              cursor: 'pointer',
+              border: '1px solid var(--signal)',
+              background: 'var(--surface-sunken)',
+            }}
+          >
+            <svg className="quick-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M4 7h16v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" strokeLinejoin="round" />
+              <path d="M4 7l2-4h12l2 4" strokeLinejoin="round" />
+              <path d="M9 11a3 3 0 0 0 6 0" />
+            </svg>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+              <div className="quick-action-label" style={{ fontSize: '1.4rem' }}>
+                {marketTotal.toLocaleString()}
+              </div>
+              <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                units at your market
+              </div>
+            </div>
+            <div className="quick-action-desc">
+              {marketDistinctItems} product{marketDistinctItems === 1 ? '' : 's'} on hand · tap to see the breakdown
+            </div>
+          </button>
         )}
       </div>
 
@@ -306,7 +475,7 @@ function DashboardBody() {
         </div>
 
         <div>
-          {!isMarketManager && (
+          {canReviewQueue && (
             <>
               <div className="section-heading">
                 <h2>Decision queue</h2>
@@ -403,6 +572,271 @@ function DashboardBody() {
           )}
         </div>
       </div>
+
+      {warehouseDrawerOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Warehouse stock breakdown"
+          onClick={() => setWarehouseDrawerOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex',
+            justifyContent: 'flex-end',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(480px, 100%)',
+              height: '100%',
+              background: 'var(--surface)',
+              borderLeft: '1px solid var(--line-strong)',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '-4px 0 16px rgba(0,0,0,0.15)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                justifyContent: 'space-between',
+                padding: '18px 20px',
+                borderBottom: '1px solid var(--line)',
+                gap: 12,
+              }}
+            >
+              <div>
+                <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                  {warehouse?.name ?? 'Warehouse'}
+                </div>
+                <h2 style={{ margin: '4px 0 0', fontSize: '1.15rem' }}>
+                  {warehouseTotal.toLocaleString()} units · {warehouseDistinctItems} product
+                  {warehouseDistinctItems === 1 ? '' : 's'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWarehouseDrawerOpen(false)}
+                aria-label="Close"
+                className="btn btn-ghost"
+                style={{ minHeight: 32, padding: '4px 10px' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ overflowY: 'auto', padding: '12px 20px 24px', flex: 1 }}>
+              {warehouseRows.length === 0 ? (
+                <p style={{ color: 'var(--text-dim)', margin: 0 }}>
+                  Catalog is empty. Import Sortly, then stock will appear here.
+                </p>
+              ) : (
+                <div className="stack" style={{ gap: 6 }}>
+                  {warehouseRows.map((row) => {
+                    const open = warehouseOpenVariationId === row.variationId
+                    const hasVariants = row.variants.length > 0
+                    return (
+                      <div
+                        key={row.variationId}
+                        style={{
+                          border: '1px solid var(--line)',
+                          borderRadius: 'var(--radius-md)',
+                          background: 'var(--surface)',
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            hasVariants
+                              ? setWarehouseOpenVariationId(open ? null : row.variationId)
+                              : undefined
+                          }
+                          style={{
+                            all: 'unset',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            width: '100%',
+                            padding: '10px 12px',
+                            cursor: hasVariants ? 'pointer' : 'default',
+                            boxSizing: 'border-box',
+                          }}
+                          aria-expanded={hasVariants ? open : undefined}
+                        >
+                          <Swatch familyName={row.meta.colourFamilyName} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="list-row-title">{row.meta.itemGroupName}</div>
+                            <div className="list-row-meta">
+                              {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
+                              {hasVariants && ` · ${row.variants.length} variant${row.variants.length === 1 ? '' : 's'}`}
+                            </div>
+                          </div>
+                          <div
+                            className="mono"
+                            style={{
+                              fontWeight: 700,
+                              fontSize: '1.05rem',
+                              color: row.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                            }}
+                          >
+                            {row.onHand.toLocaleString()}
+                          </div>
+                          {hasVariants && (
+                            <span
+                              aria-hidden="true"
+                              style={{ color: 'var(--text-faint)', fontSize: '0.8rem', minWidth: 12, textAlign: 'right' }}
+                            >
+                              {open ? '▴' : '▾'}
+                            </span>
+                          )}
+                        </button>
+
+                        {open && hasVariants && (
+                          <div
+                            style={{
+                              borderTop: '1px solid var(--line)',
+                              padding: '6px 12px 10px 42px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                            }}
+                          >
+                            {row.variants.map((v) => (
+                              <div
+                                key={v.id}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 8,
+                                  padding: '4px 0',
+                                }}
+                              >
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: '0.85rem' }}>{v.colourVariantName}</div>
+                                  <div className="mono" style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
+                                    {v.warehouseSku}
+                                  </div>
+                                </div>
+                                <div
+                                  className="mono"
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: '0.9rem',
+                                    color: v.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                                  }}
+                                >
+                                  {v.onHand.toLocaleString()}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {marketDrawerOpen && currentMarket && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Market stock breakdown"
+          onClick={() => setMarketDrawerOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex',
+            justifyContent: 'flex-end',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(480px, 100%)',
+              height: '100%',
+              background: 'var(--surface)',
+              borderLeft: '1px solid var(--line-strong)',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '-4px 0 16px rgba(0,0,0,0.15)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                justifyContent: 'space-between',
+                padding: '18px 20px',
+                borderBottom: '1px solid var(--line)',
+                gap: 12,
+              }}
+            >
+              <div>
+                <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                  {currentMarket.name}
+                </div>
+                <h2 style={{ margin: '4px 0 0', fontSize: '1.15rem' }}>
+                  {marketTotal.toLocaleString()} units · {marketDistinctItems} product
+                  {marketDistinctItems === 1 ? '' : 's'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMarketDrawerOpen(false)}
+                aria-label="Close"
+                className="btn btn-ghost"
+                style={{ minHeight: 32, padding: '4px 10px' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ overflowY: 'auto', padding: '12px 20px 24px', flex: 1 }}>
+              {marketDrawerRows.length === 0 ? (
+                <p style={{ color: 'var(--text-dim)', margin: 0 }}>
+                  Catalog is empty. Ask the warehouse to import it first.
+                </p>
+              ) : (
+                <div className="list">
+                  {marketDrawerRows.map((row) => (
+                    <div key={row.variationId} className="list-row">
+                      <Swatch familyName={row.meta.colourFamilyName} />
+                      <div className="list-row-body">
+                        <div className="list-row-title">{row.meta.itemGroupName}</div>
+                        <div className="list-row-meta">
+                          {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
+                        </div>
+                      </div>
+                      <div
+                        className="mono"
+                        style={{
+                          fontWeight: 700,
+                          fontSize: '1.05rem',
+                          color: row.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                        }}
+                      >
+                        {row.onHand.toLocaleString()}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

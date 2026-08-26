@@ -9,9 +9,14 @@ import { z } from 'zod'
 /// server so a busy season never blows up the client.
 export const notificationKindSchema = z.enum([
   'REQUEST_DRAFTED',
+  'REQUEST_SUBMITTED',
+  'REQUEST_PACKING',
+  'REQUEST_DISPATCHED',
+  'REQUEST_CLOSED',
   'REQUEST_ADVANCED',
   'INTAKE_RECORDED',
   'DISPATCH_RECORDED',
+  'SHIPMENT_NOT_RECEIVED',
 ])
 export type NotificationKind = z.infer<typeof notificationKindSchema>
 
@@ -41,7 +46,12 @@ export type NotificationsList = z.infer<typeof notificationsListSchema>
 
 export const NOTIFICATION_KIND_LABEL: Record<NotificationKind, string> = {
   REQUEST_DRAFTED: 'Auto-drafted',
-  REQUEST_ADVANCED: 'Request advanced',
+  REQUEST_SUBMITTED: 'Submitted',
+  REQUEST_PACKING: 'Packing',
+  REQUEST_DISPATCHED: 'Dispatched',
+  REQUEST_CLOSED: 'Closed',
+  REQUEST_ADVANCED: 'Request update',
   INTAKE_RECORDED: 'Intake',
   DISPATCH_RECORDED: 'Dispatch',
+  SHIPMENT_NOT_RECEIVED: 'Not received',
 }

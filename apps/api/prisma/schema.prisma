@@ -89,14 +89,13 @@ model SizeOption {
   @@unique([categoryId, name])
 }
 
-/// Sellable unit: ItemGroup x ColourFamily x Size. Carries the till SKU.
+/// Sellable unit: ItemGroup x ColourFamily x Size.
 model Variation {
   id                String  @id @default(cuid())
   itemGroupId       String
   colourFamilyId    String
   sizeOptionId      String
   squareVariationId String? @unique
-  tillSku           String  @unique
   isSellable        Boolean @default(true)
 
   itemGroup         ItemGroup            @relation(fields: [itemGroupId], references: [id])
@@ -123,6 +122,13 @@ model WarehouseVariant {
   warehouseSku    String  @unique
   unitCostCents   Int?
   isSaleItem      Boolean @default(true)
+
+  /// Every Sortly photo for this row, in file order (Photo1 first). Sortly
+  /// URLs are signed tokens that lapse with the subscription -- see
+  /// cli:archive-photos for the local copy that survives that. Kept as an
+  /// array rather than photo1..photoN columns because Sortly allows up to
+  /// eight and only a handful of rows use more than the first.
+  photoUrls    String[] @default([])
 
   itemGroup     ItemGroup             @relation(fields: [itemGroupId], references: [id])
   colourVariant ColourVariant         @relation(fields: [colourVariantId], references: [id])

@@ -56,14 +56,15 @@ interface Tab {
 }
 
 const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
-const APP_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
+const REQUEST_VIEW_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
+const ALL_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER', 'SALES']
 
 const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
-  { href: '/', label: 'Home', icon: 'dashboard', roles: APP_ROLES },
-  { href: '/requests', label: 'Requests', icon: 'requests', roles: APP_ROLES },
+  { href: '/', label: 'Home', icon: 'dashboard', roles: ALL_ROLES },
+  { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
-  { href: '/notifications', label: 'Alerts', icon: 'bell', roles: APP_ROLES },
+  { href: '/notifications', label: 'Alerts', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
 ]
 

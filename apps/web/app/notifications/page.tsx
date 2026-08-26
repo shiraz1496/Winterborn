@@ -10,15 +10,24 @@ import { ApiError, listNotifications } from '../../lib/api'
 const KIND_FILTERS: (NotificationKind | 'ALL')[] = [
   'ALL',
   'REQUEST_DRAFTED',
-  'REQUEST_ADVANCED',
+  'REQUEST_SUBMITTED',
+  'REQUEST_PACKING',
+  'REQUEST_DISPATCHED',
+  'REQUEST_CLOSED',
+  'SHIPMENT_NOT_RECEIVED',
   'INTAKE_RECORDED',
   'DISPATCH_RECORDED',
 ]
 
 function chipClassFor(kind: NotificationKind): string {
+  if (kind === 'SHIPMENT_NOT_RECEIVED') return 'chip chip-rust'
   if (kind === 'REQUEST_DRAFTED') return 'chip chip-signal'
-  if (kind === 'REQUEST_ADVANCED') return 'chip chip-pine'
+  if (kind === 'REQUEST_SUBMITTED') return 'chip chip-signal'
+  if (kind === 'REQUEST_PACKING') return 'chip chip-signal'
+  if (kind === 'REQUEST_DISPATCHED') return 'chip chip-pine'
+  if (kind === 'REQUEST_CLOSED') return 'chip chip-pine'
   if (kind === 'DISPATCH_RECORDED') return 'chip chip-pine'
+  if (kind === 'INTAKE_RECORDED') return 'chip chip-pine'
   return 'chip'
 }
 
@@ -116,9 +125,11 @@ function NotificationsBody() {
               <>
                 <div className="list-row-body">
                   <div className="list-row-title">{n.title}</div>
-                  <div className="list-row-meta">
+                  <div className="list-row-meta" style={{ marginTop: 2 }}>
+                    {n.body}
+                  </div>
+                  <div className="list-row-meta" style={{ marginTop: 4, fontSize: '0.72rem', opacity: 0.7 }}>
                     {timeAgo(n.at)}
-                    {n.locationName ? ` · ${n.locationName}` : ''} · {n.body}
                   </div>
                 </div>
                 <span className={chipClassFor(n.kind)}>{NOTIFICATION_KIND_LABEL[n.kind].toLowerCase()}</span>

@@ -1,7 +1,9 @@
 import { z } from 'zod'
 import {
+  adminLocationSchema,
   adminUserSchema,
   adminUserWithPasswordSchema,
+  syncSquareLocationsResultSchema,
   assignColourFamilyInputSchema,
   boxLabelSchema,
   boxLineSchema,
@@ -34,7 +36,9 @@ import {
   restockRequestBaseSchema,
   restockRequestSchema,
   salesRowSchema,
+  setSquareIdInputSchema,
   sizeOptionSchema,
+  squareMappingRowSchema,
   stockLevelSchema,
   thresholdSchema,
   transitionRequestInputSchema,
@@ -215,6 +219,32 @@ export function assignColourFamily(id: string, input: AssignColourFamilyInput) {
   return request('PATCH', `/catalog/colour-variants/${id}`, colourVariantSchema, input)
 }
 
+// ---- square mapping (owner + warehouse manager only) ---------------------
+
+export function listSquareMapping() {
+  return request('GET', '/catalog/square-mapping', z.array(squareMappingRowSchema))
+}
+
+export function setItemGroupSquareId(itemGroupId: string, squareId: string | null) {
+  const body = setSquareIdInputSchema.parse({ squareId })
+  return request(
+    'PATCH',
+    `/catalog/item-groups/${itemGroupId}/square-id`,
+    z.object({ id: z.string(), name: z.string(), squareItemId: z.string().nullable() }),
+    body,
+  )
+}
+
+export function setVariationSquareId(variationId: string, squareId: string | null) {
+  const body = setSquareIdInputSchema.parse({ squareId })
+  return request(
+    'PATCH',
+    `/catalog/variations/${variationId}/square-id`,
+    z.object({ id: z.string(), squareVariationId: z.string().nullable() }),
+    body,
+  )
+}
+
 // ---- requests ---------------------------------------------------------------
 
 export function listRequests() {
@@ -247,6 +277,10 @@ export function transitionRequest(requestId: string, state: string) {
 
 export function getRequestAnalysis(requestId: string) {
   return request('GET', `/requests/${requestId}/analysis`, z.array(requestLineAnalysisSchema))
+}
+
+export function reportRequestMissing(requestId: string) {
+  return request('POST', `/requests/${requestId}/report-missing`, z.object({ ok: z.literal(true) }))
 }
 
 // ---- boxes ------------------------------------------------------------------
@@ -320,4 +354,14 @@ export function createAdminUser(input: CreateAdminUserInput) {
 
 export function updateAdminUser(id: string, input: UpdateAdminUserInput) {
   return request('PATCH', `/admin/users/${id}`, adminUserWithPasswordSchema, input)
+}
+
+// ---- admin locations (owner + warehouse manager) ----------------------------
+
+export function listAdminLocations() {
+  return request('GET', '/admin/locations', z.array(adminLocationSchema))
+}
+
+export function syncSquareLocations() {
+  return request('POST', '/admin/locations/sync', syncSquareLocationsResultSchema)
 }

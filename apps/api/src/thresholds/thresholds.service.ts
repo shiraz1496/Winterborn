@@ -122,12 +122,27 @@ export class ThresholdsService {
    * one request per line. A dozen variations dropping below threshold on
    * a Sunday produces one request the operator reviews once, not a dozen
    * cluttering the queue.
+   *
+   * Auto-drafts are now pre-populated at variant level based on WAREHOUSE
+   * supply: the total `qty` is split proportionally across the warehouse
+   * variants that currently have stock, so the reviewer opens the request
+   * and sees "3 Navy, 2 Sky Blue" rather than a family-level "5 Blue"
+   * they still have to break down. This is what we can honestly infer --
+   * Square sales are family-level, so we cannot know which specific
+   * variant is depleting at the market. Using warehouse availability
+   * instead ensures every suggested variant is actually shippable.
    */
   private async autoDraft(
     variationId: string,
     locationId: string,
     qty: number,
   ): Promise<{ created: boolean; requestId: string; lineId: string }> {
+    // Figure out the variant split OUTSIDE the transaction — reads the
+    // ledger for warehouse on-hand per variant, then splits `qty`
+    // proportionally. If no variant has stock, falls back to a single
+    // family-level line so the request still surfaces the need.
+    const split = await this.suggestVariantSplit(variationId, qty)
+
     return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const open = await tx.restockRequest.findFirst({
         where: { locationId, createdFrom: 'THRESHOLD', state: { in: ['DRAFT', 'OPEN'] } },
@@ -140,25 +155,43 @@ export class ThresholdsService {
         if (existingLine) {
           return { created: false, requestId: open.id, lineId: existingLine.id }
         }
-        const line = await tx.restockRequestLine.create({
-          data: { requestId: open.id, variationId, qtyRequested: qty },
-        })
-        await this.audit.record(tx, {
-          entity: 'RestockRequestLine',
-          entityId: line.id,
-          field: 'qtyRequested',
-          oldValue: null,
-          newValue: String(qty),
-          actorId: null,
-        })
-        return { created: true, requestId: open.id, lineId: line.id }
+        // Add one line per suggested variant (or a single family-level
+        // line if we couldn't split). Return the first inserted line id
+        // for the caller's dedup hint.
+        const lineIds: string[] = []
+        for (const part of split) {
+          const line = await tx.restockRequestLine.create({
+            data: {
+              requestId: open.id,
+              variationId,
+              warehouseVariantId: part.warehouseVariantId,
+              qtyRequested: part.qty,
+            },
+          })
+          lineIds.push(line.id)
+          await this.audit.record(tx, {
+            entity: 'RestockRequestLine',
+            entityId: line.id,
+            field: 'qtyRequested',
+            oldValue: null,
+            newValue: String(part.qty),
+            actorId: null,
+          })
+        }
+        return { created: true, requestId: open.id, lineId: lineIds[0]! }
       }
 
       const request = await tx.restockRequest.create({
         data: {
           locationId,
           createdFrom: 'THRESHOLD',
-          lines: { create: [{ variationId, qtyRequested: qty }] },
+          lines: {
+            create: split.map((part) => ({
+              variationId,
+              warehouseVariantId: part.warehouseVariantId,
+              qtyRequested: part.qty,
+            })),
+          },
         },
         include: { lines: true },
       })
@@ -172,5 +205,66 @@ export class ThresholdsService {
       })
       return { created: true, requestId: request.id, lineId: request.lines[0]!.id }
     })
+  }
+
+  /**
+   * Split a family-level qty across its warehouse variants, weighted by
+   * current warehouse on-hand. Any variant with 0 or negative on-hand is
+   * skipped (nothing to ship). If no variant has stock, returns a single
+   * family-level entry so the review still surfaces the need.
+   */
+  private async suggestVariantSplit(
+    variationId: string,
+    totalQty: number,
+  ): Promise<Array<{ warehouseVariantId: string | null; qty: number }>> {
+    const warehouse = await this.prisma.location.findFirst({ where: { kind: 'WAREHOUSE' } })
+    const wvs = await this.prisma.warehouseVariant.findMany({ where: { variationId } })
+    if (!warehouse || wvs.length === 0) {
+      return [{ warehouseVariantId: null, qty: totalQty }]
+    }
+
+    // Per-variant warehouse on-hand.
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['warehouseVariantId'],
+      where: {
+        locationId: warehouse.id,
+        warehouseVariantId: { in: wvs.map((wv) => wv.id) },
+      },
+      _sum: { quantity: true },
+    })
+    const onHandById = new Map<string, number>()
+    for (const r of rows) {
+      if (r.warehouseVariantId) onHandById.set(r.warehouseVariantId, r._sum.quantity ?? 0)
+    }
+
+    const supplied = wvs
+      .map((wv) => ({ wv, onHand: Math.max(0, onHandById.get(wv.id) ?? 0) }))
+      .filter((x) => x.onHand > 0)
+      .sort((a, b) => b.onHand - a.onHand)
+
+    if (supplied.length === 0) {
+      return [{ warehouseVariantId: null, qty: totalQty }]
+    }
+
+    const totalAvailable = supplied.reduce((s, x) => s + x.onHand, 0)
+    // Never suggest more than we have.
+    const askable = Math.min(totalQty, totalAvailable)
+
+    // Proportional split, floor each, distribute the rounding remainder
+    // to the largest-stock variants first.
+    const raw = supplied.map((x) => ({ wv: x.wv, share: (askable * x.onHand) / totalAvailable }))
+    const floored = raw.map((x) => ({ wv: x.wv, qty: Math.floor(x.share), frac: x.share - Math.floor(x.share) }))
+    let remainder = askable - floored.reduce((s, x) => s + x.qty, 0)
+    // Distribute remainder to the highest-fractional-part rows.
+    floored.sort((a, b) => b.frac - a.frac)
+    for (const x of floored) {
+      if (remainder <= 0) break
+      x.qty += 1
+      remainder -= 1
+    }
+
+    return floored
+      .filter((x) => x.qty > 0)
+      .map((x) => ({ warehouseVariantId: x.wv.id, qty: x.qty }))
   }
 }

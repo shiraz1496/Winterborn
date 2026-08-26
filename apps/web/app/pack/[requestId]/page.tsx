@@ -46,6 +46,7 @@ function PackBody() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [hasPrefilled, setHasPrefilled] = useState<string | null>(null)
 
   async function load() {
     try {
@@ -135,6 +136,83 @@ function PackBody() {
     })
   }
 
+  /// Direct-set the draft quantity for a variant. Used by the editable
+  /// input on each row so the packer can type "50" instead of clicking
+  /// +50 times. Accepts any integer >= 0; 0 removes the entry.
+  function setDraftQty(variant: WarehouseVariantSummary, value: number) {
+    const clamped = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+    setDraft((prev) => {
+      const next = new Map(prev)
+      if (clamped <= 0) {
+        next.delete(variant.id)
+      } else {
+        next.set(variant.id, {
+          warehouseVariantId: variant.id,
+          variationId: variant.variationId,
+          quantity: clamped,
+          meta: variant,
+        })
+      }
+      return next
+    })
+  }
+
+  /// Once the request + variants + already-packed boxes are all loaded,
+  /// pre-fill the draft with whatever the market manager requested per
+  /// variant (minus what's already been packed in prior boxes). Runs
+  /// exactly once per request id so a manual edit is not clobbered by
+  /// a later boxes-reload. Family-level lines (no warehouseVariantId)
+  /// are left alone -- the packer still decides which specific variant
+  /// to send for those.
+  useEffect(() => {
+    if (!request) return
+    if (hasPrefilled === request.id) return
+    // Wait until warehouseVariant metadata is loaded for every line.
+    const allVariantsLoaded = request.lines.every((l) => variantsByLine[l.id])
+    if (!allVariantsLoaded) return
+
+    // Sum already-packed per warehouseVariantId across existing boxes.
+    const packedPerVariant = new Map<string, number>()
+    for (const box of boxes) {
+      for (const line of box.lines) {
+        packedPerVariant.set(
+          line.warehouseVariantId,
+          (packedPerVariant.get(line.warehouseVariantId) ?? 0) + line.quantity,
+        )
+      }
+    }
+
+    // Sum requested qty per variant across lines (guards against the
+    // theoretical case of two lines pointing at the same warehouseVariantId).
+    const requestedPerVariant = new Map<string, { line: (typeof request.lines)[number]; qty: number }>()
+    for (const line of request.lines) {
+      if (!line.warehouseVariantId) continue // family-level; skip
+      const existing = requestedPerVariant.get(line.warehouseVariantId)
+      requestedPerVariant.set(line.warehouseVariantId, {
+        line,
+        qty: (existing?.qty ?? 0) + line.qtyRequested,
+      })
+    }
+
+    const seeded = new Map<string, DraftEntry>()
+    for (const [wvId, { line, qty }] of requestedPerVariant) {
+      const meta = variantMeta.get(wvId)
+      if (!meta) continue
+      const alreadyPacked = packedPerVariant.get(wvId) ?? 0
+      const remaining = qty - alreadyPacked
+      if (remaining <= 0) continue
+      seeded.set(wvId, {
+        warehouseVariantId: wvId,
+        variationId: line.variationId,
+        quantity: remaining,
+        meta,
+      })
+    }
+
+    if (seeded.size > 0) setDraft(seeded)
+    setHasPrefilled(request.id)
+  }, [request, variantsByLine, variantMeta, boxes, hasPrefilled])
+
   async function submitBox() {
     if (!request || draft.size === 0) return
     setBusy(true)
@@ -183,9 +261,26 @@ function PackBody() {
       setBoxes(await listBoxes({ requestId: request.id }))
       toast.success('Box dispatched — ledger updated')
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
-      setError(msg)
-      toast.error(msg)
+      // Client-side error can be a dropped connection while the server
+      // still succeeded — refetch and only show the error if the box
+      // is genuinely still in PACKING. This turns a benign transport
+      // hiccup into a silent success instead of a scary banner.
+      try {
+        const fresh = await listBoxes({ requestId: request.id })
+        setBoxes(fresh)
+        const box = fresh.find((b) => b.id === boxId)
+        if (box && box.state !== 'PACKING') {
+          toast.success('Box dispatched — ledger updated')
+        } else {
+          const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
+          setError(msg)
+          toast.error(msg)
+        }
+      } catch {
+        const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
+        setError(msg)
+        toast.error(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -236,66 +331,178 @@ function PackBody() {
       <div className="section-heading">
         <h2>Resolve to variants</h2>
       </div>
-      <div className="stack" style={{ marginBottom: 24 }}>
-        {request.lines.map((line) => {
-          const variants = variantsByLine[line.id] ?? []
-          const remaining = remainingFor(line.variationId, line.qtyRequested)
-          const familyMeta = variationById.get(line.variationId)
-          const open = openLineId === line.id
-          return (
-            <div key={line.id} className="card">
-              <button
-                onClick={() => setOpenLineId(open ? null : line.id)}
-                style={{ all: 'unset', display: 'flex', alignItems: 'center', gap: 12, width: '100%', cursor: 'pointer' }}
-              >
-                <Swatch familyName={familyMeta?.colourFamilyName} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="list-row-title">{familyMeta?.itemGroupName ?? line.variationId}</div>
-                  <div className="list-row-meta">
-                    {familyMeta?.colourFamilyName} · {familyMeta?.sizeOptionName}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div className="mono" style={{ fontWeight: 700 }}>
-                    {line.qtyRequested - remaining} / {line.qtyRequested}
-                  </div>
-                  <span className={`chip ${remaining <= 0 ? 'chip-pine' : 'chip-rust'}`}>
-                    {remaining <= 0 ? 'resolved' : `${remaining} left`}
-                  </span>
-                </div>
-              </button>
+      <p className="section-desc">
+        One card per product family. If the market picked specific variants, only those show up with the requested
+        quantity pre-filled. Family-level lines expand to show every warehouse variant so you can decide the split.
+      </p>
+      {(() => {
+        // Group request lines by family (variationId). Each family may
+        // have multiple lines: some variant-level (each with its own
+        // warehouseVariantId + qtyRequested) and/or one family-level
+        // (no warehouseVariantId). Sum per-variant target quantities
+        // across lines so a re-request of the same variant coalesces
+        // into one row.
+        interface FamilyGroup {
+          variationId: string
+          lines: typeof request.lines
+          familyTotalRequested: number
+          variantTargets: Map<string, number>
+          hasFamilyLevelLine: boolean
+        }
+        const groups = new Map<string, FamilyGroup>()
+        for (const line of request.lines) {
+          const g = groups.get(line.variationId) ?? {
+            variationId: line.variationId,
+            lines: [],
+            familyTotalRequested: 0,
+            variantTargets: new Map(),
+            hasFamilyLevelLine: false,
+          }
+          g.lines.push(line)
+          g.familyTotalRequested += line.qtyRequested
+          if (line.warehouseVariantId) {
+            g.variantTargets.set(
+              line.warehouseVariantId,
+              (g.variantTargets.get(line.warehouseVariantId) ?? 0) + line.qtyRequested,
+            )
+          } else {
+            g.hasFamilyLevelLine = true
+          }
+          groups.set(line.variationId, g)
+        }
 
-              {open && (
-                <div className="list" style={{ marginTop: 14 }}>
-                  {variants.map((v) => (
-                    <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)' }}>
-                      <Swatch familyName={v.colourVariantName} />
-                      <div className="list-row-body">
-                        <div className="list-row-title">{v.colourVariantName}</div>
-                        <div className="list-row-meta mono">{v.warehouseSku}</div>
-                      </div>
-                      <div className="stepper">
-                        <button
-                          className="stepper-btn"
-                          onClick={() => adjustDraft(v, -1)}
-                          disabled={!draft.get(v.id)}
-                          aria-label="Decrease"
-                        >
-                          −
-                        </button>
-                        <span className="stepper-value">{draft.get(v.id)?.quantity ?? 0}</span>
-                        <button className="stepper-btn" onClick={() => adjustDraft(v, 1)} aria-label="Increase">
-                          +
-                        </button>
+        // Merge per-line warehouse-variant lists into one per family.
+        function variantsForFamily(g: FamilyGroup) {
+          const seen = new Map<string, WarehouseVariantSummary>()
+          for (const line of g.lines) {
+            for (const v of variantsByLine[line.id] ?? []) {
+              seen.set(v.id, v)
+            }
+          }
+          return [...seen.values()]
+        }
+
+        // Packed-so-far per variant across every existing box.
+        function packedForVariant(wvId: string): number {
+          let n = 0
+          for (const box of boxes) {
+            for (const line of box.lines) {
+              if (line.warehouseVariantId === wvId) n += line.quantity
+            }
+          }
+          return n
+        }
+
+        return (
+          <div className="stack" style={{ marginBottom: 24 }}>
+            {[...groups.values()].map((g) => {
+              const familyMeta = variationById.get(g.variationId)
+              const familyVariants = variantsForFamily(g)
+              // Variants to show in the expanded body:
+              //   - if any variant-level lines exist, only those variants
+              //   - PLUS all variants (for split) if there's a family-level line too
+              const requestedVariantIds = new Set(g.variantTargets.keys())
+              const shownVariants = g.hasFamilyLevelLine
+                ? familyVariants
+                : familyVariants.filter((v) => requestedVariantIds.has(v.id))
+
+              // Family-level packed = sum of every variant that belongs to it.
+              const familyPacked = familyVariants.reduce((s, v) => s + packedForVariant(v.id), 0)
+              const familyRemaining = g.familyTotalRequested - familyPacked
+              const open = openLineId === g.variationId
+
+              return (
+                <div key={g.variationId} className="card">
+                  <button
+                    onClick={() => setOpenLineId(open ? null : g.variationId)}
+                    style={{ all: 'unset', display: 'flex', alignItems: 'center', gap: 12, width: '100%', cursor: 'pointer' }}
+                  >
+                    <Swatch familyName={familyMeta?.colourFamilyName} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="list-row-title">{familyMeta?.itemGroupName ?? g.variationId}</div>
+                      <div className="list-row-meta">
+                        {familyMeta?.colourFamilyName} · {familyMeta?.sizeOptionName}
+                        {' · '}
+                        {g.lines.length} line{g.lines.length === 1 ? '' : 's'}
                       </div>
                     </div>
-                  ))}
+                    <div style={{ textAlign: 'right' }}>
+                      <div className="eyebrow" style={{ color: 'var(--text-faint)', marginBottom: 2 }}>
+                        packed / requested
+                      </div>
+                      <div className="mono" style={{ fontWeight: 700 }}>
+                        {familyPacked} / {g.familyTotalRequested}
+                      </div>
+                      <span className={`chip ${familyRemaining <= 0 ? 'chip-pine' : 'chip-rust'}`}>
+                        {familyRemaining <= 0 ? 'resolved' : `${familyRemaining} left`}
+                      </span>
+                    </div>
+                  </button>
+
+                  {open && (
+                    <div className="list" style={{ marginTop: 14 }}>
+                      {shownVariants.map((v) => {
+                        const target = g.variantTargets.get(v.id) ?? null // null = family-level line, no target
+                        const packedHere = packedForVariant(v.id)
+                        return (
+                          <div
+                            key={v.id}
+                            className="list-row"
+                            style={{ border: '1px solid var(--line)', alignItems: 'center' }}
+                          >
+                            <Swatch familyName={v.colourVariantName} />
+                            <div className="list-row-body">
+                              <div className="list-row-title">
+                                {v.colourVariantName}
+                                {target != null && (
+                                  <span className="chip chip-signal" style={{ marginLeft: 8, fontSize: '0.6rem' }}>
+                                    requested {target}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="list-row-meta mono">
+                                {v.warehouseSku}
+                                {target != null && ` · packed ${packedHere} / ${target}`}
+                              </div>
+                            </div>
+                            <div className="stepper">
+                              <button
+                                className="stepper-btn"
+                                onClick={() => adjustDraft(v, -1)}
+                                disabled={!draft.get(v.id)}
+                                aria-label="Decrease"
+                              >
+                                −
+                              </button>
+                              <input
+                                type="number"
+                                className="stepper-input"
+                                min={0}
+                                step={1}
+                                value={draft.get(v.id)?.quantity ?? 0}
+                                onChange={(e) => setDraftQty(v, Number(e.target.value))}
+                                onFocus={(e) => e.currentTarget.select()}
+                                aria-label={`Quantity of ${v.colourVariantName}`}
+                              />
+                              <button
+                                className="stepper-btn"
+                                onClick={() => adjustDraft(v, 1)}
+                                aria-label="Increase"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
+              )
+            })}
+          </div>
+        )
+      })()}
 
       <div className="card" style={{ marginBottom: 24, position: 'sticky', bottom: 76 }}>
         <div className="row-between" style={{ marginBottom: draftCount > 0 ? 12 : 0 }}>

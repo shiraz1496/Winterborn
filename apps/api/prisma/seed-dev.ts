@@ -43,7 +43,6 @@ export async function seedDevCatalog(prisma: PrismaClient): Promise<DevSeed> {
       itemGroupId: itemGroup.id,
       colourFamilyId: blue.id,
       sizeOptionId: size.id,
-      tillSku: 'SCF-STR-BLU-R',
     },
   })
   const otherVariation = await prisma.variation.create({
@@ -51,7 +50,6 @@ export async function seedDevCatalog(prisma: PrismaClient): Promise<DevSeed> {
       itemGroupId: itemGroup.id,
       colourFamilyId: gray.id,
       sizeOptionId: size.id,
-      tillSku: 'SCF-STR-GRY-R',
     },
   })
 

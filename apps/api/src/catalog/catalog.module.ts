@@ -1,5 +1,4 @@
 import { Injectable, Module } from '@nestjs/common'
-import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { PrismaModule } from '../prisma/prisma.module.js'
 import { PrismaService } from '../prisma/prisma.service.js'
@@ -29,6 +28,14 @@ export type ImportCounts = {
   colourVariants: number
   variations: number
   warehouseVariants: number
+  /// INTAKE ledger events written for the initial on-hand stock -- one
+  /// per SID with a non-zero Sortly Quantity, keyed idempotently so a
+  /// re-run does not double-count.
+  intakeEvents: number
+  intakeUnits: number
+  /// Photo URLs recorded on WarehouseVariant.photoUrls (sum across all
+  /// rows). Excludes the ColourVariant.photoUrl backfill.
+  photoUrls: number
 }
 
 export type ImportSummary = {
@@ -41,18 +48,19 @@ export type ImportSummary = {
   warnings: string[]
 }
 
-function slugify(value: string): string {
-  const slug = value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  return slug || 'X'
-}
-
-function shortHash(value: string): string {
-  return createHash('sha1').update(value).digest('hex').slice(0, 8)
+/// Order-preserving concat: keep the existing list's order, append any
+/// values from the incoming list not already present. Used for merging
+/// duplicate-SID photoUrls without clobbering the earlier row's ordering.
+function mergeUnique<T>(existing: T[], incoming: T[]): T[] {
+  const seen = new Set(existing)
+  const out = [...existing]
+  for (const v of incoming) {
+    if (!seen.has(v)) {
+      seen.add(v)
+      out.push(v)
+    }
+  }
+  return out
 }
 
 /**
@@ -95,6 +103,24 @@ export class SortlyImportService {
       colourVariants: 0,
       variations: 0,
       warehouseVariants: 0,
+      intakeEvents: 0,
+      intakeUnits: 0,
+      photoUrls: 0,
+    }
+
+    // Warehouse Location is required for INTAKE events (initial on-hand
+    // stock from Sortly's Quantity). If none exists yet, the catalog
+    // import still succeeds; a warning tells the operator to run
+    // cli:seed-locations and re-import (or re-run just to fill stock in).
+    // Multiple warehouses: take the first by name -- an intentional
+    // ambiguity workflow-owners should make explicit before it happens.
+    const warehouse = await this.prisma.location.findFirst({
+      where: { kind: 'WAREHOUSE' },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true },
+    })
+    if (!warehouse) {
+      warnings.push('no WAREHOUSE location found -- Sortly Quantity was not seeded as INTAKE events')
     }
 
     // In-run caches only: correctness comes from the DB find-or-create
@@ -232,7 +258,6 @@ export class SortlyImportService {
       itemGroupId: string,
       familyId: string,
       sizeOptionId: string,
-      tillSkuSeed: string,
     ): Promise<string> => {
       const key = `${itemGroupId}::${familyId}::${sizeOptionId}`
       const cached = variationCache.get(key)
@@ -246,9 +271,8 @@ export class SortlyImportService {
         variationCache.set(key, existing.id)
         return existing.id
       }
-      const tillSku = `${slugify(tillSkuSeed)}-${shortHash(tillSkuSeed)}`
       const row = await this.prisma.variation.create({
-        data: { itemGroupId, colourFamilyId: familyId, sizeOptionId, tillSku },
+        data: { itemGroupId, colourFamilyId: familyId, sizeOptionId },
       })
       created.variations++
       variationCache.set(key, row.id)
@@ -267,16 +291,16 @@ export class SortlyImportService {
         const colourName = colourVariantIdentity(item)
         const colourVariantId = await getOrCreateColourVariant(familyId, colourName, item.colour, item.photoUrl)
 
-        const tillSkuSeed = `${categoryName}-${item.itemGroupName}-${UNASSIGNED_FAMILY}-${sizeName}`
-        const variationId = await getOrCreateVariation(itemGroupId, familyId, sizeOptionId, tillSkuSeed)
+        const variationId = await getOrCreateVariation(itemGroupId, familyId, sizeOptionId)
 
         const existingWv = await this.prisma.warehouseVariant.findUnique({
           where: { itemGroupId_colourVariantId_sizeOptionId: { itemGroupId, colourVariantId, sizeOptionId } },
         })
+        let warehouseVariantId: string
         if (existingWv) {
           // Same physical SKU can appear more than once in the raw export
           // (47 SIDs repeat in the real file, always with the same
-          // identity and only the quantity differing — see the parser
+          // identity and only the quantity differing -- see the parser
           // report). Collapsing to one WarehouseVariant row is correct:
           // this task writes catalog rows, never a stored quantity. But a
           // "last write wins" merge on unitCostCents is wrong here: 2 of
@@ -284,12 +308,11 @@ export class SortlyImportService {
           // price, and if that unpriced sibling is processed second it
           // would blindly null out a real price. A genuine price must
           // never be regressed to null by a blank duplicate.
+          warehouseVariantId = existingWv.id
           const nextCost = item.unitCostCents ?? null
+          const update: Prisma.WarehouseVariantUpdateInput = {}
           if (existingWv.unitCostCents === null && nextCost !== null) {
-            await this.prisma.warehouseVariant.update({
-              where: { id: existingWv.id },
-              data: { unitCostCents: nextCost },
-            })
+            update.unitCostCents = nextCost
           } else if (
             existingWv.unitCostCents !== null &&
             nextCost !== null &&
@@ -300,26 +323,70 @@ export class SortlyImportService {
                 `keeping ${existingWv.unitCostCents}, saw ${nextCost}`,
             )
           }
-          continue
+          // Merge photo URLs from the duplicate row rather than dropping
+          // them. Order-preserving dedupe: existing first, then any new
+          // ones the duplicate happened to carry.
+          const mergedPhotos = mergeUnique(existingWv.photoUrls, item.photoUrls)
+          if (mergedPhotos.length !== existingWv.photoUrls.length) {
+            update.photoUrls = { set: mergedPhotos }
+            created.photoUrls += mergedPhotos.length - existingWv.photoUrls.length
+          }
+          if (Object.keys(update).length > 0) {
+            await this.prisma.warehouseVariant.update({ where: { id: existingWv.id }, data: update })
+          }
+        } else {
+          try {
+            const wv = await this.prisma.warehouseVariant.create({
+              data: {
+                itemGroupId,
+                colourVariantId,
+                sizeOptionId,
+                variationId,
+                warehouseSku: item.sid,
+                unitCostCents: item.unitCostCents ?? null,
+                photoUrls: item.photoUrls,
+              },
+              select: { id: true },
+            })
+            warehouseVariantId = wv.id
+            created.warehouseVariants++
+            created.photoUrls += item.photoUrls.length
+          } catch (err) {
+            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
+              warnings.push(`warehouseSku collision for SID ${item.sid} (${item.entryName}): ${err.message}`)
+              continue
+            }
+            throw err
+          }
         }
 
-        try {
-          await this.prisma.warehouseVariant.create({
-            data: {
-              itemGroupId,
-              colourVariantId,
-              sizeOptionId,
-              variationId,
-              warehouseSku: item.sid,
-              unitCostCents: item.unitCostCents ?? null,
-            },
-          })
-          created.warehouseVariants++
-        } catch (err) {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
-            warnings.push(`warehouseSku collision for SID ${item.sid} (${item.entryName}): ${err.message}`)
-          } else {
-            throw err
+        // Initial on-hand stock at the warehouse. INTAKE event keyed
+        // `sortly-intake:{sid}` so re-importing the same file is a
+        // no-op rather than double-counting.
+        if (warehouse && item.quantity > 0) {
+          try {
+            await this.prisma.ledgerEvent.create({
+              data: {
+                type: 'INTAKE',
+                locationId: warehouse.id,
+                variationId,
+                warehouseVariantId,
+                quantity: item.quantity,
+                occurredAt: new Date(),
+                source: 'SCRIPT',
+                sourceRef: `sortly-import:${item.sid}`,
+                idempotencyKey: `sortly-intake:${item.sid}`,
+                note: `initial stock from Sortly (${item.entryName})`,
+              },
+            })
+            created.intakeEvents++
+            created.intakeUnits += item.quantity
+          } catch (err) {
+            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
+              // Prior run already seeded this row; leave that event authoritative.
+            } else {
+              throw err
+            }
           }
         }
       } catch (err) {

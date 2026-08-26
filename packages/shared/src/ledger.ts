@@ -44,10 +44,11 @@ export const appendEventInputSchema = baseEvent
     message: 'WRITE_OFF events require a reason',
     path: ['reason'],
   })
-  .refine((e) => e.type !== 'DISPATCH' && e.type !== 'RETURN', {
-    message: 'DISPATCH and RETURN always come in pairs sharing a transferId (spec §5.4); use LedgerService.transfer(), not append()',
-    path: ['type'],
-  })
+  // DISPATCH and RETURN both belong to a transfer pair but the two rows
+  // are now written at DIFFERENT times: DISPATCH (negative at source) on
+  // send, INTAKE (positive at destination) on arrival confirmation. Both
+  // go through append(), each carrying the shared transferId. The
+  // pairing is enforced by BoxesService, not by this schema.
 /// z.input for the same reason as TransferInput: occurredAt accepts a string.
 export type AppendEventInput = z.input<typeof appendEventInputSchema>
 

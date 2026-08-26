@@ -116,15 +116,6 @@ function sizeCode(category: string, group: string, size: string): string {
   return abbreviate(`size::${category}::${group}`, size, 1)
 }
 
-function familyCode(category: string, group: string, family: string): string {
-  // No special-casing for the `Unassigned` placeholder family: the
-  // ordinary rule already produces "UNA" for it, honestly derived from
-  // the literal word, and that never collides with a real 3-letter colour
-  // code (BLU, GRN, RED, ...) -- it neither crashes nor invents a colour
-  // that isn't there.
-  return abbreviate(`till-colour::${category}::${group}`, family, 3)
-}
-
 function variantCode(category: string, group: string, variant: string): string {
   return abbreviate(`wh-colour::${category}::${group}`, variant, 3)
 }
@@ -132,16 +123,6 @@ function variantCode(category: string, group: string, variant: string): string {
 /** `FRAAS` inserts an `FR` segment after the category code; `OWN` inserts nothing. */
 function brandSegment(brand: Brand): string | null {
   return brand === 'FRAAS' ? 'FR' : null
-}
-
-/** Till-level SKU: `CAT-GROUP-FAMILY-SIZE`. What the cashier taps. */
-export function tillSku(category: string, group: string, family: string, size: string): string {
-  return [
-    categoryCode(category),
-    groupCode(category, group),
-    familyCode(category, group, family),
-    sizeCode(category, group, size),
-  ].join('-')
 }
 
 /**

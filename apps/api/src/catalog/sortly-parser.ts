@@ -18,7 +18,14 @@ export type ParsedSortlyItem = {
   quantity: number
   minLevel?: number
   unitCostCents?: number
+  /// Alias for `photoUrls[0]`. Kept for existing callers (importer's
+  /// ColourVariant photo backfill) that want the representative image
+  /// without knowing about the array.
   photoUrl?: string
+  /// Every non-empty Photo1..Photo8 cell in file order. 542/547 rows have
+  /// Photo1; 131 have Photo2; 74 have Photo3; the tail is tiny (Photo8: 1
+  /// row). Reading all eight is cheaper than deciding a cutoff.
+  photoUrls: string[]
   primaryFolder: string
   subfolder1?: string
   subfolder2?: string
@@ -168,7 +175,11 @@ export function parseSortlyCsv(csvText: string): ParseResult {
       const quantity = parseQuantity(row['Quantity'])
       const minLevel = parseMinLevel(row['Min Level'])
       const unitCostCents = parsePriceCents(row['Price'])
-      const photoUrl = clean(row['Photo1'])
+      const photoUrls: string[] = []
+      for (const slot of [1, 2, 3, 4, 5, 6, 7, 8] as const) {
+        const url = clean(row[`Photo${slot}`])
+        if (url) photoUrls.push(url)
+      }
       const subfolder1 = clean(row['Subfolder-level1'])
       const subfolder2 = clean(row['Subfolder-level2'])
 
@@ -182,7 +193,8 @@ export function parseSortlyCsv(csvText: string): ParseResult {
         quantity,
         minLevel,
         unitCostCents,
-        photoUrl,
+        photoUrl: photoUrls[0],
+        photoUrls,
         primaryFolder,
         subfolder1,
         subfolder2,

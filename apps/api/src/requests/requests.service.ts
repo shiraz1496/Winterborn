@@ -11,6 +11,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { AuditService } from './audit.service.js'
+import { BoxesService } from '../fulfilment/boxes.service.js'
 
 /// A request may only be edited (lines added/changed) before packing starts.
 /// Once packing begins the manifest is what's real; the request lines are
@@ -33,16 +34,36 @@ export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly Request
   CLOSED: [],
 }
 
+/// Per-transition role gate, matched to the UI's NEXT_TRANSITION map in
+/// apps/web/app/requests/[id]/page.tsx. Any change here has to change
+/// there too (or the button will render but the API will 403).
+///
+///   Submit (DRAFT→OPEN):        MM (requester) or OWNER
+///   Approve/pack (OPEN→PACKING): warehouse roles only
+///   Ship (PACKING→DISPATCHED):   warehouse roles only
+///   Receive (→CLOSED):           MM only — arrival is what only the
+///                                destination can attest to.
+const TRANSITION_ROLES: Readonly<Record<`${RequestState}->${RequestState}`, readonly CurrentUserPayload['role'][]>> = {
+  'DRAFT->OPEN': ['MARKET_MANAGER', 'OWNER'],
+  'OPEN->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'PACKING->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'DISPATCHED->ARRIVED': ['MARKET_MANAGER'],
+  'DISPATCHED->CLOSED': ['MARKET_MANAGER'],
+  'ARRIVED->CLOSED': ['MARKET_MANAGER'],
+}
+
 @Injectable()
 export class RequestsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly boxes: BoxesService,
   ) {}
 
   async create(input: CreateRequestInput, actor: CurrentUserPayload) {
     const parsed = createRequestInputSchema.parse(input)
     this.assertLocationAccess(actor, parsed.locationId)
+    this.assertCanEditLines(actor, parsed.locationId)
 
     return this.prisma.$transaction(async (tx) => {
       const request = await tx.restockRequest.create({
@@ -89,6 +110,7 @@ export class RequestsService {
     return this.prisma.$transaction(async (tx) => {
       const request = await tx.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
       this.assertLocationAccess(actor, request.locationId)
+      this.assertCanEditLines(actor, request.locationId)
       this.assertEditable(request.state)
 
       const line = await tx.restockRequestLine.create({
@@ -117,6 +139,7 @@ export class RequestsService {
     return this.prisma.$transaction(async (tx) => {
       const request = await tx.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
       this.assertLocationAccess(actor, request.locationId)
+      this.assertCanEditLines(actor, request.locationId)
       this.assertEditable(request.state)
 
       const existing = await tx.restockRequestLine.findUniqueOrThrow({ where: { id: lineId } })
@@ -158,9 +181,46 @@ export class RequestsService {
   }
 
   async transition(requestId: string, toState: RequestState, actor: CurrentUserPayload) {
+    // Doc §6.4: closing a request from DISPATCHED/ARRIVED means "the
+    // destination has physically received the shipment". Before the
+    // state changes, post the INTAKE ledger rows so the market's on-
+    // hand finally reflects what actually arrived. This is what makes
+    // "in transit" a real concept: between DISPATCH and receive, stock
+    // has left the warehouse but is not counted anywhere.
+    //
+    // Done OUTSIDE the transition transaction because ledger writes are
+    // append-only (a nested tx would fight the append-only trigger's
+    // ordering guarantee) and are idempotent, so a retry is safe.
+    const before = await this.prisma.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
+    this.assertLocationAccess(actor, before.locationId)
+
+    if (before.state !== toState) {
+      const key = `${before.state}->${toState}` as keyof typeof TRANSITION_ROLES
+      const allowedRoles = TRANSITION_ROLES[key]
+      if (!allowedRoles) {
+        throw new BadRequestException(`illegal transition ${before.state} -> ${toState}`)
+      }
+      if (!allowedRoles.includes(actor.role)) {
+        throw new ForbiddenException(
+          `${actor.role} may not transition a request ${before.state} -> ${toState}`,
+        )
+      }
+    }
+
+    if (before.state !== toState && toState === 'CLOSED' && (before.state === 'DISPATCHED' || before.state === 'ARRIVED')) {
+      await this.boxes.receiveForRequest(requestId, actor)
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const request = await tx.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
-      this.assertLocationAccess(actor, request.locationId)
+
+      // Idempotent: if the caller asks for the state the request is
+      // already in, no-op. Absorbs React StrictMode double-renders and
+      // any race between two tabs -- no duplicate audit row for a
+      // transition that has already happened.
+      if (request.state === toState) {
+        return request
+      }
 
       const allowed = REQUEST_TRANSITIONS[request.state]
       if (!allowed.includes(toState)) {
@@ -183,10 +243,52 @@ export class RequestsService {
     })
   }
 
+  /// Flags a dispatched request as "not received" from the destination's
+  /// point of view. Writes an AuditLog row that the notification feed
+  /// picks up and surfaces to Owner + WM to investigate. Does not change
+  /// request state — the box may still land later, in which case the MM
+  /// clicks Received and the request closes normally.
+  async reportMissing(requestId: string, actor: CurrentUserPayload) {
+    if (actor.role !== 'MARKET_MANAGER') {
+      // Reporting an in-transit box missing is an attestation from the
+      // destination — only the market manager can make it. Warehouse
+      // can't know whether a physical box arrived or not.
+      throw new ForbiddenException('only the market manager may flag a shipment as not received')
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const request = await tx.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
+      this.assertLocationAccess(actor, request.locationId)
+
+      if (request.state !== 'DISPATCHED' && request.state !== 'ARRIVED') {
+        throw new BadRequestException(
+          `only DISPATCHED requests can be reported missing (state=${request.state})`,
+        )
+      }
+
+      await this.audit.record(tx, {
+        entity: 'RestockRequest',
+        entityId: requestId,
+        field: 'not_received',
+        oldValue: null,
+        newValue: new Date().toISOString(),
+        actorId: actor.id,
+      })
+      return { ok: true }
+    })
+  }
+
   private assertLocationAccess(actor: CurrentUserPayload, locationId: string): void {
     if (actor.role === 'MARKET_MANAGER' && actor.locationId !== locationId) {
       throw new ForbiddenException("cannot access another location's request")
     }
+  }
+
+  /// Lines belong to the requester. Only the market's own MM or OWNER
+  /// can add/change what was asked for; warehouse never edits demand.
+  private assertCanEditLines(actor: CurrentUserPayload, locationId: string): void {
+    if (actor.role === 'OWNER') return
+    if (actor.role === 'MARKET_MANAGER' && actor.locationId === locationId) return
+    throw new ForbiddenException(`${actor.role} may not edit request lines`)
   }
 
   private assertEditable(state: RequestState): void {

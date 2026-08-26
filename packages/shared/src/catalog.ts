@@ -20,6 +20,35 @@ export const locationSchema = z.object({
 })
 export type LocationDto = z.infer<typeof locationSchema>
 
+/// Admin view of a Location, exposing the Square link the read-only
+/// `locationSchema` intentionally hides. Owner + Warehouse Manager only.
+export const adminLocationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: locationKindSchema,
+  timezone: z.string(),
+  isActive: z.boolean(),
+  squareLocationId: z.string().nullable(),
+})
+export type AdminLocationDto = z.infer<typeof adminLocationSchema>
+
+/// Result of POST /admin/locations/sync. `created` is Square markets
+/// that had no local counterpart; `updated` is local markets whose Square
+/// link (or name / timezone) was overwritten from Square; `linked` is
+/// existing local markets whose squareLocationId was filled in via an
+/// exact-name match (first sync only). `unlinked` is local MARKET rows
+/// that still have no Square counterpart -- useful because the operator
+/// needs to know they're not sales-connected. Warehouse rows are never
+/// touched by sync and are omitted from the summary entirely.
+export const syncSquareLocationsResultSchema = z.object({
+  created: z.array(z.string()),
+  updated: z.array(z.string()),
+  linked: z.array(z.string()),
+  unlinked: z.array(z.string()),
+  squareTotal: z.number().int(),
+})
+export type SyncSquareLocationsResult = z.infer<typeof syncSquareLocationsResultSchema>
+
 /// Family-level ("what the cashier taps") sellable unit. StockLevel.variationId
 /// points at rows of this shape.
 export const variationSummarySchema = z.object({
@@ -28,7 +57,6 @@ export const variationSummarySchema = z.object({
   categoryName: z.string(),
   colourFamilyName: z.string(),
   sizeOptionName: z.string(),
-  tillSku: z.string(),
 })
 export type VariationSummary = z.infer<typeof variationSummarySchema>
 
@@ -129,3 +157,32 @@ export const lowStockRowSchema = z.object({
   minLevel: z.number().int(),
 })
 export type LowStockRow = z.infer<typeof lowStockRowSchema>
+
+/// One row of the /admin/square-mapping table: everything the operator
+/// needs to identify a local Variation, plus the two Square IDs (item at
+/// the ItemGroup level, variation at the Variation level) that make sales
+/// resolvable by the webhook / poll paths in apps/api/src/square. Both
+/// fields are nullable -- an unset ID means "no Square row is linked
+/// yet". Sending null in a PATCH clears the field.
+export const squareMappingRowSchema = z.object({
+  variationId: z.string(),
+  itemGroupId: z.string(),
+  itemGroupName: z.string(),
+  categoryName: z.string(),
+  colourFamilyName: z.string(),
+  sizeOptionName: z.string(),
+  squareItemId: z.string().nullable(),
+  squareVariationId: z.string().nullable(),
+})
+export type SquareMappingRow = z.infer<typeof squareMappingRowSchema>
+
+/// PATCH /catalog/item-groups/:id/square-id +
+/// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;
+/// the empty string is coerced to null so a blank input field doesn't
+/// store "" and then collide on the unique constraint next time.
+export const setSquareIdInputSchema = z.object({
+  squareId: z
+    .union([z.string().trim().max(128), z.null()])
+    .transform((value) => (value === null || value === '' ? null : value)),
+})
+export type SetSquareIdInput = z.infer<typeof setSquareIdInputSchema>

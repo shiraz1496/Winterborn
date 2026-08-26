@@ -1,5 +1,10 @@
+import { config as loadEnv } from 'dotenv'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+// Repo-root .env, not apps/api/.env. See seed-locations.ts for the
+// same rationale.
+loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.env') })
 import { PrismaService } from '../prisma/prisma.service.js'
 import { SortlyImportService } from '../catalog/catalog.module.js'
 
@@ -39,7 +44,7 @@ async function main(): Promise<void> {
     }
     console.log('  created:')
     for (const [model, count] of Object.entries(summary.created)) {
-      console.log(`    ${model.padEnd(16)} ${count}`)
+      console.log(`    ${model.padEnd(18)} ${count}`)
     }
     if (summary.warnings.length > 0) {
       console.log(`  warnings: ${summary.warnings.length}`)

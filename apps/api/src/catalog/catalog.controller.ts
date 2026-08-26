@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput, CreateWarehouseVariantInput } from '@winterborn/shared'
-import { createWarehouseVariantInputSchema } from '@winterborn/shared'
+import type { AssignColourFamilyInput, CreateWarehouseVariantInput, SetSquareIdInput } from '@winterborn/shared'
+import { createWarehouseVariantInputSchema, setSquareIdInputSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -73,6 +73,30 @@ export class CatalogController {
   @Roles('OWNER', 'WAREHOUSE_MANAGER')
   assignColourFamily(@Param('id') id: string, @Body() body: AssignColourFamilyInput) {
     return this.catalog.assignColourFamily(id, body.colourFamilyId)
+  }
+
+  /// Square-mapping admin surface. Read and write are both gated to
+  /// OWNER + WAREHOUSE_MANAGER by policy -- the raw Square IDs are treated
+  /// as configuration data other roles have no reason to see. If a future
+  /// role needs read access, relax the guard on the GET only.
+  @Get('catalog/square-mapping')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  squareMapping() {
+    return this.catalog.listSquareMapping()
+  }
+
+  @Patch('catalog/item-groups/:id/square-id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  setItemGroupSquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
+    const parsed = setSquareIdInputSchema.parse(body)
+    return this.catalog.setItemGroupSquareId(id, parsed.squareId)
+  }
+
+  @Patch('catalog/variations/:id/square-id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  setVariationSquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
+    const parsed = setSquareIdInputSchema.parse(body)
+    return this.catalog.setVariationSquareId(id, parsed.squareId)
   }
 
   @Get('stock/by-family')

@@ -8,7 +8,9 @@ import { NotificationsService } from './notifications.service.js'
 
 @Controller('notifications')
 @UseGuards(JwtGuard, RolesGuard)
-@Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')
+// SALES included so their session doesn't 403 if they land on /notifications;
+// the service short-circuits to an empty list for that role.
+@Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER', 'SALES')
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 

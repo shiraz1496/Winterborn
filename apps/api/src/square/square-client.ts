@@ -29,3 +29,16 @@ export async function searchOrders(request: Square.SearchOrdersRequest): Promise
   assertNoErrors(res, 'orders.search')
   return res
 }
+
+/**
+ * Every Square location visible to the merchant. Consumed by the
+ * /admin/locations sync flow to mirror Square's location list into our
+ * `Location` table. Square typically returns a small handful, so no
+ * pagination handling here -- if that ever changes, wrap this in a
+ * cursor-loop like `searchOrders`'s callers do for orders.
+ */
+export async function listSquareLocations(): Promise<Square.Location[]> {
+  const res = await square.locations.list()
+  assertNoErrors(res, 'locations.list')
+  return res.locations ?? []
+}

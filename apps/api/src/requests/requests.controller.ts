@@ -69,4 +69,14 @@ export class RequestsController {
   ) {
     return this.requests.transition(id, body.state, user)
   }
+
+  /// Market Manager flags a dispatched request as never arrived. Writes
+  /// an AuditLog row that surfaces in the notification feed for the
+  /// warehouse to investigate. Deliberately does NOT change the request
+  /// state — the box may still turn up; the MM can click "Received"
+  /// later once it does.
+  @Post(':id/report-missing')
+  reportMissing(@Param('id') id: string, @CurrentUser() user: CurrentUserPayload) {
+    return this.requests.reportMissing(id, user)
+  }
 }

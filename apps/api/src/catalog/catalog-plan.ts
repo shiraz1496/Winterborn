@@ -32,7 +32,13 @@ export type NewVariationPlan = {
   tempId: string
   /** What the cashier sees, e.g. the colour family name. */
   variationName: string
-  /** The till SKU from Task 4 -- written to Square's `sku` field. */
+  /**
+   * Written to Square's `sku` field and used as the correlation key
+   * between plan and apply/verify. Since Variation.tillSku no longer
+   * exists on the DB (dropped in migration 20260826... _drop_till_sku),
+   * this is derived at plan-build time from the colour family name plus
+   * the tail of Variation.id. Stable per variation but no longer stored.
+   */
   sku: string
   priceCents: number
   currency: string
@@ -74,6 +80,18 @@ export type CatalogPlan = {
   createdAt: string
   category: string
   items: ItemPlan[]
+}
+
+/// Uppercase ASCII slug used to build a stable, human-scannable SKU at
+/// plan time. Not stored -- see NewVariationPlan.sku for context.
+function planSkuSlug(value: string): string {
+  const slug = value
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'X'
 }
 
 function isItem(obj: Square.CatalogObject | undefined): obj is Square.CatalogObject.Item {
@@ -135,7 +153,9 @@ export async function buildPlan(prisma: PrismaService, category: string): Promis
     const newVariations: NewVariationPlan[] = group.variations.map((v, i) => ({
       tempId: `#new_${group.id}_${i}`,
       variationName: v.colourFamily.name,
-      sku: v.tillSku,
+      // Derived at plan time -- see NewVariationPlan.sku doc for why the
+      // Variation.tillSku field no longer exists.
+      sku: `${planSkuSlug(v.colourFamily.name)}-${v.id.slice(-6)}`,
       priceCents: legacyPriceCents,
       currency,
     }))

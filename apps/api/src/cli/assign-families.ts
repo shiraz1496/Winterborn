@@ -1,3 +1,4 @@
+import './load-env.js'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { assignFamily } from '../catalog/family-assigner.js'
 import { Prisma } from '@prisma/client'

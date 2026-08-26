@@ -545,6 +545,37 @@ textarea {
   text-align: center;
 }
 
+/* Editable variant of .stepper-value. Same visual weight but the
+   packer can click and type a number directly -- essential when a box
+   line needs 50 units and +/- one-at-a-time is too slow. Native
+   number-spinner arrows hidden; we already render +/- buttons. */
+.stepper-input {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  font-weight: 700;
+  width: 72px;
+  min-width: 72px;
+  text-align: center;
+  background: var(--surface-sunken);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 6px 4px;
+  height: var(--tap-primary);
+  -moz-appearance: textfield;
+}
+
+.stepper-input::-webkit-outer-spin-button,
+.stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.stepper-input:focus {
+  border-color: var(--signal);
+  outline: none;
+}
+
 /* ---- printable label ----------------------------------------------------- */
 
 .label-ticket {

@@ -5,6 +5,7 @@ import Link from 'next/link'
 import type { LocationDto, RestockRequestDto } from '@winterborn/shared'
 import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
+import { useAuth } from '../../lib/auth-context'
 import { ApiError, listLocations, listRequests } from '../../lib/api'
 
 const STATE_FILTERS = ['ALL', 'OPEN', 'PACKING', 'DISPATCHED', 'CLOSED'] as const
@@ -17,6 +18,11 @@ function chipClassFor(state: string): string {
 }
 
 function RequestsBody() {
+  const { user } = useAuth()
+  // Only requesters can file a new restock: the market's own MM, or
+  // OWNER on their behalf. Warehouse roles (WM/WO) pack what markets
+  // ask for — they don't invent demand — and SALES is read-only.
+  const canCreate = user?.role === 'MARKET_MANAGER' || user?.role === 'OWNER'
   const [requests, setRequests] = useState<RestockRequestDto[]>([])
   const [locations, setLocations] = useState<LocationDto[]>([])
   const [filter, setFilter] = useState<StateFilter>('ALL')
@@ -61,9 +67,11 @@ function RequestsBody() {
         title="Requests"
         description="Every restock request across every market. Tap one to review its lines, adjust quantities, and move it through packing to dispatch. Filter with the chips below."
         actions={
-          <Link href="/requests/new" className="btn">
-            + New
-          </Link>
+          canCreate ? (
+            <Link href="/requests/new" className="btn">
+              + New
+            </Link>
+          ) : undefined
         }
       />
 
@@ -100,7 +108,7 @@ function RequestsBody() {
               ? 'No requests yet. Create one when a market needs stock.'
               : `No requests in the ${filter.toLowerCase()} state right now.`}
           </p>
-          {filter === 'ALL' && (
+          {filter === 'ALL' && canCreate && (
             <Link href="/requests/new" className="empty-state-cta">
               + New request
             </Link>

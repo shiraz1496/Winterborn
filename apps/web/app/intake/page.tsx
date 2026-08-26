@@ -6,10 +6,12 @@ import type {
   ColourFamilyDto,
   IntakeResult,
   SizeOptionDto,
+  VariationSummary,
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
+import { Swatch } from '../../components/Swatch'
 import { useAuth } from '../../lib/auth-context'
 import {
   ApiError,
@@ -17,18 +19,20 @@ import {
   listCategories,
   listColourFamilies,
   listSizeOptions,
+  listVariations,
   listWarehouseVariants,
   receiveIntake,
 } from '../../lib/api'
 import { useToast } from '../../lib/toast'
 
 /// Doc 3 §3.1. Receive inventory: pick a warehouse SKU, enter quantity,
-/// confirm. `idempotencyToken` is generated once when this component mounts
-/// and rotated on every successful submit -- a double-tap on Confirm is a
-/// retry (no second row); a fresh intake is a fresh token (yes, second row).
-/// If the product doesn't exist yet, Owner and Warehouse Manager may create
-/// it inline using the same controlled vocabulary already proven in the
-/// catalogue migration.
+/// confirm. Mirrors the New Request page's UX so warehouse staff never
+/// have to relearn a second pattern -- search a family, expand it, enter
+/// per-variant counts for what actually arrived, submit.
+///
+/// One `receiveIntake` call is fired per variant with qty > 0, each
+/// tagged with its own idempotency token so a retried submit lands one
+/// row per variant (not two, not zero).
 
 function newIdempotencyToken(): string {
   // crypto.randomUUID() exists in modern browsers and Node 20+, but guard
@@ -41,9 +45,27 @@ function newIdempotencyToken(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-interface Selected {
-  wv: WarehouseVariantSummary
-  qty: number
+/// One family being received. Contains a per-variant qty map so an
+/// operator can log "3 Navy + 2 Sky Blue" under the same family in one
+/// submit. Each variant has its own idempotency token, rotated after a
+/// successful submit, so a mid-submit retry never double-counts.
+interface DraftFamily {
+  variationId: string
+  itemGroupName: string
+  familyName: string
+  sizeName: string
+  variants: WarehouseVariantSummary[]
+  qtyByVariant: Record<string, number>
+  tokenByVariant: Record<string, string>
+  note: string
+}
+
+interface FamilyResult {
+  variationId: string
+  itemGroupName: string
+  familyName: string
+  sizeName: string
+  lines: Array<{ colourVariantName: string; quantity: number; onHand: number; created: boolean }>
 }
 
 const CREATOR_ROLES = ['OWNER', 'WAREHOUSE_MANAGER'] as const
@@ -51,67 +73,153 @@ const CREATOR_ROLES = ['OWNER', 'WAREHOUSE_MANAGER'] as const
 function IntakeBody() {
   const toast = useToast()
   const { user } = useAuth()
+  const canCreate = user ? CREATOR_ROLES.includes(user.role as (typeof CREATOR_ROLES)[number]) : false
+
+  const [variations, setVariations] = useState<VariationSummary[]>([])
   const [variants, setVariants] = useState<WarehouseVariantSummary[]>([])
   const [query, setQuery] = useState('')
-  const [selected, setSelected] = useState<Selected | null>(null)
-  const [token, setToken] = useState<string>(() => newIdempotencyToken())
-  const [note, setNote] = useState('')
+  const [families, setFamilies] = useState<DraftFamily[]>([])
+  const [openId, setOpenId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [lastResult, setLastResult] = useState<
-    (IntakeResult & { label: string }) | null
-  >(null)
-
-  const canCreate = user ? CREATOR_ROLES.includes(user.role as (typeof CREATOR_ROLES)[number]) : false
-
-  async function refreshVariants(): Promise<WarehouseVariantSummary[]> {
-    const next = await listWarehouseVariants()
-    setVariants(next)
-    return next
-  }
+  const [lastResults, setLastResults] = useState<FamilyResult[]>([])
 
   useEffect(() => {
-    refreshVariants().catch((err) =>
-      setError(err instanceof ApiError ? err.message : 'Could not load the warehouse catalog.'),
-    )
+    Promise.all([listVariations(), listWarehouseVariants()])
+      .then(([v, wv]) => {
+        setVariations(v)
+        setVariants(wv)
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the warehouse catalog.'))
   }, [])
+
+  const variantsByVariation = useMemo(() => {
+    const m = new Map<string, WarehouseVariantSummary[]>()
+    for (const wv of variants) {
+      const list = m.get(wv.variationId) ?? []
+      list.push(wv)
+      m.set(wv.variationId, list)
+    }
+    for (const [, list] of m) list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
+    return m
+  }, [variants])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (q.length === 0) return []
-    return variants
+    const takenIds = new Set(families.map((f) => f.variationId))
+    return variations
       .filter((v) =>
-        `${v.itemGroupName} ${v.colourVariantName} ${v.sizeOptionName} ${v.warehouseSku}`
-          .toLowerCase()
-          .includes(q),
+        `${v.itemGroupName} ${v.colourFamilyName} ${v.sizeOptionName}`.toLowerCase().includes(q),
       )
+      .filter((v) => !takenIds.has(v.id))
       .slice(0, 10)
-  }, [query, variants])
+  }, [query, variations, families])
+
+  function addFamily(v: VariationSummary) {
+    const familyVariants = variantsByVariation.get(v.id) ?? []
+    // If there's only one variant under this family, pre-fill it with 1
+    // so a common case (single-variant SKU) is a one-tap intake.
+    const initialQty: Record<string, number> = {}
+    if (familyVariants.length === 1) initialQty[familyVariants[0]!.id] = 1
+    const tokens: Record<string, string> = {}
+    for (const wv of familyVariants) tokens[wv.id] = newIdempotencyToken()
+    setFamilies((prev) => [
+      ...prev,
+      {
+        variationId: v.id,
+        itemGroupName: v.itemGroupName,
+        familyName: v.colourFamilyName,
+        sizeName: v.sizeOptionName,
+        variants: familyVariants,
+        qtyByVariant: initialQty,
+        tokenByVariant: tokens,
+        note: '',
+      },
+    ])
+    setOpenId(v.id)
+    setQuery('')
+  }
+
+  function setVariantQty(familyId: string, variantId: string, qty: number) {
+    setFamilies((prev) =>
+      prev.map((f) => {
+        if (f.variationId !== familyId) return f
+        const next = { ...f.qtyByVariant }
+        const clamped = Math.max(0, Math.floor(qty))
+        if (clamped === 0) delete next[variantId]
+        else next[variantId] = clamped
+        return { ...f, qtyByVariant: next }
+      }),
+    )
+  }
+
+  function bumpVariant(familyId: string, variantId: string, delta: number) {
+    setFamilies((prev) =>
+      prev.map((f) => {
+        if (f.variationId !== familyId) return f
+        const current = f.qtyByVariant[variantId] ?? 0
+        const next = { ...f.qtyByVariant }
+        const clamped = Math.max(0, current + delta)
+        if (clamped === 0) delete next[variantId]
+        else next[variantId] = clamped
+        return { ...f, qtyByVariant: next }
+      }),
+    )
+  }
+
+  function setNote(familyId: string, note: string) {
+    setFamilies((prev) => prev.map((f) => (f.variationId === familyId ? { ...f, note } : f)))
+  }
+
+  function removeFamily(familyId: string) {
+    setFamilies((prev) => prev.filter((f) => f.variationId !== familyId))
+    if (openId === familyId) setOpenId(null)
+  }
+
+  const totalUnits = useMemo(
+    () => families.reduce((sum, f) => sum + Object.values(f.qtyByVariant).reduce((s, n) => s + n, 0), 0),
+    [families],
+  )
+  const lineCount = useMemo(
+    () => families.reduce((sum, f) => sum + Object.values(f.qtyByVariant).filter((q) => q > 0).length, 0),
+    [families],
+  )
 
   async function submit() {
-    if (!selected) return
+    if (lineCount === 0) return
     setBusy(true)
     setError(null)
+    const results: FamilyResult[] = []
     try {
-      const result = await receiveIntake({
-        warehouseVariantId: selected.wv.id,
-        quantity: selected.qty,
-        idempotencyToken: token,
-        note: note.trim() || undefined,
-      })
-      const label = `${selected.wv.itemGroupName} · ${selected.wv.colourVariantName} · ${selected.wv.sizeOptionName}`
-      setLastResult({ ...result, label })
-      toast.success(
-        result.created
-          ? `Recorded intake of ${selected.qty} — on hand now ${result.onHand}`
-          : `Already recorded (${selected.qty}) — on hand ${result.onHand}`,
-      )
-      // Rotate the token so the NEXT confirm is a fresh intake, not another
-      // retry of the one we just wrote.
-      setToken(newIdempotencyToken())
-      setSelected(null)
-      setNote('')
+      for (const f of families) {
+        const entries = Object.entries(f.qtyByVariant).filter(([, q]) => q > 0)
+        if (entries.length === 0) continue
+        const lines: FamilyResult['lines'] = []
+        for (const [variantId, qty] of entries) {
+          const v = f.variants.find((x) => x.id === variantId)
+          if (!v) continue
+          const res = await receiveIntake({
+            warehouseVariantId: variantId,
+            quantity: qty,
+            idempotencyToken: f.tokenByVariant[variantId] ?? newIdempotencyToken(),
+            note: f.note.trim() || undefined,
+          })
+          lines.push({ colourVariantName: v.colourVariantName, quantity: qty, onHand: res.onHand, created: res.created })
+        }
+        results.push({
+          variationId: f.variationId,
+          itemGroupName: f.itemGroupName,
+          familyName: f.familyName,
+          sizeName: f.sizeName,
+          lines,
+        })
+      }
+      setLastResults(results)
+      toast.success(`Recorded intake — ${totalUnits} unit${totalUnits === 1 ? '' : 's'} across ${lineCount} variant${lineCount === 1 ? '' : 's'}`)
+      setFamilies([])
+      setOpenId(null)
       setQuery('')
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Could not record the intake.'
@@ -122,22 +230,48 @@ function IntakeBody() {
     }
   }
 
-  function pick(wv: WarehouseVariantSummary) {
-    setSelected({ wv, qty: 1 })
-    setQuery('')
-  }
-
-  function bumpQty(delta: number) {
-    setSelected((prev) => (prev ? { ...prev, qty: Math.max(1, prev.qty + delta) } : prev))
-  }
-
   async function onCreated(newVariant: WarehouseVariantSummary) {
     setCreating(false)
-    // Refresh the catalog list in the background so future searches see the
-    // new row -- but don't block picking it, it's already in hand.
-    refreshVariants().catch(() => undefined)
-    pick(newVariant)
+    // Refresh so the new variant is available under its family and can
+    // be selected without a page reload.
+    const [freshVariations, freshVariants] = await Promise.all([listVariations(), listWarehouseVariants()])
+    setVariations(freshVariations)
+    setVariants(freshVariants)
+    const parentFamily = freshVariations.find((v) => v.id === newVariant.variationId)
+    if (parentFamily) {
+      const already = families.find((f) => f.variationId === parentFamily.id)
+      if (!already) {
+        addFamilyFromVariations(parentFamily, freshVariants)
+      } else {
+        setOpenId(parentFamily.id)
+      }
+    }
     toast.success(`Created ${newVariant.itemGroupName} · ${newVariant.colourVariantName}`)
+  }
+
+  /// Helper for onCreated -- we need to seed a DraftFamily with freshly
+  /// fetched variants (not the stale state closure).
+  function addFamilyFromVariations(v: VariationSummary, allVariants: WarehouseVariantSummary[]) {
+    const familyVariants = allVariants.filter((wv) => wv.variationId === v.id)
+    familyVariants.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
+    const initialQty: Record<string, number> = {}
+    if (familyVariants.length === 1) initialQty[familyVariants[0]!.id] = 1
+    const tokens: Record<string, string> = {}
+    for (const wv of familyVariants) tokens[wv.id] = newIdempotencyToken()
+    setFamilies((prev) => [
+      ...prev,
+      {
+        variationId: v.id,
+        itemGroupName: v.itemGroupName,
+        familyName: v.colourFamilyName,
+        sizeName: v.sizeOptionName,
+        variants: familyVariants,
+        qtyByVariant: initialQty,
+        tokenByVariant: tokens,
+        note: '',
+      },
+    ])
+    setOpenId(v.id)
   }
 
   return (
@@ -145,140 +279,236 @@ function IntakeBody() {
       <PageHeader
         eyebrow="Warehouse only"
         title="Receive inventory"
-        description="Log stock that just arrived at the warehouse. Find the warehouse SKU, enter how many arrived, and confirm. The stock ledger updates immediately."
+        description="Log stock that just arrived. Search a product, expand it to enter counts per colour variant, then confirm. Each variant lands on its own ledger row so future dispatches can pull the right colour."
       />
 
       {error && <p className="error-banner">{error}</p>}
 
-      {lastResult && (
+      {lastResults.length > 0 && (
         <div className="card" style={{ marginBottom: 20, borderColor: 'var(--pine)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <strong>{lastResult.created ? 'Recorded' : 'Already recorded'}</strong>
-            <span className="chip chip-pine">On hand: {lastResult.onHand}</span>
+          <div className="row-between" style={{ marginBottom: 8 }}>
+            <strong>Last intake</strong>
+            <button type="button" className="btn btn-ghost" style={{ minHeight: 28, padding: '4px 10px' }} onClick={() => setLastResults([])}>
+              Clear
+            </button>
           </div>
-          <p style={{ margin: '6px 0 0', color: 'var(--text-dim)' }}>{lastResult.label}</p>
+          <div className="stack" style={{ gap: 10 }}>
+            {lastResults.map((r) => (
+              <div key={r.variationId} style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+                <div className="list-row-title">{r.itemGroupName}</div>
+                <div className="list-row-meta" style={{ marginBottom: 6 }}>
+                  {r.familyName} · {r.sizeName}
+                </div>
+                {r.lines.map((l) => (
+                  <div
+                    key={`${r.variationId}:${l.colourVariantName}`}
+                    className="row-between"
+                    style={{ padding: '2px 0' }}
+                  >
+                    <span>{l.colourVariantName}</span>
+                    <span className="mono">
+                      {l.created ? '+' : '='}
+                      {l.quantity} · on hand {l.onHand}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {!selected && (
-        <>
-          <div className="field">
-            <label htmlFor="intake-search">Find a product</label>
-            <input
-              id="intake-search"
-              placeholder="Search item, colour, size, or warehouse SKU…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
+      <div className="field">
+        <label htmlFor="intake-search">Add a product</label>
+        <input
+          id="intake-search"
+          placeholder="Search item, colour family, size, or SKU…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          autoComplete="off"
+        />
+      </div>
 
-          {matches.length > 0 ? (
-            <div className="list" style={{ marginTop: 12 }}>
-              {matches.map((v) => (
-                <button
-                  key={v.id}
-                  onClick={() => pick(v)}
-                  className="list-row"
-                  style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%' }}
-                >
-                  <div className="list-row-body">
-                    <div className="list-row-title">{v.itemGroupName}</div>
-                    <div className="list-row-meta">
-                      {v.colourVariantName} · {v.sizeOptionName} · <span className="mono">{v.warehouseSku}</span>
+      {matches.length > 0 ? (
+        <div className="list" style={{ marginBottom: 20 }}>
+          {matches.map((v) => {
+            const variantCount = variantsByVariation.get(v.id)?.length ?? 0
+            return (
+              <button
+                key={v.id}
+                onClick={() => addFamily(v)}
+                className="list-row"
+                style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%' }}
+              >
+                <Swatch familyName={v.colourFamilyName} />
+                <div className="list-row-body">
+                  <div className="list-row-title">{v.itemGroupName}</div>
+                  <div className="list-row-meta">
+                    {v.colourFamilyName} · {v.sizeOptionName}
+                  </div>
+                </div>
+                <span className="chip">
+                  {variantCount} variant{variantCount === 1 ? '' : 's'}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : query.length > 0 ? (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <p style={{ margin: 0, color: 'var(--text-dim)' }}>
+            No product matched.{' '}
+            {canCreate
+              ? 'If this really is a new product, create it now:'
+              : "Product creation is warehouse-manager only — ask them to add it."}
+          </p>
+          {canCreate && (
+            <button type="button" className="btn" style={{ marginTop: 12 }} onClick={() => setCreating(true)}>
+              + Create new product
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      <div className="section-heading">
+        <h2>Items being received</h2>
+        <span className="eyebrow">
+          {lineCount} line{lineCount === 1 ? '' : 's'} · {totalUnits} unit{totalUnits === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {families.length === 0 ? (
+        <div className="card">
+          <p style={{ margin: 0, color: 'var(--text-dim)' }}>Search above to add what just arrived.</p>
+        </div>
+      ) : (
+        <div className="stack" style={{ marginBottom: 24 }}>
+          {families.map((f) => {
+            const familyTotal = Object.values(f.qtyByVariant).reduce((s, n) => s + n, 0)
+            const open = openId === f.variationId
+            return (
+              <div key={f.variationId} className="card">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenId(open ? null : f.variationId)}
+                    style={{
+                      all: 'unset',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      flex: 1,
+                      minWidth: 0,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Swatch familyName={f.familyName} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="list-row-title">{f.itemGroupName}</div>
+                      <div className="list-row-meta">
+                        {f.familyName} · {f.sizeName}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
+                        {familyTotal}
+                      </div>
+                      <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
+                        {f.variants.length} variant{f.variants.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => removeFamily(f.variationId)}
+                    aria-label="Remove"
+                    style={{ minHeight: 40, padding: '6px 10px' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {open && (
+                  <div className="stack" style={{ marginTop: 14, gap: 8 }}>
+                    {f.variants.length === 0 ? (
+                      <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.85rem' }}>
+                        No variants configured for this family — cannot record intake.
+                      </p>
+                    ) : (
+                      f.variants.map((v) => {
+                        const qty = f.qtyByVariant[v.id] ?? 0
+                        return (
+                          <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)' }}>
+                            <Swatch familyName={v.colourVariantName} />
+                            <div className="list-row-body">
+                              <div className="list-row-title">{v.colourVariantName}</div>
+                              <div className="list-row-meta mono">{v.warehouseSku}</div>
+                            </div>
+                            <div className="stepper">
+                              <button
+                                className="stepper-btn"
+                                onClick={() => bumpVariant(f.variationId, v.id, -1)}
+                                disabled={qty <= 0}
+                                aria-label="Decrease"
+                              >
+                                −
+                              </button>
+                              <input
+                                type="number"
+                                className="stepper-input"
+                                min={0}
+                                step={1}
+                                value={qty}
+                                onChange={(e) => setVariantQty(f.variationId, v.id, Number(e.target.value))}
+                                onFocus={(e) => e.currentTarget.select()}
+                                aria-label={`Quantity of ${v.colourVariantName}`}
+                              />
+                              <button
+                                className="stepper-btn"
+                                onClick={() => bumpVariant(f.variationId, v.id, 1)}
+                                aria-label="Increase"
+                              >
+                                +
+                              </button>
+                              <button
+                                className="stepper-btn"
+                                onClick={() => bumpVariant(f.variationId, v.id, 10)}
+                                aria-label="Add ten"
+                              >
+                                +10
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+
+                    <div className="field" style={{ marginTop: 8 }}>
+                      <label htmlFor={`note-${f.variationId}`}>Note (optional)</label>
+                      <input
+                        id={`note-${f.variationId}`}
+                        placeholder="PO#, delivery batch, shade check…"
+                        value={f.note}
+                        onChange={(e) => setNote(f.variationId, e.target.value)}
+                        maxLength={500}
+                      />
                     </div>
                   </div>
-                  <span className="eyebrow">Choose</span>
-                </button>
-              ))}
-            </div>
-          ) : query.length > 0 ? (
-            <div className="card" style={{ marginTop: 12 }}>
-              <p style={{ margin: 0, color: 'var(--text-dim)' }}>
-                No warehouse SKU matched.{' '}
-                {canCreate
-                  ? 'If this really is a new product, create it now:'
-                  : "Product creation is warehouse-manager only — ask them to add it."}
-              </p>
-              {canCreate && (
-                <button
-                  type="button"
-                  className="btn"
-                  style={{ marginTop: 12 }}
-                  onClick={() => setCreating(true)}
-                >
-                  + Create new product
-                </button>
-              )}
-            </div>
-          ) : null}
-        </>
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
 
-      {selected && (
-        <>
-          <div className="card" style={{ marginBottom: 20 }}>
-            <div className="list-row-title">{selected.wv.itemGroupName}</div>
-            <div className="list-row-meta" style={{ marginTop: 4 }}>
-              {selected.wv.colourVariantName} · {selected.wv.sizeOptionName} ·{' '}
-              <span className="mono">{selected.wv.warehouseSku}</span>
-            </div>
-          </div>
-
-          <div className="field">
-            <label>Quantity received</label>
-            <div className="stepper" style={{ marginTop: 6 }}>
-              <button className="stepper-btn" onClick={() => bumpQty(-1)} aria-label="Decrease">
-                −
-              </button>
-              <span className="stepper-value">{selected.qty}</span>
-              <button className="stepper-btn" onClick={() => bumpQty(1)} aria-label="Increase">
-                +
-              </button>
-              <button className="stepper-btn" onClick={() => bumpQty(9)} aria-label="Add ten">
-                +10
-              </button>
-              <button className="stepper-btn" onClick={() => bumpQty(99)} aria-label="Add hundred">
-                +100
-              </button>
-            </div>
-          </div>
-
-          <div className="field">
-            <label htmlFor="intake-note">Note (optional)</label>
-            <input
-              id="intake-note"
-              placeholder="e.g. PO#, delivery batch, shade check"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              maxLength={500}
-            />
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, marginTop: 24 }}>
-            <button
-              className="btn btn-ghost"
-              onClick={() => {
-                setSelected(null)
-                setNote('')
-              }}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-            <button className="btn btn-primary" onClick={submit} disabled={busy}>
-              {busy ? 'Recording…' : `Confirm intake of ${selected.qty}`}
-            </button>
-          </div>
-        </>
-      )}
+      <button className="btn btn-primary" onClick={submit} disabled={busy || lineCount === 0}>
+        {busy
+          ? 'Recording…'
+          : `Confirm intake${lineCount > 0 ? ` (${totalUnits} unit${totalUnits === 1 ? '' : 's'})` : ''}`}
+      </button>
 
       {creating && (
-        <NewProductModal
-          initialItemGroup={query}
-          onClose={() => setCreating(false)}
-          onCreated={onCreated}
-        />
+        <NewProductModal initialItemGroup={query} onClose={() => setCreating(false)} onCreated={onCreated} />
       )}
     </div>
   )

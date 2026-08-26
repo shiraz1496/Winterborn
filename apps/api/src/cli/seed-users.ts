@@ -1,4 +1,9 @@
-import 'dotenv/config'
+import { config as loadEnv } from 'dotenv'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+// Repo-root .env, not apps/api/.env. See seed-locations.ts for the
+// same rationale.
+loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.env') })
 import { PrismaClient, type UserRole } from '@prisma/client'
 import { hash as hashArgon2 } from '@node-rs/argon2'
 
