@@ -62,6 +62,16 @@ export function mapOrderToLedgerInputs(
   const orderId = order.id
   if (!orderId) return { events, deadLetters }
 
+  // Only completed orders count as sales. Square POS transitions an order
+  // through OPEN before payment; a cashier voiding the cart pre-payment
+  // leaves the order in CANCELED / DRAFT with no refunds[] to reverse it
+  // — so mapping an OPEN order to SALE events would write a phantom that
+  // never gets corrected. Refunds ride in on later `order.updated` events
+  // where state is still COMPLETED and `returns[]` is populated, so this
+  // guard doesn't block the return path. Applies to both webhook and poll
+  // sources because both funnel through this same mapper.
+  if (order.state !== 'COMPLETED') return { events, deadLetters }
+
   // AppendEventInput's occurredAt is typed Date at the z.input level even
   // though the schema uses z.coerce.date() (zod does not widen a coerced
   // schema's static input type), so construct a Date here rather than

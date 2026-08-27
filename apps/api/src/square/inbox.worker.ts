@@ -22,7 +22,15 @@ interface WebhookPayload {
 
 function extractOrderId(payload: unknown): string | undefined {
   const p = payload as WebhookPayload | undefined
-  return p?.data?.object?.order?.id ?? p?.data?.object?.payment?.order_id ?? (p?.data?.type === 'order' ? p?.data?.id : undefined)
+  // Order events (order.created, order.updated, order.fulfillment.updated)
+  // put the order id at `data.id` and use snake_case `data.type` values
+  // like `order_created`, `order_updated`, `order_fulfillment_updated`.
+  // Payment events keep the order id under `data.object.payment.order_id`.
+  return (
+    p?.data?.object?.order?.id ??
+    p?.data?.object?.payment?.order_id ??
+    (p?.data?.type?.startsWith('order_') && p?.data?.id ? p.data.id : undefined)
+  )
 }
 
 /**

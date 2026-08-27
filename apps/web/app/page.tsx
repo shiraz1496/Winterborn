@@ -52,6 +52,9 @@ function DashboardBody() {
   const [warehouseDrawerOpen, setWarehouseDrawerOpen] = useState(false)
   const [warehouseOpenVariationId, setWarehouseOpenVariationId] = useState<string | null>(null)
   const [marketDrawerOpen, setMarketDrawerOpen] = useState(false)
+  const [marketOpenVariationId, setMarketOpenVariationId] = useState<string | null>(null)
+  const [marketVariantStock, setMarketVariantStock] = useState<StockLevel[]>([])
+  const [marketVariantCatalog, setMarketVariantCatalog] = useState<WarehouseVariantSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -120,6 +123,31 @@ function DashboardBody() {
       cancelled = true
     }
   }, [locationId])
+
+  // Market drawer variant breakdown. Two reads:
+  //   1. stockByVariant(marketId) — per-variant history at this market
+  //      (only DISPATCH events carry warehouseVariantId, so this is
+  //      "sent to date" rather than a live count; sales carry no variant).
+  //   2. listWarehouseVariants() — variant names + SKUs for display.
+  // Kept in a separate effect from the family-level loads so a slow variant
+  // catalog fetch doesn't gate the rest of the dashboard.
+  useEffect(() => {
+    if (!isMarketManager || !locationId) return
+    let cancelled = false
+    Promise.all([stockByVariant(locationId), listWarehouseVariants()])
+      .then(([vStock, vCatalog]) => {
+        if (cancelled) return
+        setMarketVariantStock(vStock)
+        setMarketVariantCatalog(vCatalog)
+      })
+      .catch(() => {
+        // Non-fatal — drawer will still show family-level rows without
+        // the expandable variant breakdown.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isMarketManager, locationId])
 
   const variationById = useMemo(() => new Map(variations.map((v) => [v.id, v])), [variations])
   const markets = useMemo(() => locations.filter((l) => l.kind === 'MARKET'), [locations])
@@ -269,22 +297,57 @@ function DashboardBody() {
   const warehouseTotal = useMemo(() => warehouseRows.reduce((s, r) => s + r.onHand, 0), [warehouseRows])
   const warehouseDistinctItems = warehouseRows.length
 
-  // Market drawer rows: every catalog family with its on-hand at the
-  // current market. Zero-stock items are kept in the tail so an MM can
-  // see what they COULD request. Sorted highest-first, then alphabetical.
+  // Market drawer rows: only products that have EVER had ledger activity at
+  // this market (dispatched, sold, returned, or corrected here). We base off
+  // `stock` — which comes from a groupBy on ledger events at this location,
+  // so a variation only appears if it has at least one event here — rather
+  // than the full catalog, which would list every warehouse product with a
+  // "0" whether or not it ever reached this booth.
+  //
+  // Variants attach the same way the warehouse drawer does: sourced from the
+  // per-variant ledger read (also filtered by locationId), enriched with
+  // names + SKUs from the warehouse variant catalog for display. Only
+  // variants with ledger activity at this market appear — matching the
+  // family-level rule.
   const marketDrawerRows = useMemo(() => {
-    const onHandByVariation = new Map(stockRows.map((r) => [r.variationId, r.onHand]))
-    return variations
-      .map((meta) => ({
-        variationId: meta.id,
-        meta,
-        onHand: onHandByVariation.get(meta.id) ?? 0,
-      }))
+    const variantMetaById = new Map(marketVariantCatalog.map((wv) => [wv.id, wv]))
+    const variantsByVariation = new Map<
+      string,
+      Array<{ id: string; colourVariantName: string; warehouseSku: string; onHand: number }>
+    >()
+    for (const s of marketVariantStock) {
+      if (!s.warehouseVariantId) continue
+      const meta = variantMetaById.get(s.warehouseVariantId)
+      if (!meta) continue
+      const list = variantsByVariation.get(s.variationId) ?? []
+      list.push({
+        id: meta.id,
+        colourVariantName: meta.colourVariantName,
+        warehouseSku: meta.warehouseSku,
+        onHand: s.onHand,
+      })
+      variantsByVariation.set(s.variationId, list)
+    }
+    for (const [, list] of variantsByVariation) {
+      list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
+    }
+    return stock
+      .map((s) => {
+        const meta = variationById.get(s.variationId)
+        if (!meta) return null
+        return {
+          variationId: s.variationId,
+          meta,
+          onHand: s.onHand,
+          variants: variantsByVariation.get(s.variationId) ?? [],
+        }
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null)
       .sort((a, b) => {
         if (b.onHand !== a.onHand) return b.onHand - a.onHand
         return a.meta.itemGroupName.localeCompare(b.meta.itemGroupName)
       })
-  }, [variations, stockRows])
+  }, [stock, variationById, marketVariantStock, marketVariantCatalog])
   const marketTotal = useMemo(() => marketDrawerRows.reduce((s, r) => s + r.onHand, 0), [marketDrawerRows])
   const marketDistinctItems = marketDrawerRows.length
 
@@ -806,31 +869,112 @@ function DashboardBody() {
             <div style={{ overflowY: 'auto', padding: '12px 20px 24px', flex: 1 }}>
               {marketDrawerRows.length === 0 ? (
                 <p style={{ color: 'var(--text-dim)', margin: 0 }}>
-                  Catalog is empty. Ask the warehouse to import it first.
+                  Nothing has been shipped to this market yet. Ask the warehouse to dispatch stock.
                 </p>
               ) : (
-                <div className="list">
-                  {marketDrawerRows.map((row) => (
-                    <div key={row.variationId} className="list-row">
-                      <Swatch familyName={row.meta.colourFamilyName} />
-                      <div className="list-row-body">
-                        <div className="list-row-title">{row.meta.itemGroupName}</div>
-                        <div className="list-row-meta">
-                          {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
-                        </div>
-                      </div>
+                <div className="stack" style={{ gap: 6 }}>
+                  {marketDrawerRows.map((row) => {
+                    const open = marketOpenVariationId === row.variationId
+                    const hasVariants = row.variants.length > 0
+                    return (
                       <div
-                        className="mono"
+                        key={row.variationId}
                         style={{
-                          fontWeight: 700,
-                          fontSize: '1.05rem',
-                          color: row.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                          border: '1px solid var(--line)',
+                          borderRadius: 'var(--radius-md)',
+                          background: 'var(--surface)',
                         }}
                       >
-                        {row.onHand.toLocaleString()}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            hasVariants
+                              ? setMarketOpenVariationId(open ? null : row.variationId)
+                              : undefined
+                          }
+                          style={{
+                            all: 'unset',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            width: '100%',
+                            padding: '10px 12px',
+                            cursor: hasVariants ? 'pointer' : 'default',
+                            boxSizing: 'border-box',
+                          }}
+                          aria-expanded={hasVariants ? open : undefined}
+                        >
+                          <Swatch familyName={row.meta.colourFamilyName} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="list-row-title">{row.meta.itemGroupName}</div>
+                            <div className="list-row-meta">
+                              {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
+                              {hasVariants && ` · ${row.variants.length} variant${row.variants.length === 1 ? '' : 's'}`}
+                            </div>
+                          </div>
+                          <div
+                            className="mono"
+                            style={{
+                              fontWeight: 700,
+                              fontSize: '1.05rem',
+                              color: row.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                            }}
+                          >
+                            {row.onHand.toLocaleString()}
+                          </div>
+                          {hasVariants && (
+                            <span
+                              aria-hidden="true"
+                              style={{ color: 'var(--text-faint)', fontSize: '0.8rem', minWidth: 12, textAlign: 'right' }}
+                            >
+                              {open ? '▴' : '▾'}
+                            </span>
+                          )}
+                        </button>
+
+                        {open && hasVariants && (
+                          <div
+                            style={{
+                              borderTop: '1px solid var(--line)',
+                              padding: '6px 12px 10px 42px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                            }}
+                          >
+                            {row.variants.map((v) => (
+                              <div
+                                key={v.id}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 8,
+                                  padding: '4px 0',
+                                }}
+                              >
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: '0.85rem' }}>{v.colourVariantName}</div>
+                                  <div className="mono" style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
+                                    {v.warehouseSku}
+                                  </div>
+                                </div>
+                                <div
+                                  className="mono"
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: '0.9rem',
+                                    color: v.onHand === 0 ? 'var(--danger)' : 'var(--text)',
+                                  }}
+                                >
+                                  {v.onHand.toLocaleString()}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
