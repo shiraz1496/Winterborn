@@ -25,13 +25,20 @@ function sign(rawBody: string): string {
 // mapOrderToLedgerInputs -- pure, no DB, fixtures built by hand.
 // ---------------------------------------------------------------------------
 describe('mapOrderToLedgerInputs', () => {
-  const resolveVariation = (id: string): string | undefined =>
-    id === 'sq_var_1' ? 'variation_1' : id === 'sq_var_2' ? 'variation_2' : undefined
+  const resolveCatalog = (id: string) =>
+    id === 'sq_var_1'
+      ? { variationId: 'variation_1' }
+      : id === 'sq_var_2'
+        ? { variationId: 'variation_2' }
+        : id === 'sq_wv_1'
+          ? { variationId: 'variation_1', warehouseVariantId: 'warehouse_variant_1' }
+          : undefined
   const resolveLocation = (id: string): string | undefined => (id === 'sq_loc_1' ? 'location_1' : undefined)
 
   it('maps a two-line order to two negative-quantity SALE events keyed by saleKey(orderId, lineUid)', () => {
     const order = {
       id: 'order_abc',
+      state: 'COMPLETED',
       locationId: 'sq_loc_1',
       updatedAt: '2025-12-07T14:00:00Z',
       lineItems: [
@@ -40,7 +47,7 @@ describe('mapOrderToLedgerInputs', () => {
       ],
     } as unknown as Square.Order
 
-    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveVariation, resolveLocation, 'WEBHOOK')
+    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveCatalog, resolveLocation, 'WEBHOOK')
 
     expect(deadLetters).toHaveLength(0)
     expect(events).toHaveLength(2)
@@ -62,6 +69,7 @@ describe('mapOrderToLedgerInputs', () => {
   it('dead-letters a line whose catalogObjectId matches no known Variation, without throwing or dropping the order', () => {
     const order = {
       id: 'order_def',
+      state: 'COMPLETED',
       locationId: 'sq_loc_1',
       lineItems: [
         { uid: 'line_1', catalogObjectId: 'sq_var_1', quantity: '1' },
@@ -69,7 +77,7 @@ describe('mapOrderToLedgerInputs', () => {
       ],
     } as unknown as Square.Order
 
-    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveVariation, resolveLocation, 'WEBHOOK')
+    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveCatalog, resolveLocation, 'WEBHOOK')
 
     expect(events).toHaveLength(1)
     expect(events[0]?.idempotencyKey).toBe(saleKey('order_def', 'line_1'))
@@ -81,9 +89,48 @@ describe('mapOrderToLedgerInputs', () => {
     })
   })
 
+  it('carries warehouseVariantId on the SALE event when the resolver returns a per-SKU match', () => {
+    // sq_wv_1 is the variant-level mapping fixture (WarehouseVariant.squareVariationId
+    // for Earmuffs / Black, say). sq_var_1 is the family-level fallback that leaves
+    // warehouseVariantId undefined — both must coexist without one clobbering the other.
+    const order = {
+      id: 'order_var_1',
+      state: 'COMPLETED',
+      locationId: 'sq_loc_1',
+      lineItems: [
+        { uid: 'line_family', catalogObjectId: 'sq_var_1', quantity: '1' },
+        { uid: 'line_variant', catalogObjectId: 'sq_wv_1', quantity: '2' },
+      ],
+    } as unknown as Square.Order
+
+    const { events } = mapOrderToLedgerInputs(order, resolveCatalog, resolveLocation, 'WEBHOOK')
+
+    const familyEvent = events.find((e) => e.idempotencyKey === saleKey('order_var_1', 'line_family'))
+    const variantEvent = events.find((e) => e.idempotencyKey === saleKey('order_var_1', 'line_variant'))
+    expect(familyEvent).toMatchObject({ variationId: 'variation_1', warehouseVariantId: undefined })
+    expect(variantEvent).toMatchObject({
+      variationId: 'variation_1',
+      warehouseVariantId: 'warehouse_variant_1',
+      quantity: -2,
+    })
+  })
+
+  it('drops OPEN / CANCELED / DRAFT orders — only COMPLETED writes SALE events', () => {
+    const openOrder = {
+      id: 'order_open',
+      state: 'OPEN',
+      locationId: 'sq_loc_1',
+      lineItems: [{ uid: 'l', catalogObjectId: 'sq_var_1', quantity: '1' }],
+    } as unknown as Square.Order
+
+    const { events } = mapOrderToLedgerInputs(openOrder, resolveCatalog, resolveLocation, 'WEBHOOK')
+    expect(events).toHaveLength(0)
+  })
+
   it('maps a refund line to a positive-quantity SALE event with a distinct key, not a skipped one', () => {
     const order = {
       id: 'order_ghi',
+      state: 'COMPLETED',
       locationId: 'sq_loc_1',
       lineItems: [{ uid: 'line_1', catalogObjectId: 'sq_var_1', quantity: '2' }],
       returns: [
@@ -95,7 +142,7 @@ describe('mapOrderToLedgerInputs', () => {
       ],
     } as unknown as Square.Order
 
-    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveVariation, resolveLocation, 'WEBHOOK')
+    const { events, deadLetters } = mapOrderToLedgerInputs(order, resolveCatalog, resolveLocation, 'WEBHOOK')
 
     expect(deadLetters).toHaveLength(0)
     expect(events).toHaveLength(2)
@@ -129,6 +176,7 @@ describe('InboxWorker.processOne', () => {
 
     const fakeOrder = {
       id: 'order_worker_1',
+      state: 'COMPLETED',
       locationId: 'SQ_DEN',
       updatedAt: '2025-12-07T14:00:00Z',
       lineItems: [{ uid: 'line_1', catalogObjectId: 'sq_var_A', quantity: '3' }],
@@ -163,6 +211,7 @@ describe('InboxWorker.processOne', () => {
   it('dead-letters an unmapped catalogObjectId but still marks the row processed, error visible', async () => {
     const fakeOrder = {
       id: 'order_worker_2',
+      state: 'COMPLETED',
       locationId: 'SQ_DEN',
       lineItems: [{ uid: 'line_1', catalogObjectId: 'sq_var_unknown', quantity: '1' }],
     } as unknown as Square.Order

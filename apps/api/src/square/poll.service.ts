@@ -58,7 +58,15 @@ export class PollService {
       ? new Date(cursorRow.lastPolledAt.getTime() - OVERLAP_MINUTES * 60_000)
       : (location.seasonStart ?? new Date(0))
 
-    const [variations, locations] = await Promise.all([
+    // Two indexes, same shape as the inbox worker's: variant-first, family
+    // fallback. Kept in lockstep with inbox.worker.ts so both paths produce
+    // identical resolver behaviour — that shared behaviour is what the
+    // idempotency guarantee ultimately depends on.
+    const [warehouseVariants, variations, locations] = await Promise.all([
+      this.prisma.warehouseVariant.findMany({
+        where: { squareVariationId: { not: null } },
+        select: { id: true, variationId: true, squareVariationId: true },
+      }),
       this.prisma.variation.findMany({
         where: { squareVariationId: { not: null } },
         select: { id: true, squareVariationId: true },
@@ -68,8 +76,15 @@ export class PollService {
         select: { id: true, squareLocationId: true },
       }),
     ])
-    const variationIndex = new Map(variations.map((v) => [v.squareVariationId as string, v.id]))
+    const warehouseVariantIndex = new Map(
+      warehouseVariants.map((wv) => [
+        wv.squareVariationId as string,
+        { variationId: wv.variationId, warehouseVariantId: wv.id },
+      ]),
+    )
+    const variationIndex = new Map(variations.map((v) => [v.squareVariationId as string, { variationId: v.id }]))
     const locationIndex = new Map(locations.map((l) => [l.squareLocationId as string, l.id]))
+    const resolveCatalog = (id: string) => warehouseVariantIndex.get(id) ?? variationIndex.get(id)
 
     let ingested = 0
     let deduped = 0
@@ -93,7 +108,7 @@ export class PollService {
         // double-counting.
         const { events, deadLetters } = mapOrderToLedgerInputs(
           order,
-          (id) => variationIndex.get(id),
+          resolveCatalog,
           (id) => locationIndex.get(id),
           'POLL',
         )

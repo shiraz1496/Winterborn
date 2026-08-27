@@ -120,6 +120,13 @@ model WarehouseVariant {
   /// granularities without a join at write time.
   variationId     String
   warehouseSku    String  @unique
+  /// Square catalog object id for this specific colour/size SKU. When a POS
+  /// sale arrives, the mapper resolves the incoming catalog_object_id against
+  /// this field first so the SALE lands on the specific WarehouseVariant
+  /// (Earmuffs / Black), not just the family Variation. Variation.squareVariationId
+  /// stays as a family-level fallback for products where Square only exposes
+  /// one variation per item.
+  squareVariationId String? @unique
   unitCostCents   Int?
   isSaleItem      Boolean @default(true)
 

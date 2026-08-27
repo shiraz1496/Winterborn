@@ -69,12 +69,33 @@ export class InboxWorker {
     let failed = 0
     let deadLettered = 0
 
-    const [variations, locations] = await Promise.all([
-      this.prisma.variation.findMany({ where: { squareVariationId: { not: null } }, select: { id: true, squareVariationId: true } }),
-      this.prisma.location.findMany({ where: { squareLocationId: { not: null } }, select: { id: true, squareLocationId: true } }),
+    // Two indexes: warehouse variants for per-SKU mappings (Earmuffs / Black),
+    // and family variations as a fallback for single-SKU products where only
+    // Variation.squareVariationId is set. resolveCatalog() below tries variant
+    // first so variant-mapped items land on the specific WarehouseVariant.
+    const [warehouseVariants, variations, locations] = await Promise.all([
+      this.prisma.warehouseVariant.findMany({
+        where: { squareVariationId: { not: null } },
+        select: { id: true, variationId: true, squareVariationId: true },
+      }),
+      this.prisma.variation.findMany({
+        where: { squareVariationId: { not: null } },
+        select: { id: true, squareVariationId: true },
+      }),
+      this.prisma.location.findMany({
+        where: { squareLocationId: { not: null } },
+        select: { id: true, squareLocationId: true },
+      }),
     ])
-    const variationIndex = new Map(variations.map((v) => [v.squareVariationId as string, v.id]))
+    const warehouseVariantIndex = new Map(
+      warehouseVariants.map((wv) => [
+        wv.squareVariationId as string,
+        { variationId: wv.variationId, warehouseVariantId: wv.id },
+      ]),
+    )
+    const variationIndex = new Map(variations.map((v) => [v.squareVariationId as string, { variationId: v.id }]))
     const locationIndex = new Map(locations.map((l) => [l.squareLocationId as string, l.id]))
+    const resolveCatalog = (id: string) => warehouseVariantIndex.get(id) ?? variationIndex.get(id)
 
     for (const row of rows) {
       const orderId = extractOrderId(row.payload)
@@ -88,7 +109,7 @@ export class InboxWorker {
         const order = await this.fetchOrder(orderId)
         const { events, deadLetters } = mapOrderToLedgerInputs(
           order,
-          (id) => variationIndex.get(id),
+          resolveCatalog,
           (id) => locationIndex.get(id),
           'WEBHOOK',
         )

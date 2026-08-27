@@ -21,7 +21,10 @@ const baseEvent = z.object({
   locationId: z.string().min(1),
   /// Family level. Always required, at every granularity.
   variationId: z.string().min(1),
-  /// Variant level. Absent on SALE, because Square reports sales by family.
+  /// Variant level. Optional on SALE — carried when the incoming Square
+  /// catalog_object_id resolves to a specific WarehouseVariant via
+  /// WarehouseVariant.squareVariationId, absent when only the family-level
+  /// Variation.squareVariationId mapping exists (legacy or single-variant items).
   warehouseVariantId: z.string().min(1).optional(),
   /// Signed. Zero is never a real movement and is rejected.
   quantity: z.number().int().refine((n) => n !== 0, 'quantity must not be zero'),
@@ -36,10 +39,6 @@ const baseEvent = z.object({
 })
 
 export const appendEventInputSchema = baseEvent
-  .refine((e) => !(e.type === 'SALE' && e.warehouseVariantId !== undefined), {
-    message: 'SALE events must not carry a warehouseVariantId (spec §5.5)',
-    path: ['warehouseVariantId'],
-  })
   .refine((e) => !(e.type === 'WRITE_OFF' && e.reason === undefined), {
     message: 'WRITE_OFF events require a reason',
     path: ['reason'],

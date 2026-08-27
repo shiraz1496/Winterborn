@@ -18,8 +18,19 @@ export interface MapOrderResult {
   deadLetters: DeadLetter[]
 }
 
-/** Square catalog object ID -> our Variation.id, or undefined if unknown. */
-export type VariationResolver = (squareVariationId: string) => string | undefined
+/**
+ * Square catalog object ID resolution. Returns both the family Variation and
+ * the specific WarehouseVariant when the mapping exists at variant grain
+ * (WarehouseVariant.squareVariationId), or just the Variation when only the
+ * family-level fallback (Variation.squareVariationId) is available. Callers
+ * are expected to try variant-first, family-second, so single-SKU products
+ * without per-variant Square IDs still map.
+ */
+export interface SquareCatalogMatch {
+  variationId: string
+  warehouseVariantId?: string
+}
+export type SquareCatalogResolver = (squareVariationId: string) => SquareCatalogMatch | undefined
 
 /** Square location ID -> our Location.id, or undefined if unknown. */
 export type LocationResolver = (squareLocationId: string) => string | undefined
@@ -52,7 +63,7 @@ function parseQuantity(raw: string): number | undefined {
  */
 export function mapOrderToLedgerInputs(
   order: Square.Order,
-  resolveVariationId: VariationResolver,
+  resolveCatalog: SquareCatalogResolver,
   resolveLocationId: LocationResolver,
   source: LedgerSource,
 ): MapOrderResult {
@@ -98,8 +109,8 @@ export function mapOrderToLedgerInputs(
       deadLetterLine(lineUid, catalogObjectId, 'missing uid or catalogObjectId')
       continue
     }
-    const variationId = resolveVariationId(catalogObjectId)
-    if (!variationId) {
+    const match = resolveCatalog(catalogObjectId)
+    if (!match) {
       deadLetterLine(lineUid, catalogObjectId, 'unmapped catalogObjectId')
       continue
     }
@@ -111,7 +122,8 @@ export function mapOrderToLedgerInputs(
     events.push({
       type: 'SALE',
       locationId,
-      variationId,
+      variationId: match.variationId,
+      warehouseVariantId: match.warehouseVariantId,
       quantity: -quantity,
       occurredAt,
       source,
@@ -128,8 +140,8 @@ export function mapOrderToLedgerInputs(
         deadLetterLine(lineUid, catalogObjectId, 'missing uid or catalogObjectId on return line')
         continue
       }
-      const variationId = resolveVariationId(catalogObjectId)
-      if (!variationId) {
+      const match = resolveCatalog(catalogObjectId)
+      if (!match) {
         deadLetterLine(lineUid, catalogObjectId, 'unmapped catalogObjectId on return line')
         continue
       }
@@ -141,7 +153,8 @@ export function mapOrderToLedgerInputs(
       events.push({
         type: 'SALE',
         locationId,
-        variationId,
+        variationId: match.variationId,
+        warehouseVariantId: match.warehouseVariantId,
         quantity,
         occurredAt,
         source,
