@@ -336,6 +336,14 @@ export class CatalogReadService {
         itemGroup: { include: { category: true } },
         colourFamily: true,
         sizeOption: true,
+        // The warehouse variants nested under each Variation are the real
+        // per-colour SKUs that Square sells; the operator maps
+        // squareVariationId here to get variant-level SALE decrements. Sorted
+        // alphabetically by colour variant so the UI renders in a stable order.
+        warehouseVariants: {
+          include: { colourVariant: true, sizeOption: true },
+          orderBy: [{ colourVariant: { name: 'asc' } }, { sizeOption: { name: 'asc' } }],
+        },
       },
       orderBy: [{ itemGroup: { name: 'asc' } }, { colourFamily: { name: 'asc' } }, { sizeOption: { name: 'asc' } }],
     })
@@ -348,6 +356,13 @@ export class CatalogReadService {
       sizeOptionName: r.sizeOption.name,
       squareItemId: r.itemGroup.squareItemId,
       squareVariationId: r.squareVariationId,
+      warehouseVariants: r.warehouseVariants.map((wv) => ({
+        warehouseVariantId: wv.id,
+        colourVariantName: wv.colourVariant.name,
+        sizeOptionName: wv.sizeOption.name,
+        warehouseSku: wv.warehouseSku,
+        squareVariationId: wv.squareVariationId,
+      })),
     }))
   }
 
@@ -386,6 +401,28 @@ export class CatalogReadService {
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException(`squareVariationId "${squareId}" is already assigned to another variation`)
+      }
+      throw err
+    }
+  }
+
+  /// Set or clear WarehouseVariant.squareVariationId. This is the per-SKU
+  /// mapping the mapper checks first (variant-grain resolution); Variation
+  /// squareVariationId remains a family-level fallback for single-variant
+  /// items. P2002 handling identical to the family-level setter — the same
+  /// Square catalog object can never resolve to two different WarehouseVariants.
+  async setWarehouseVariantSquareId(warehouseVariantId: string, squareId: string | null) {
+    const existing = await this.prisma.warehouseVariant.findUnique({ where: { id: warehouseVariantId } })
+    if (!existing) throw new NotFoundException(`warehouse variant ${warehouseVariantId} not found`)
+    try {
+      return await this.prisma.warehouseVariant.update({
+        where: { id: warehouseVariantId },
+        data: { squareVariationId: squareId },
+        select: { id: true, squareVariationId: true },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`squareVariationId "${squareId}" is already assigned to another warehouse variant`)
       }
       throw err
     }

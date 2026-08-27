@@ -164,6 +164,20 @@ export type LowStockRow = z.infer<typeof lowStockRowSchema>
 /// resolvable by the webhook / poll paths in apps/api/src/square. Both
 /// fields are nullable -- an unset ID means "no Square row is linked
 /// yet". Sending null in a PATCH clears the field.
+/// Per-warehouse-variant mapping. One row per stock SKU (Earmuffs / Black),
+/// nested under the parent Variation. `squareVariationId` is nullable — set
+/// it when the Square catalog exposes a distinct variation per colour, leave
+/// null for family-level items where only the parent Variation carries a
+/// squareVariationId (still supported as a fallback in the mapper).
+export const squareMappingWarehouseVariantSchema = z.object({
+  warehouseVariantId: z.string(),
+  colourVariantName: z.string(),
+  sizeOptionName: z.string(),
+  warehouseSku: z.string(),
+  squareVariationId: z.string().nullable(),
+})
+export type SquareMappingWarehouseVariant = z.infer<typeof squareMappingWarehouseVariantSchema>
+
 export const squareMappingRowSchema = z.object({
   variationId: z.string(),
   itemGroupId: z.string(),
@@ -173,6 +187,7 @@ export const squareMappingRowSchema = z.object({
   sizeOptionName: z.string(),
   squareItemId: z.string().nullable(),
   squareVariationId: z.string().nullable(),
+  warehouseVariants: z.array(squareMappingWarehouseVariantSchema),
 })
 export type SquareMappingRow = z.infer<typeof squareMappingRowSchema>
 

@@ -245,6 +245,16 @@ export function setVariationSquareId(variationId: string, squareId: string | nul
   )
 }
 
+export function setWarehouseVariantSquareId(warehouseVariantId: string, squareId: string | null) {
+  const body = setSquareIdInputSchema.parse({ squareId })
+  return request(
+    'PATCH',
+    `/catalog/warehouse-variants/${warehouseVariantId}/square-id`,
+    z.object({ id: z.string(), squareVariationId: z.string().nullable() }),
+    body,
+  )
+}
+
 // ---- requests ---------------------------------------------------------------
 
 export function listRequests() {

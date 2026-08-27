@@ -99,6 +99,13 @@ export class CatalogController {
     return this.catalog.setVariationSquareId(id, parsed.squareId)
   }
 
+  @Patch('catalog/warehouse-variants/:id/square-id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  setWarehouseVariantSquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
+    const parsed = setSquareIdInputSchema.parse(body)
+    return this.catalog.setWarehouseVariantSquareId(id, parsed.squareId)
+  }
+
   @Get('stock/by-family')
   stockByFamily(@Query('locationId') locationId?: string) {
     return this.ledgerRead.onHandByFamily(locationId)
