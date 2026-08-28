@@ -51,6 +51,10 @@ RUN pnpm --filter @winterborn/api build
 
 # ---- runtime: small final image, prod deps only ----
 FROM node:20-alpine AS runtime
+# openssl3 must be present so Prisma's linux-musl-openssl-3.0.x engine can
+# link libssl.so.3 at startup. Also ensures libssl is on the expected
+# search path even when the base image bundles it under an unusual name.
+RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 WORKDIR /app
 # The whole pruned workspace tree, structure preserved on purpose:
