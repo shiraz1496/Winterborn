@@ -44,35 +44,6 @@ const USERS: SeedUserSpec[] = [
     name: 'Owner',
     defaultEmail: 'owner@example.com',
   },
-  {
-    envEmail: 'SEED_WAREHOUSE_MANAGER_EMAIL',
-    envPassword: 'SEED_WAREHOUSE_MANAGER_PASSWORD',
-    role: 'WAREHOUSE_MANAGER',
-    name: 'Warehouse Manager',
-    defaultEmail: 'warehouse-manager@example.com',
-  },
-  {
-    envEmail: 'SEED_WAREHOUSE_OPERATOR_EMAIL',
-    envPassword: 'SEED_WAREHOUSE_OPERATOR_PASSWORD',
-    role: 'WAREHOUSE_OPERATOR',
-    name: 'Warehouse Operator',
-    defaultEmail: 'warehouse-operator@example.com',
-  },
-  {
-    envEmail: 'SEED_MARKET_MANAGER_EMAIL',
-    envPassword: 'SEED_MARKET_MANAGER_PASSWORD',
-    role: 'MARKET_MANAGER',
-    name: 'Market Manager',
-    defaultEmail: 'market-manager@example.com',
-    scopedToMarket: true,
-  },
-  {
-    envEmail: 'SEED_SALES_EMAIL',
-    envPassword: 'SEED_SALES_PASSWORD',
-    role: 'SALES',
-    name: 'Sales Operator',
-    defaultEmail: 'sales@example.com',
-  },
 ]
 
 async function resolveMarketLocationId(): Promise<string | null> {
