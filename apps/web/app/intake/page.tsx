@@ -358,15 +358,15 @@ function IntakeBody() {
         <div className="card" style={{ marginBottom: 20 }}>
           <p style={{ margin: 0, color: 'var(--text-dim)' }}>
             No product matched.{' '}
-            {canCreate
+            {/* {canCreate
               ? 'If this really is a new product, create it now:'
-              : "Product creation is warehouse-manager only — ask them to add it."}
+              : "Product creation is warehouse-manager only — ask them to add it."} */}
           </p>
-          {canCreate && (
+          {/* {canCreate && (
             <button type="button" className="btn" style={{ marginTop: 12 }} onClick={() => setCreating(true)}>
               + Create new product
             </button>
-          )}
+          )} */}
         </div>
       ) : null}
 
