@@ -43,7 +43,10 @@ export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly Request
 ///   Ship (PACKING→DISPATCHED):   warehouse roles only
 ///   Receive (→CLOSED):           MM only — arrival is what only the
 ///                                destination can attest to.
-const TRANSITION_ROLES: Readonly<Record<`${RequestState}->${RequestState}`, readonly CurrentUserPayload['role'][]>> = {
+// Partial: only the 6 legal transitions are keys. Missing key = illegal,
+// handled at the lookup site (see `if (!allowedRoles)` below). Without
+// Partial, TS demands all 36 State×State combinations be present.
+const TRANSITION_ROLES: Readonly<Partial<Record<`${RequestState}->${RequestState}`, readonly CurrentUserPayload['role'][]>>> = {
   'DRAFT->OPEN': ['MARKET_MANAGER', 'OWNER'],
   'OPEN->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKING->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
