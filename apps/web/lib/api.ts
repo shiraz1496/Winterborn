@@ -38,7 +38,16 @@ import {
   salesRowSchema,
   setSquareIdInputSchema,
   sizeOptionSchema,
+  createProductAttributeInputSchema,
+  createProductAttributeValueInputSchema,
+  itemGroupDetailSchema,
+  itemGroupMappingProgressSchema,
+  squareCatalogItemSchema,
+  squareCatalogSyncResultSchema,
+  squareCatalogVariationSchema,
+  squareMappingOrphansSchema,
   squareMappingRowSchema,
+  updateItemGroupMappingSchema,
   stockLevelSchema,
   thresholdSchema,
   transitionRequestInputSchema,
@@ -72,6 +81,11 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /// Structured details from the Nest exception body (e.g. the
+    /// InsufficientStockException details array). Callers that recognise
+    /// their own error codes can down-cast; unknown types are ignored.
+    public readonly details?: unknown,
+    public readonly code?: string,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -102,14 +116,18 @@ async function request<S extends z.ZodTypeAny>(
 
   if (!res.ok) {
     let message = res.statusText
+    let details: unknown
+    let code: string | undefined
     try {
-      const payload = (await res.json()) as { message?: string | string[] }
+      const payload = (await res.json()) as { message?: string | string[]; details?: unknown; code?: string }
       if (Array.isArray(payload.message)) message = payload.message.join('; ')
       else if (typeof payload.message === 'string') message = payload.message
+      details = payload.details
+      code = typeof payload.code === 'string' ? payload.code : undefined
     } catch {
       // Body wasn't JSON (or was empty) -- statusText is the best we have.
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, details, code)
   }
 
   if (res.status === 204) return schema.parse(undefined)
@@ -251,6 +269,73 @@ export function setWarehouseVariantSquareId(warehouseVariantId: string, squareId
     'PATCH',
     `/catalog/warehouse-variants/${warehouseVariantId}/square-id`,
     z.object({ id: z.string(), squareVariationId: z.string().nullable() }),
+    body,
+  )
+}
+
+// ---- square catalog cache (owner + warehouse manager only) ---------------
+
+export function syncSquareCatalog() {
+  return request('POST', '/catalog/sync-square', squareCatalogSyncResultSchema, {})
+}
+
+export function listSquareCatalogItems() {
+  return request('GET', '/catalog/square-items', z.array(squareCatalogItemSchema))
+}
+
+export function listSquareCatalogVariations(squareItemId: string) {
+  return request(
+    'GET',
+    `/catalog/square-items/${encodeURIComponent(squareItemId)}/variations`,
+    z.array(squareCatalogVariationSchema),
+  )
+}
+
+export function listSquareMappingOrphans() {
+  return request('GET', '/catalog/square-mapping-orphans', squareMappingOrphansSchema)
+}
+
+export function listItemGroupsForMapping() {
+  return request('GET', '/catalog/item-groups', z.array(itemGroupMappingProgressSchema))
+}
+
+export function getItemGroupMappingDetail(itemGroupId: string) {
+  return request(
+    'GET',
+    `/catalog/item-groups/${encodeURIComponent(itemGroupId)}/mapping-detail`,
+    itemGroupDetailSchema,
+  )
+}
+
+export function updateItemGroupMapping(
+  itemGroupId: string,
+  input: { squareItemId?: string | null; skus?: Array<{ warehouseVariantId: string; squareVariationId: string | null }> },
+) {
+  const body = updateItemGroupMappingSchema.parse(input)
+  return request(
+    'PATCH',
+    `/catalog/item-groups/${encodeURIComponent(itemGroupId)}/mapping`,
+    z.object({ itemGroupId: z.string(), ok: z.boolean() }),
+    body,
+  )
+}
+
+export function createProductAttribute(itemGroupId: string, input: { name: string; displayOrder?: number }) {
+  const body = createProductAttributeInputSchema.parse(input)
+  return request(
+    'POST',
+    `/catalog/item-groups/${encodeURIComponent(itemGroupId)}/attributes`,
+    z.object({ id: z.string(), name: z.string(), displayOrder: z.number().int(), itemGroupId: z.string() }),
+    body,
+  )
+}
+
+export function createProductAttributeValue(productAttributeId: string, input: { value: string; displayOrder?: number }) {
+  const body = createProductAttributeValueInputSchema.parse(input)
+  return request(
+    'POST',
+    `/catalog/product-attributes/${encodeURIComponent(productAttributeId)}/values`,
+    z.object({ id: z.string(), value: z.string(), displayOrder: z.number().int(), productAttributeId: z.string() }),
     body,
   )
 }

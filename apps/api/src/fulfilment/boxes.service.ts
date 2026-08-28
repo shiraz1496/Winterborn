@@ -3,7 +3,26 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { transferKeyPrefix } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
+import { LedgerReadService } from '../ledger/ledger-read.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
+
+/// Thrown when a pack or dispatch would drive warehouse stock below zero.
+/// The details array lets the frontend render a clear per-line alert like
+/// "Cannot send 12 of Blue / Small — only 5 available".
+export interface InsufficientStockDetail {
+  warehouseVariantId: string
+  requested: number
+  available: number
+}
+export class InsufficientStockException extends BadRequestException {
+  constructor(public readonly details: InsufficientStockDetail[]) {
+    super({
+      message: 'Not enough stock to complete this action',
+      code: 'INSUFFICIENT_STOCK',
+      details,
+    })
+  }
+}
 
 export interface PackBoxLineInput {
   warehouseVariantId: string
@@ -37,13 +56,81 @@ export class BoxesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
+    private readonly ledgerRead: LedgerReadService,
   ) {}
+
+  /// Compute how many units of each warehouse variant can still be committed
+  /// to a new box line at the warehouse. Deducts quantities already committed
+  /// to boxes that are packed but not yet dispatched (state = PACKING) — those
+  /// units are reserved even though the ledger doesn't reflect them yet.
+  ///
+  /// Returns a Map keyed by warehouseVariantId with the available count.
+  /// Missing keys mean "no stock recorded" (0 on-hand, 0 reserved).
+  async availableAtWarehouse(warehouseVariantIds: string[]): Promise<Map<string, number>> {
+    if (warehouseVariantIds.length === 0) return new Map()
+    const warehouse = await this.prisma.location.findFirst({ where: { kind: 'WAREHOUSE' } })
+    if (!warehouse) return new Map()
+
+    const [onHandRows, reservedRows] = await Promise.all([
+      this.prisma.ledgerEvent.groupBy({
+        by: ['warehouseVariantId'],
+        _sum: { quantity: true },
+        where: {
+          locationId: warehouse.id,
+          warehouseVariantId: { in: warehouseVariantIds },
+        },
+      }),
+      this.prisma.boxLine.groupBy({
+        by: ['warehouseVariantId'],
+        _sum: { quantity: true },
+        where: {
+          warehouseVariantId: { in: warehouseVariantIds },
+          box: { state: 'PACKING' },
+        },
+      }),
+    ])
+
+    const onHandById = new Map<string, number>()
+    for (const r of onHandRows) {
+      if (r.warehouseVariantId) onHandById.set(r.warehouseVariantId, r._sum.quantity ?? 0)
+    }
+    const reservedById = new Map<string, number>()
+    for (const r of reservedRows) {
+      if (r.warehouseVariantId) reservedById.set(r.warehouseVariantId, r._sum.quantity ?? 0)
+    }
+
+    const available = new Map<string, number>()
+    for (const wvId of warehouseVariantIds) {
+      const on = onHandById.get(wvId) ?? 0
+      const reserved = reservedById.get(wvId) ?? 0
+      available.set(wvId, on - reserved)
+    }
+    return available
+  }
 
   async pack(input: PackBoxInput, actor: CurrentUserPayload) {
     if (input.lines.length === 0) throw new BadRequestException('a box must be packed with at least one line')
     for (const line of input.lines) {
       if (line.quantity <= 0) throw new BadRequestException('box line quantity must be positive')
     }
+
+    // Prevent packing more than the warehouse can supply. Rolls up any
+    // duplicate warehouseVariantIds in the same request first so committing
+    // two lines of 5 against 8 on-hand fails before either row lands.
+    const requestedByVariant = new Map<string, number>()
+    for (const line of input.lines) {
+      requestedByVariant.set(
+        line.warehouseVariantId,
+        (requestedByVariant.get(line.warehouseVariantId) ?? 0) + line.quantity,
+      )
+    }
+    const available = await this.availableAtWarehouse(Array.from(requestedByVariant.keys()))
+    const shortfall: InsufficientStockDetail[] = []
+    for (const [warehouseVariantId, requested] of requestedByVariant) {
+      const avail = available.get(warehouseVariantId) ?? 0
+      if (requested > avail) shortfall.push({ warehouseVariantId, requested, available: avail })
+    }
+    if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
 
     // Opaque, carries no contents -- the QR encodes this token only (spec
     // §9.4). Contents live entirely in BoxLine, so editing the manifest
@@ -94,6 +181,13 @@ export class BoxesService {
     if (box.state !== 'PACKING') {
       throw new BadRequestException(`box lines cannot be edited once dispatched (state=${box.state})`)
     }
+    const available = await this.availableAtWarehouse([input.warehouseVariantId])
+    const avail = available.get(input.warehouseVariantId) ?? 0
+    if (input.quantity > avail) {
+      throw new InsufficientStockException([
+        { warehouseVariantId: input.warehouseVariantId, requested: input.quantity, available: avail },
+      ])
+    }
     return this.prisma.boxLine.create({
       data: { boxId, warehouseVariantId: input.warehouseVariantId, quantity: input.quantity },
     })
@@ -120,6 +214,29 @@ export class BoxesService {
 
     const warehouse = await this.prisma.location.findFirstOrThrow({ where: { kind: 'WAREHOUSE' } })
     const now = new Date()
+
+    // Safety net: even after the pack-time reservation guard, verify that
+    // physical ledger on-hand still covers this box's lines. Race conditions
+    // (two boxes packed simultaneously against the same shrinking pool, or
+    // an out-of-band SALE while a box sat in PACKING) could otherwise let a
+    // dispatch drive stock below zero. Idempotent re-dispatches are exempt
+    // because their DISPATCH row already exists and the ledger append is a
+    // no-op — check state before enforcing.
+    if (box.state !== 'DISPATCHED') {
+      const perLineRequested = new Map<string, number>()
+      for (const line of box.lines) {
+        perLineRequested.set(
+          line.warehouseVariantId,
+          (perLineRequested.get(line.warehouseVariantId) ?? 0) + line.quantity,
+        )
+      }
+      const shortfall: InsufficientStockDetail[] = []
+      for (const [warehouseVariantId, requested] of perLineRequested) {
+        const onHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, warehouse.id)
+        if (requested > onHand) shortfall.push({ warehouseVariantId, requested, available: onHand })
+      }
+      if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
+    }
 
     // One transferId per box, so both the DISPATCH row (now) and the
     // eventual INTAKE row (on receive) can be joined.

@@ -30,7 +30,11 @@
     "cli:replay-season": "tsx src/cli/replay-season.ts",
     "cli:seed-users": "tsx src/cli/seed-users.ts",
     "cli:seed-locations": "tsx src/cli/seed-locations.ts",
-    "cli:seed-thresholds": "tsx src/cli/seed-thresholds.ts"
+    "cli:seed-thresholds": "tsx src/cli/seed-thresholds.ts",
+    "cli:migrate-to-flexible-attributes": "tsx src/cli/migrate-to-flexible-attributes.ts",
+    "cli:sync-square-catalog": "tsx src/cli/sync-square-catalog.ts",
+    "cli:reset-db-keep-users": "tsx src/cli/reset-db-keep-users.ts",
+    "cli:import-sortly-xlsx": "tsx src/cli/import-sortly-xlsx.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -43,7 +47,8 @@
     "dotenv": "^16.4.5",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "square": "^43.0.0"
+    "square": "^43.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",

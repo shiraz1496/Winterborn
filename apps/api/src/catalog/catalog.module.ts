@@ -7,6 +7,7 @@ import { AuthModule } from '../auth/auth.module.js'
 import { LedgerModule } from '../ledger/ledger.module.js'
 import { CatalogReadService } from './catalog-read.service.js'
 import { CatalogController } from './catalog.controller.js'
+import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 
 const UNIQUE_VIOLATION = 'P2002'
 
@@ -293,8 +294,12 @@ export class SortlyImportService {
 
         const variationId = await getOrCreateVariation(itemGroupId, familyId, sizeOptionId)
 
-        const existingWv = await this.prisma.warehouseVariant.findUnique({
-          where: { itemGroupId_colourVariantId_sizeOptionId: { itemGroupId, colourVariantId, sizeOptionId } },
+        // Composite unique dropped in migration 20260827130000 in favour of
+        // warehouseSku as the sole per-SKU identity; findFirst instead of
+        // findUnique here. Legacy CSV importer keeps working for the
+        // "duplicate SID in the same batch" merge behaviour below.
+        const existingWv = await this.prisma.warehouseVariant.findFirst({
+          where: { itemGroupId, colourVariantId, sizeOptionId },
         })
         let warehouseVariantId: string
         if (existingWv) {
@@ -407,7 +412,7 @@ export class SortlyImportService {
 @Module({
   imports: [PrismaModule, AuthModule, LedgerModule],
   controllers: [CatalogController],
-  providers: [SortlyImportService, CatalogReadService],
-  exports: [SortlyImportService, CatalogReadService],
+  providers: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
+  exports: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
 })
 export class CatalogModule {}

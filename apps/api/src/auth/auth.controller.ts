@@ -23,7 +23,7 @@ const SESSION_COOKIE_PATH = { path: '/' }
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(private readonly auth: AuthService) { }
 
   @Post('login')
   @HttpCode(200)
@@ -38,11 +38,18 @@ export class AuthController {
       throw new BadRequestException('password is required')
     }
     const { jwt, user } = await this.auth.login(body.email, body.password)
+    // IS_CROSS=true when web and API live on different registrable domains
+    // (e.g. Vercel + Render). Explicit === 'true' check because every env
+    // var is a string, and "false" would otherwise be truthy.
+    const isCross = process.env.IS_CROSS === 'true'
     res.cookie(SESSION_COOKIE_NAME, jwt, {
       ...SESSION_COOKIE_PATH,
       httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      // SameSite=None lets the cookie ride cross-site fetches; browsers
+      // reject None without Secure, so pair them. Locally we stay on lax +
+      // insecure so http://localhost dev keeps working.
+      sameSite: isCross ? 'none' : 'lax',
+      secure: isCross,
       maxAge: SESSION_TTL_DAYS * 24 * 60 * 60 * 1000,
     })
     return { user }
@@ -70,7 +77,15 @@ export class AuthController {
         // clear the cookie below.
       }
     }
-    res.clearCookie(SESSION_COOKIE_NAME, SESSION_COOKIE_PATH)
+    // clearCookie must match the original cookie's sameSite/secure or
+    // modern browsers reject the replacement and the stale cookie survives.
+    const isCross = process.env.IS_CROSS === 'true'
+    res.clearCookie(SESSION_COOKIE_NAME, {
+      ...SESSION_COOKIE_PATH,
+      httpOnly: true,
+      sameSite: isCross ? 'none' : 'lax',
+      secure: isCross,
+    })
     return { ok: true }
   }
 

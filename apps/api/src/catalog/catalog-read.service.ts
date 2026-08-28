@@ -151,13 +151,15 @@ export class CatalogReadService {
           }),
       )
 
-      const existingWv = await tx.warehouseVariant.findUnique({
+      // Legacy composite unique on (itemGroup, colourVariant, sizeOption) was
+      // dropped when the flexible attribute model took over — see the
+      // 20260827130000 migration. Fall back to findFirst against those three
+      // columns for the "duplicate SKU" pre-check.
+      const existingWv = await tx.warehouseVariant.findFirst({
         where: {
-          itemGroupId_colourVariantId_sizeOptionId: {
-            itemGroupId: itemGroup.id,
-            colourVariantId: colourVariant.id,
-            sizeOptionId: sizeOption.id,
-          },
+          itemGroupId: itemGroup.id,
+          colourVariantId: colourVariant.id,
+          sizeOptionId: sizeOption.id,
         },
       })
       if (existingWv) {
@@ -426,6 +428,274 @@ export class CatalogReadService {
       }
       throw err
     }
+  }
+
+  /// Every cached Square item, alphabetical by name. `variationCount` lets the
+  /// sync page show "42 items · 187 variations" summary rows without a second
+  /// round-trip.
+  async listSquareCatalogItems() {
+    const rows = await this.prisma.squareCatalogItem.findMany({
+      include: { _count: { select: { variations: true } } },
+      orderBy: { name: 'asc' },
+    })
+    return rows.map((r) => ({
+      squareItemId: r.squareItemId,
+      name: r.name,
+      categoryName: r.categoryName,
+      variationCount: r._count.variations,
+      lastSyncedAt: r.lastSyncedAt.toISOString(),
+    }))
+  }
+
+  /// Variations under one item — feeds the SKU dropdown in the mapping modal.
+  async listSquareCatalogVariations(squareItemId: string) {
+    const rows = await this.prisma.squareCatalogVariation.findMany({
+      where: { squareItemId },
+      orderBy: { name: 'asc' },
+    })
+    return rows.map((r) => ({
+      squareVariationId: r.squareVariationId,
+      squareItemId: r.squareItemId,
+      name: r.name,
+      priceCents: r.priceCents,
+    }))
+  }
+
+  /// Product-list rows for the mapping page. One per ItemGroup, with
+  /// mapping-progress counts computed off WarehouseVariant.squareVariationId.
+  async listItemGroupMappingProgress() {
+    const rows = await this.prisma.itemGroup.findMany({
+      include: {
+        category: true,
+        warehouseVariants: { select: { id: true, squareVariationId: true } },
+        _count: { select: { productAttributes: true } },
+      },
+      orderBy: { name: 'asc' },
+    })
+    return rows.map((r) => ({
+      itemGroupId: r.id,
+      itemGroupName: r.name,
+      categoryName: r.category.name,
+      squareItemId: r.squareItemId,
+      totalSkus: r.warehouseVariants.length,
+      mappedSkus: r.warehouseVariants.filter((wv) => wv.squareVariationId !== null).length,
+      attributeCount: r._count.productAttributes,
+    }))
+  }
+
+  /// Everything the mapping modal needs for one product. Attributes with
+  /// their allowed values, SKUs with their attribute value IDs, plus the
+  /// pre-cached Square candidates so the dropdown works offline of Square.
+  /// If the item has a squareItemId set, variation candidates are filtered
+  /// to that item; otherwise all cached variations are returned (letting the
+  /// operator pick an item first and then see its variations).
+  async getItemGroupDetail(itemGroupId: string) {
+    const ig = await this.prisma.itemGroup.findUnique({
+      where: { id: itemGroupId },
+      include: {
+        category: true,
+        productAttributes: {
+          include: { values: { orderBy: [{ displayOrder: 'asc' }, { value: 'asc' }] } },
+          orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+        },
+        warehouseVariants: {
+          include: {
+            colourVariant: true,
+            sizeOption: true,
+            attributes: { select: { productAttributeValueId: true } },
+          },
+          orderBy: [{ colourVariant: { name: 'asc' } }, { sizeOption: { name: 'asc' } }],
+        },
+      },
+    })
+    if (!ig) throw new NotFoundException(`item group ${itemGroupId} not found`)
+
+    // Fetch every currently-bound squareItemId / squareVariationId across the
+    // catalog EXCEPT those belonging to this ItemGroup — so the modal can
+    // mark them as "already used" and keep the DB's unique constraints from
+    // ever biting the operator at save time.
+    const [squareItems, squareVariations, boundItemsElsewhere, boundVariationsElsewhere, boundVariationsAtFamily] = await Promise.all([
+      this.prisma.squareCatalogItem.findMany({
+        orderBy: { name: 'asc' },
+        select: { squareItemId: true, name: true },
+      }),
+      ig.squareItemId
+        ? this.prisma.squareCatalogVariation.findMany({
+            where: { squareItemId: ig.squareItemId },
+            orderBy: { name: 'asc' },
+            select: { squareVariationId: true, squareItemId: true, name: true },
+          })
+        : this.prisma.squareCatalogVariation.findMany({
+            orderBy: [{ squareItemId: 'asc' }, { name: 'asc' }],
+            select: { squareVariationId: true, squareItemId: true, name: true },
+          }),
+      this.prisma.itemGroup.findMany({
+        where: { squareItemId: { not: null }, id: { not: itemGroupId } },
+        select: { squareItemId: true },
+      }),
+      this.prisma.warehouseVariant.findMany({
+        where: { squareVariationId: { not: null }, itemGroupId: { not: itemGroupId } },
+        select: { squareVariationId: true },
+      }),
+      this.prisma.variation.findMany({
+        where: { squareVariationId: { not: null }, itemGroupId: { not: itemGroupId } },
+        select: { squareVariationId: true },
+      }),
+    ])
+
+    const boundItemIds = new Set(boundItemsElsewhere.map((r) => r.squareItemId).filter((v): v is string => v !== null))
+    const boundVariationIds = new Set([
+      ...boundVariationsElsewhere.map((r) => r.squareVariationId).filter((v): v is string => v !== null),
+      ...boundVariationsAtFamily.map((r) => r.squareVariationId).filter((v): v is string => v !== null),
+    ])
+
+    return {
+      itemGroupId: ig.id,
+      itemGroupName: ig.name,
+      categoryName: ig.category.name,
+      squareItemId: ig.squareItemId,
+      attributes: ig.productAttributes.map((a) => ({
+        id: a.id,
+        name: a.name,
+        displayOrder: a.displayOrder,
+        values: a.values.map((v) => ({ id: v.id, value: v.value, displayOrder: v.displayOrder })),
+      })),
+      skus: ig.warehouseVariants.map((wv) => ({
+        warehouseVariantId: wv.id,
+        warehouseSku: wv.warehouseSku,
+        colourVariantName: wv.colourVariant.name,
+        sizeOptionName: wv.sizeOption.name,
+        squareVariationId: wv.squareVariationId,
+        attributeValueIds: wv.attributes.map((a) => a.productAttributeValueId),
+      })),
+      squareItemCandidates: squareItems.map((si) => ({
+        ...si,
+        isBoundElsewhere: boundItemIds.has(si.squareItemId),
+      })),
+      squareVariationCandidates: squareVariations.map((sv) => ({
+        ...sv,
+        isBoundElsewhere: boundVariationIds.has(sv.squareVariationId),
+      })),
+    }
+  }
+
+  /// Create a new ProductAttribute (axis) on an ItemGroup. Empty-name is
+  /// rejected upstream by the Zod schema; here we surface a P2002 unique
+  /// collision as Conflict so the UI can render "this axis already exists".
+  /// displayOrder defaults to the current max + 1 so new axes append.
+  async createProductAttribute(itemGroupId: string, name: string, displayOrder?: number) {
+    const ig = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
+    if (!ig) throw new NotFoundException(`item group ${itemGroupId} not found`)
+    let order = displayOrder
+    if (order === undefined) {
+      const max = await this.prisma.productAttribute.aggregate({
+        where: { itemGroupId },
+        _max: { displayOrder: true },
+      })
+      order = (max._max.displayOrder ?? -1) + 1
+    }
+    try {
+      return await this.prisma.productAttribute.create({
+        data: { itemGroupId, name, displayOrder: order },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`attribute "${name}" already exists on this item group`)
+      }
+      throw err
+    }
+  }
+
+  /// Add a new allowed value under an existing ProductAttribute.
+  async createProductAttributeValue(productAttributeId: string, value: string, displayOrder?: number) {
+    const attr = await this.prisma.productAttribute.findUnique({ where: { id: productAttributeId } })
+    if (!attr) throw new NotFoundException(`attribute ${productAttributeId} not found`)
+    let order = displayOrder
+    if (order === undefined) {
+      const max = await this.prisma.productAttributeValue.aggregate({
+        where: { productAttributeId },
+        _max: { displayOrder: true },
+      })
+      order = (max._max.displayOrder ?? -1) + 1
+    }
+    try {
+      return await this.prisma.productAttributeValue.create({
+        data: { productAttributeId, value, displayOrder: order },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`value "${value}" already exists on this axis`)
+      }
+      throw err
+    }
+  }
+
+  /// Batch save for the mapping modal. Everything happens in one transaction
+  /// so a partial UI submit doesn't leave the product half-mapped. Passing an
+  /// undefined key means "don't touch"; passing null clears the link.
+  async updateItemGroupMapping(
+    itemGroupId: string,
+    input: { squareItemId?: string | null; skus?: Array<{ warehouseVariantId: string; squareVariationId: string | null }> },
+  ) {
+    const ig = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
+    if (!ig) throw new NotFoundException(`item group ${itemGroupId} not found`)
+
+    return this.prisma.$transaction(async (tx) => {
+      if (input.squareItemId !== undefined) {
+        try {
+          await tx.itemGroup.update({
+            where: { id: itemGroupId },
+            data: { squareItemId: input.squareItemId === '' ? null : input.squareItemId },
+          })
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+            throw new ConflictException(`squareItemId "${input.squareItemId}" is already assigned to another item group`)
+          }
+          throw err
+        }
+      }
+      if (input.skus) {
+        for (const sku of input.skus) {
+          try {
+            await tx.warehouseVariant.update({
+              where: { id: sku.warehouseVariantId },
+              data: { squareVariationId: sku.squareVariationId === '' ? null : sku.squareVariationId },
+            })
+          } catch (err) {
+            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+              throw new ConflictException(
+                `squareVariationId "${sku.squareVariationId}" is already assigned to another warehouse variant`,
+              )
+            }
+            throw err
+          }
+        }
+      }
+      return { itemGroupId, ok: true }
+    })
+  }
+
+  /// Both directions of orphan surfacing. `squareOnly` = items synced from
+  /// Square but not linked to any Winterborn ItemGroup via squareItemId.
+  /// `winterbornOnly` = ItemGroups that have never had a Square link set.
+  /// Neither list is fatal — they're prompts for the operator to bind.
+  async listMappingOrphans() {
+    const [squareItems, itemGroups] = await Promise.all([
+      this.prisma.squareCatalogItem.findMany({ orderBy: { name: 'asc' } }),
+      this.prisma.itemGroup.findMany({
+        include: { category: true },
+        orderBy: { name: 'asc' },
+      }),
+    ])
+    const linkedItemIds = new Set(itemGroups.map((ig) => ig.squareItemId).filter((v): v is string => v !== null))
+    const linkedGroupSquareIds = new Set(itemGroups.map((ig) => ig.squareItemId))
+    const squareOnly = squareItems
+      .filter((si) => !linkedItemIds.has(si.squareItemId))
+      .map((si) => ({ squareItemId: si.squareItemId, name: si.name }))
+    const winterbornOnly = itemGroups
+      .filter((ig) => ig.squareItemId === null || !linkedGroupSquareIds.has(ig.squareItemId))
+      .map((ig) => ({ itemGroupId: ig.id, name: ig.name, categoryName: ig.category.name }))
+    return { squareOnly, winterbornOnly }
   }
 }
 

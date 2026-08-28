@@ -20,6 +20,7 @@ import {
   listVariations,
   listWarehouseVariants,
   packBox,
+  stockByVariant,
   transitionRequest,
 } from '../../../lib/api'
 
@@ -28,6 +29,23 @@ interface DraftEntry {
   variationId: string
   quantity: number
   meta: WarehouseVariantSummary
+}
+
+/// Extract the InsufficientStockException details array from an ApiError.
+/// Returns [] for any other error shape so callers can safely branch on
+/// `.length > 0`.
+function insufficientStockDetails(err: unknown): Array<{ warehouseVariantId: string; requested: number; available: number }> {
+  if (!(err instanceof ApiError)) return []
+  if (err.code !== 'INSUFFICIENT_STOCK') return []
+  const d = err.details
+  if (!Array.isArray(d)) return []
+  return d.filter(
+    (row): row is { warehouseVariantId: string; requested: number; available: number } =>
+      typeof row === 'object' && row !== null &&
+      typeof (row as { warehouseVariantId: unknown }).warehouseVariantId === 'string' &&
+      typeof (row as { requested: unknown }).requested === 'number' &&
+      typeof (row as { available: unknown }).available === 'number',
+  )
 }
 
 function PackBody() {
@@ -47,6 +65,10 @@ function PackBody() {
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [hasPrefilled, setHasPrefilled] = useState<string | null>(null)
+  // Live warehouse stock per warehouseVariant. Refetched after every
+  // successful pack so the "N available" counters and the over-allocation
+  // warnings track reality as boxes get packed.
+  const [warehouseStock, setWarehouseStock] = useState<Map<string, number>>(new Map())
 
   async function load() {
     try {
@@ -86,6 +108,23 @@ function PackBody() {
       setSiblings(others)
       const loc = allLocations.find((l: LocationDto) => l.id === req.locationId)
       setLocationName(loc?.name ?? null)
+
+      // Warehouse stock powers the "N available" chip + over-allocation
+      // warning on each variant row. Fetched here (once per page load) and
+      // again after every successful pack so the counters stay in sync.
+      const warehouseLoc = allLocations.find((l: LocationDto) => l.kind === 'WAREHOUSE')
+      if (warehouseLoc) {
+        try {
+          const rows = await stockByVariant(warehouseLoc.id)
+          const map = new Map<string, number>()
+          for (const r of rows) {
+            if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
+          }
+          setWarehouseStock(map)
+        } catch {
+          // Non-fatal — the pack UI still works without the warning.
+        }
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load this request for packing.')
     } finally {
@@ -224,12 +263,45 @@ function PackBody() {
         lines: [...draft.values()].map((d) => ({ warehouseVariantId: d.warehouseVariantId, quantity: d.quantity })),
       })
       setDraft(new Map())
-      setBoxes(await listBoxes({ requestId: request.id }))
+      const [fresh, warehouseLoc] = await Promise.all([
+        listBoxes({ requestId: request.id }),
+        listLocations().then((locs) => locs.find((l) => l.kind === 'WAREHOUSE')),
+      ])
+      setBoxes(fresh)
+      // Refresh warehouse counters so remaining pack rows show updated
+      // "N available" after this box consumed a chunk of stock.
+      if (warehouseLoc) {
+        try {
+          const rows = await stockByVariant(warehouseLoc.id)
+          const map = new Map<string, number>()
+          for (const r of rows) if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
+          setWarehouseStock(map)
+        } catch {
+          // Non-fatal.
+        }
+      }
       toast.success('Box packed')
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not pack that box.'
-      setError(msg)
-      toast.error(msg)
+      // InsufficientStock from the backend arrives as ApiError with a
+      // details array under body.details. Render a per-SKU message so the
+      // packer sees exactly which line was over-allocated and by how much.
+      const insufficient = insufficientStockDetails(err)
+      if (insufficient.length > 0) {
+        const summary = insufficient
+          .map((d) => {
+            const meta = variantMeta.get(d.warehouseVariantId)
+            const label = meta ? `${meta.colourVariantName}${meta.sizeOptionName && meta.sizeOptionName !== 'One Size' ? ` / ${meta.sizeOptionName}` : ''}` : d.warehouseVariantId
+            return `${label}: tried ${d.requested}, only ${d.available} available`
+          })
+          .join('\n')
+        const msg = `Not enough stock in warehouse:\n${summary}`
+        setError(msg)
+        toast.error('Not enough stock — see banner for details')
+      } else {
+        const msg = err instanceof ApiError ? err.message : 'Could not pack that box.'
+        setError(msg)
+        toast.error(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -295,6 +367,11 @@ function PackBody() {
   }
 
   const draftCount = [...draft.values()].reduce((sum, d) => sum + d.quantity, 0)
+  // True as soon as any draft line asks for more than the warehouse can
+  // supply. Used to disable "Pack this box" and show a summary banner.
+  const hasDraftOverAllocation = [...draft.values()].some(
+    (d) => d.quantity > (warehouseStock.get(d.warehouseVariantId) ?? 0),
+  )
   const variationById = new Map(variations.map((v) => [v.id, v]))
 
   return (
@@ -444,11 +521,18 @@ function PackBody() {
                       {shownVariants.map((v) => {
                         const target = g.variantTargets.get(v.id) ?? null // null = family-level line, no target
                         const packedHere = packedForVariant(v.id)
+                        const draftQty = draft.get(v.id)?.quantity ?? 0
+                        const warehouseOnHand = warehouseStock.get(v.id) ?? 0
+                        const overAllocated = draftQty > warehouseOnHand
                         return (
                           <div
                             key={v.id}
                             className="list-row"
-                            style={{ border: '1px solid var(--line)', alignItems: 'center' }}
+                            style={{
+                              border: overAllocated ? '1px solid var(--danger, #c0392b)' : '1px solid var(--line)',
+                              alignItems: 'center',
+                              background: overAllocated ? 'var(--danger-soft, #fdecea)' : undefined,
+                            }}
                           >
                             <Swatch familyName={v.colourVariantName} />
                             <div className="list-row-body">
@@ -459,11 +543,28 @@ function PackBody() {
                                     requested {target}
                                   </span>
                                 )}
+                                <span
+                                  className="chip"
+                                  style={{
+                                    marginLeft: 8,
+                                    fontSize: '0.6rem',
+                                    background: warehouseOnHand === 0 ? 'var(--danger-soft, #fdecea)' : 'var(--surface-sunken)',
+                                    color: warehouseOnHand === 0 ? 'var(--danger, #c0392b)' : 'var(--text-dim)',
+                                  }}
+                                  title="Units currently on hand at the warehouse"
+                                >
+                                  {warehouseOnHand} available
+                                </span>
                               </div>
                               <div className="list-row-meta mono">
                                 {v.warehouseSku}
                                 {target != null && ` · packed ${packedHere} / ${target}`}
                               </div>
+                              {overAllocated && (
+                                <div style={{ marginTop: 4, color: 'var(--danger, #c0392b)', fontSize: '0.72rem', fontWeight: 600 }}>
+                                  Cannot send {draftQty} — only {warehouseOnHand} available in warehouse.
+                                </div>
+                              )}
                             </div>
                             <div className="stepper">
                               <button
@@ -479,15 +580,18 @@ function PackBody() {
                                 className="stepper-input"
                                 min={0}
                                 step={1}
-                                value={draft.get(v.id)?.quantity ?? 0}
+                                value={draftQty}
                                 onChange={(e) => setDraftQty(v, Number(e.target.value))}
                                 onFocus={(e) => e.currentTarget.select()}
                                 aria-label={`Quantity of ${v.colourVariantName}`}
+                                style={overAllocated ? { borderColor: 'var(--danger, #c0392b)' } : undefined}
                               />
                               <button
                                 className="stepper-btn"
                                 onClick={() => adjustDraft(v, 1)}
                                 aria-label="Increase"
+                                disabled={draftQty >= warehouseOnHand}
+                                title={draftQty >= warehouseOnHand ? 'No more units available in warehouse' : undefined}
                               >
                                 +
                               </button>
@@ -511,7 +615,16 @@ function PackBody() {
             {draftCount} unit{draftCount === 1 ? '' : 's'}
           </span>
         </div>
-        <button className="btn btn-primary" onClick={submitBox} disabled={busy || draft.size === 0}>
+        {hasDraftOverAllocation && (
+          <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 'var(--radius-sm)', background: 'var(--danger-soft, #fdecea)', color: 'var(--danger, #c0392b)', fontSize: '0.8rem', fontWeight: 600 }}>
+            One or more lines exceed the warehouse stock — reduce the highlighted rows before packing.
+          </div>
+        )}
+        <button
+          className="btn btn-primary"
+          onClick={submitBox}
+          disabled={busy || draft.size === 0 || hasDraftOverAllocation}
+        >
           {busy ? 'Packing…' : 'Pack this box'}
         </button>
       </div>

@@ -1,10 +1,11 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput, CreateWarehouseVariantInput, SetSquareIdInput } from '@winterborn/shared'
-import { createWarehouseVariantInputSchema, setSquareIdInputSchema } from '@winterborn/shared'
+import type { AssignColourFamilyInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateWarehouseVariantInput, SetSquareIdInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
+import { createProductAttributeInputSchema, createProductAttributeValueInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
 import { CatalogReadService } from './catalog-read.service.js'
+import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// Read-only catalog/stock/location surface for the frontend, plus the one
@@ -18,6 +19,7 @@ export class CatalogController {
   constructor(
     private readonly catalog: CatalogReadService,
     private readonly ledgerRead: LedgerReadService,
+    private readonly squareCatalogSync: SquareCatalogSyncService,
   ) {}
 
   @Get('locations')
@@ -104,6 +106,84 @@ export class CatalogController {
   setWarehouseVariantSquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
     const parsed = setSquareIdInputSchema.parse(body)
     return this.catalog.setWarehouseVariantSquareId(id, parsed.squareId)
+  }
+
+  /// Manually trigger a full Square catalog sync. Owner/WM only. Not automatic —
+  /// the operator runs it when they've added new items in Square that need to
+  /// show up in the mapping modal's dropdowns.
+  @Post('catalog/sync-square')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  syncSquare() {
+    return this.squareCatalogSync.sync()
+  }
+
+  /// List every locally-cached Square item (name + id + last-synced timestamp).
+  /// Feeds the sync page's "everything we know about Square" table.
+  @Get('catalog/square-items')
+  listSquareItems() {
+    return this.catalog.listSquareCatalogItems()
+  }
+
+  /// List cached Square variations under one item — powers the SKU dropdown
+  /// in the mapping modal.
+  @Get('catalog/square-items/:squareItemId/variations')
+  listSquareVariations(@Param('squareItemId') squareItemId: string) {
+    return this.catalog.listSquareCatalogVariations(squareItemId)
+  }
+
+  /// Product-list rows for the new mapping page. Each carries progress
+  /// (X of Y SKUs bound to a Square variation) so the operator can sort
+  /// by "needs attention first".
+  @Get('catalog/item-groups')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  listItemGroups() {
+    return this.catalog.listItemGroupMappingProgress()
+  }
+
+  /// Everything the mapping modal needs for one product in a single response.
+  @Get('catalog/item-groups/:id/mapping-detail')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  itemGroupDetail(@Param('id') id: string) {
+    return this.catalog.getItemGroupDetail(id)
+  }
+
+  /// Batch save from the mapping modal.
+  @Patch('catalog/item-groups/:id/mapping')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  updateItemGroupMapping(@Param('id') id: string, @Body() body: UpdateItemGroupMappingInput) {
+    const parsed = updateItemGroupMappingSchema.parse(body)
+    return this.catalog.updateItemGroupMapping(id, parsed)
+  }
+
+  /// Add a new attribute (axis) to a product. Modal fires this when operator
+  /// picks "+ Add axis" from the axis selector — payload is either a canonical
+  /// name (Color/Size/Style) or a custom operator-typed string.
+  @Post('catalog/item-groups/:id/attributes')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  createProductAttribute(@Param('id') id: string, @Body() body: CreateProductAttributeInput) {
+    const parsed = createProductAttributeInputSchema.parse(body)
+    return this.catalog.createProductAttribute(id, parsed.name, parsed.displayOrder)
+  }
+
+  /// Add a new allowed value to an existing axis. Note: adding a value does
+  /// not create new WarehouseVariant rows — that's a separate warehouse-side
+  /// action (creating physical stock). The value exists as a declared option
+  /// available for mapping when the WarehouseVariant is eventually created.
+  @Post('catalog/product-attributes/:attrId/values')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  createProductAttributeValue(@Param('attrId') attrId: string, @Body() body: CreateProductAttributeValueInput) {
+    const parsed = createProductAttributeValueInputSchema.parse(body)
+    return this.catalog.createProductAttributeValue(attrId, parsed.value, parsed.displayOrder)
+  }
+
+  /// Diagnostics for the sync page: Square items with no linked Winterborn
+  /// ItemGroup, and vice versa. Both directions matter — the first is "we've
+  /// synced this but haven't wired it up", the second is "we track this
+  /// internally but Square doesn't sell it (or the name doesn't match)".
+  @Get('catalog/square-mapping-orphans')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  squareMappingOrphans() {
+    return this.catalog.listMappingOrphans()
   }
 
   @Get('stock/by-family')

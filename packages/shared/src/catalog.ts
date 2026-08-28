@@ -191,6 +191,153 @@ export const squareMappingRowSchema = z.object({
 })
 export type SquareMappingRow = z.infer<typeof squareMappingRowSchema>
 
+/// Row for the /admin/square-mapping product-list screen. One per ItemGroup,
+/// with progress info so the operator can see at a glance which products
+/// still need attention.
+export const itemGroupMappingProgressSchema = z.object({
+  itemGroupId: z.string(),
+  itemGroupName: z.string(),
+  categoryName: z.string(),
+  squareItemId: z.string().nullable(),
+  totalSkus: z.number().int(),
+  mappedSkus: z.number().int(),
+  attributeCount: z.number().int(),
+})
+export type ItemGroupMappingProgress = z.infer<typeof itemGroupMappingProgressSchema>
+
+/// One axis on the product-detail response — Color / Size / Style / custom.
+export const itemGroupAttributeSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  displayOrder: z.number().int(),
+  values: z.array(
+    z.object({
+      id: z.string(),
+      value: z.string(),
+      displayOrder: z.number().int(),
+    }),
+  ),
+})
+export type ItemGroupAttribute = z.infer<typeof itemGroupAttributeSchema>
+
+/// One SKU row in the mapping modal, with its resolved attribute values and
+/// current Square binding. `attributeValues` lists the value IDs the SKU
+/// carries (one per axis), which the modal uses to display "Broad Stripes /
+/// Pink/Purple / Small" without a second lookup.
+export const itemGroupSkuSchema = z.object({
+  warehouseVariantId: z.string(),
+  warehouseSku: z.string(),
+  colourVariantName: z.string(),
+  sizeOptionName: z.string(),
+  squareVariationId: z.string().nullable(),
+  attributeValueIds: z.array(z.string()),
+})
+export type ItemGroupSku = z.infer<typeof itemGroupSkuSchema>
+
+/// Everything the mapping modal needs for one product. Includes any pre-cached
+/// Square candidates so the dropdown is populated without a second call.
+export const itemGroupDetailSchema = z.object({
+  itemGroupId: z.string(),
+  itemGroupName: z.string(),
+  categoryName: z.string(),
+  squareItemId: z.string().nullable(),
+  attributes: z.array(itemGroupAttributeSchema),
+  skus: z.array(itemGroupSkuSchema),
+  squareItemCandidates: z.array(z.object({ squareItemId: z.string(), name: z.string(), isBoundElsewhere: z.boolean() })),
+  squareVariationCandidates: z.array(
+    z.object({
+      squareVariationId: z.string(),
+      squareItemId: z.string(),
+      name: z.string(),
+      /// This Square variation is already the target of a WarehouseVariant
+      /// (or a Variation) mapping outside the ItemGroup being edited. Modal
+      /// hides it from the dropdown so the DB's unique constraint can never
+      /// bite the operator at save time.
+      isBoundElsewhere: z.boolean(),
+    }),
+  ),
+})
+export type ItemGroupDetail = z.infer<typeof itemGroupDetailSchema>
+
+/// POST /catalog/item-groups/:id/attributes — create a new axis on this
+/// ItemGroup ("Color", "Size", "Style", or an operator-typed custom name).
+/// P2002 collision surfaces as a Conflict (axis already exists on this product).
+export const createProductAttributeInputSchema = z.object({
+  name: z.string().trim().min(1).max(50),
+  displayOrder: z.number().int().optional(),
+})
+export type CreateProductAttributeInput = z.infer<typeof createProductAttributeInputSchema>
+
+/// POST /catalog/item-groups/:id/attributes/:attrId/values — add a new
+/// allowed value on an existing axis (e.g. "XL" on the Size axis).
+export const createProductAttributeValueInputSchema = z.object({
+  value: z.string().trim().min(1).max(100),
+  displayOrder: z.number().int().optional(),
+})
+export type CreateProductAttributeValueInput = z.infer<typeof createProductAttributeValueInputSchema>
+
+/// Body of PATCH /catalog/item-groups/:id/mapping. Atomically saves everything
+/// the modal edited: squareItemId, per-SKU squareVariationIds. Null clears a
+/// field. Missing keys leave the current value.
+export const updateItemGroupMappingSchema = z.object({
+  squareItemId: z.union([z.string(), z.null()]).optional(),
+  skus: z
+    .array(
+      z.object({
+        warehouseVariantId: z.string(),
+        squareVariationId: z.union([z.string(), z.null()]),
+      }),
+    )
+    .optional(),
+})
+export type UpdateItemGroupMappingInput = z.infer<typeof updateItemGroupMappingSchema>
+
+/// Locally-cached Square catalog item (result of GET /catalog/square-items).
+/// Populated by the Square catalog sync; the sync page shows the list, the
+/// mapping modal uses this as the source for its item dropdown.
+export const squareCatalogItemSchema = z.object({
+  squareItemId: z.string(),
+  name: z.string(),
+  categoryName: z.string().nullable(),
+  variationCount: z.number().int(),
+  lastSyncedAt: z.string(),
+})
+export type SquareCatalogItemDto = z.infer<typeof squareCatalogItemSchema>
+
+/// Variation under a cached Square catalog item (result of
+/// GET /catalog/square-items/:squareItemId/variations). Feeds the per-SKU
+/// dropdown in the mapping modal.
+export const squareCatalogVariationSchema = z.object({
+  squareVariationId: z.string(),
+  squareItemId: z.string(),
+  name: z.string(),
+  priceCents: z.number().int().nullable(),
+})
+export type SquareCatalogVariationDto = z.infer<typeof squareCatalogVariationSchema>
+
+/// Result of POST /catalog/sync-square — counts of what was upserted /
+/// pruned. `syncedAt` is the pass timestamp; the sync page renders "synced
+/// N minutes ago" against it.
+export const squareCatalogSyncResultSchema = z.object({
+  itemsSynced: z.number().int(),
+  variationsSynced: z.number().int(),
+  itemsRemoved: z.number().int(),
+  variationsRemoved: z.number().int(),
+  pages: z.number().int(),
+  syncedAt: z.string(),
+})
+export type SquareCatalogSyncResult = z.infer<typeof squareCatalogSyncResultSchema>
+
+/// Result of GET /catalog/square-mapping-orphans. Both directions of
+/// unlinked items — Square-only and Winterborn-only.
+export const squareMappingOrphansSchema = z.object({
+  squareOnly: z.array(z.object({ squareItemId: z.string(), name: z.string() })),
+  winterbornOnly: z.array(
+    z.object({ itemGroupId: z.string(), name: z.string(), categoryName: z.string() }),
+  ),
+})
+export type SquareMappingOrphans = z.infer<typeof squareMappingOrphansSchema>
+
 /// PATCH /catalog/item-groups/:id/square-id +
 /// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;
 /// the empty string is coerced to null so a blank input field doesn't

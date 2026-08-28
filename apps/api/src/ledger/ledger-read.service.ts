@@ -87,6 +87,19 @@ export class LedgerReadService {
     return agg._sum.quantity ?? 0
   }
 
+  /// Variant-grain on-hand. Used by dispatch validation and the pack-page
+  /// warning to know how many of a specific SKU (Blue Small, not "Blue"
+  /// family) can still leave the warehouse. Sums ledger events at variant
+  /// scope, so it correctly reflects DISPATCH + INTAKE + SALE + WRITE_OFF
+  /// history at that grain.
+  async onHandForWarehouseVariant(warehouseVariantId: string, locationId: string): Promise<number> {
+    const agg = await this.prisma.ledgerEvent.aggregate({
+      _sum: { quantity: true },
+      where: { warehouseVariantId, locationId },
+    })
+    return agg._sum.quantity ?? 0
+  }
+
   /**
    * Recomputes every balance from the raw event stream, deliberately via a
    * different code path than onHandByFamily: hand-written SQL against the

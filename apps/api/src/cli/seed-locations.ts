@@ -32,22 +32,6 @@ interface LocationSpec {
 
 const LOCATIONS: LocationSpec[] = [
   { name: 'Main Warehouse', kind: 'WAREHOUSE', timezone: 'America/Denver' },
-  { name: 'Atlanta', kind: 'MARKET', timezone: 'America/New_York' },
-  // Aurora IL (Chicago suburb). Aurora CO would collide with Denver.
-  { name: 'Aurora', kind: 'MARKET', timezone: 'America/Chicago' },
-  { name: 'Baltimore', kind: 'MARKET', timezone: 'America/New_York' },
-  { name: 'Boston (Snowport)', kind: 'MARKET', timezone: 'America/New_York' },
-  // Carmel IN (Christkindlmarkt), not Carmel CA.
-  { name: 'Carmel', kind: 'MARKET', timezone: 'America/Indiana/Indianapolis' },
-  { name: 'Chicago (Daley Plaza)', kind: 'MARKET', timezone: 'America/Chicago' },
-  { name: 'Chicago (Wrigley)', kind: 'MARKET', timezone: 'America/Chicago' },
-  { name: 'Cullman, AL', kind: 'MARKET', timezone: 'America/Chicago' },
-  { name: 'Denver', kind: 'MARKET', timezone: 'America/Denver' },
-  { name: 'Grand Rapids', kind: 'MARKET', timezone: 'America/Detroit' },
-  { name: 'Philadelphia', kind: 'MARKET', timezone: 'America/New_York' },
-  { name: 'Savannah, GA', kind: 'MARKET', timezone: 'America/New_York' },
-  { name: 'Seattle', kind: 'MARKET', timezone: 'America/Los_Angeles' },
-  { name: 'Washington DC', kind: 'MARKET', timezone: 'America/New_York' },
 ]
 
 async function main(): Promise<void> {

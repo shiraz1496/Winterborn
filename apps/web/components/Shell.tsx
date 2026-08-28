@@ -1,6 +1,6 @@
 'use client'
 
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import { useAuth } from '../lib/auth-context'
 import { logout } from '../lib/api'
 import { BottomNav } from './BottomNav'
@@ -26,22 +26,23 @@ function titleFor(pathname: string): string {
 }
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { user, refresh } = useAuth()
+  const { user } = useAuth()
   const pathname = usePathname()
-  const router = useRouter()
 
   if (pathname === '/login' || !user) {
     return <div className="app-shell">{children}</div>
   }
 
   async function onLogout() {
-    // Best-effort: even if the request fails (offline warehouse wifi),
-    // refresh() below re-checks /auth/me and the app still routes to
-    // /login on the resulting 401 -- so this never strands someone on a
-    // page that thinks it's signed in when the cookie is already gone.
+    // Best-effort server-side revoke: even on failure (offline warehouse
+    // wifi) we still want the client to end up at /login with fresh state.
     await logout().catch(() => {})
-    await refresh()
-    router.replace('/login')
+    // Full page load, not router.replace(). A client-side navigation can
+    // leave the current tree mounted with a stale user reference, and if
+    // refresh() throws (any non-401 network error) the navigation never
+    // runs at all. Full load also discards react/react-query caches so no
+    // data from the previous session survives.
+    window.location.href = '/login'
   }
 
   return (

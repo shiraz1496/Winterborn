@@ -39,8 +39,89 @@ model ItemGroup {
   category          Category           @relation(fields: [categoryId], references: [id])
   variations        Variation[]
   warehouseVariants WarehouseVariant[]
+  productAttributes ProductAttribute[]
 
   @@unique([categoryId, name])
+}
+
+/// Locally-cached Square catalog item, populated by the sync CLI /
+/// endpoint. The mapping modal reads from this cache so operators pick
+/// products by name from a dropdown instead of pasting IDs. `lastSyncedAt`
+/// lets the UI show a "stale by X hours" indicator. Cascade delete of
+/// SquareCatalogVariation via FK — a wiped item takes its variations with it.
+model SquareCatalogItem {
+  squareItemId String                   @id
+  name         String
+  categoryName String?
+  lastSyncedAt DateTime                 @default(now())
+  variations   SquareCatalogVariation[]
+
+  @@index([name])
+}
+
+/// Locally-cached Square catalog variation. Every ItemVariation object under
+/// every synced Item lives here — including the auto-created "Regular" one
+/// on visually-simple items (Dryer Balls). priceCents is captured for the
+/// UI's price-drift check (not enforced anywhere else).
+model SquareCatalogVariation {
+  squareVariationId String            @id
+  squareItemId      String
+  name              String
+  priceCents        Int?
+  lastSyncedAt      DateTime          @default(now())
+  item              SquareCatalogItem @relation(fields: [squareItemId], references: [squareItemId], onDelete: Cascade)
+
+  @@index([squareItemId])
+  @@index([name])
+}
+
+/// A variant axis declared for a specific ItemGroup. Each product carries as
+/// many of these as it needs — Earmuffs has just Color; Scarves has Style +
+/// Color + Size; Dryer Balls has none. `name` is a free-form string so
+/// operators can invent axes like "Yarn count" or "Weight" without a schema
+/// change. `displayOrder` controls the modal's rendering order.
+model ProductAttribute {
+  id           String  @id @default(cuid())
+  itemGroupId  String
+  name         String
+  displayOrder Int     @default(0)
+
+  itemGroup ItemGroup               @relation(fields: [itemGroupId], references: [id], onDelete: Cascade)
+  values    ProductAttributeValue[]
+
+  @@unique([itemGroupId, name])
+  @@index([itemGroupId])
+}
+
+/// One legal value on a given axis. "Black" for a Color axis, "Small" for a
+/// Size axis, "Broad Stripes" for a Style axis. WarehouseVariants hang off
+/// specific values via WarehouseVariantAttribute.
+model ProductAttributeValue {
+  id                 String @id @default(cuid())
+  productAttributeId String
+  value              String
+  displayOrder       Int    @default(0)
+
+  productAttribute ProductAttribute            @relation(fields: [productAttributeId], references: [id], onDelete: Cascade)
+  variantLinks     WarehouseVariantAttribute[]
+
+  @@unique([productAttributeId, value])
+  @@index([productAttributeId])
+}
+
+/// Join between a stock SKU and one of its attribute values. A WarehouseVariant
+/// with three axes (Style + Color + Size) has three rows here. A SKU with no
+/// axes (Dryer Balls Set of 3) has zero. This is the model that lets one code
+/// path handle products with wildly different variant structures.
+model WarehouseVariantAttribute {
+  warehouseVariantId      String
+  productAttributeValueId String
+
+  warehouseVariant      WarehouseVariant      @relation(fields: [warehouseVariantId], references: [id], onDelete: Cascade)
+  productAttributeValue ProductAttributeValue @relation(fields: [productAttributeValueId], references: [id], onDelete: Cascade)
+
+  @@id([warehouseVariantId, productAttributeValueId])
+  @@index([productAttributeValueId])
 }
 
 /// Tier 1: what the cashier taps. Becomes a Square variation.
@@ -141,11 +222,15 @@ model WarehouseVariant {
   colourVariant ColourVariant         @relation(fields: [colourVariantId], references: [id])
   sizeOption    SizeOption            @relation(fields: [sizeOptionId], references: [id])
   variation     Variation             @relation(fields: [variationId], references: [id])
+  attributes    WarehouseVariantAttribute[]
   boxLines      BoxLine[]
   requestLines  RestockRequestLine[]
   ledgerEvents  LedgerEvent[]
 
-  @@unique([itemGroupId, colourVariantId, sizeOptionId])
+  // Legacy uniqueness on (itemGroupId, colourVariantId, sizeOptionId) was
+  // dropped when the flexible attribute model took over — with colour as a
+  // placeholder for xlsx-imported rows, that composite collapses genuine
+  // per-colour SKUs into one row. warehouseSku is now the per-SKU identity.
   @@index([variationId])
 }
 
