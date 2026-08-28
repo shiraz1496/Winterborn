@@ -28,21 +28,36 @@ const prisma = new PrismaClient()
 interface SeedUserSpec {
   envEmail: string
   envPassword: string
+  envName: string
   role: UserRole
-  name: string
+  defaultName: string
   defaultEmail: string
   scopedToMarket?: boolean
+  scopedToWarehouse?: boolean
 }
 
 const DEFAULT_DEV_PASSWORD = 'winterborn-dev'
+const MAIN_WAREHOUSE_NAME = 'Main Warehouse'
+const MAIN_WAREHOUSE_TIMEZONE = 'America/Denver'
 
 const USERS: SeedUserSpec[] = [
   {
     envEmail: 'SEED_OWNER_EMAIL',
     envPassword: 'SEED_OWNER_PASSWORD',
+    envName: 'SEED_OWNER_NAME',
     role: 'OWNER',
-    name: 'Owner',
-    defaultEmail: 'owner@example.com',
+    defaultName: 'Owner',
+    defaultEmail: 'owner@winterborn.com',
+    scopedToWarehouse: true,
+  },
+  {
+    envEmail: 'SEED_WAREHOUSE_MANAGER_EMAIL',
+    envPassword: 'SEED_WAREHOUSE_MANAGER_PASSWORD',
+    envName: 'SEED_WAREHOUSE_MANAGER_NAME',
+    role: 'WAREHOUSE_MANAGER',
+    defaultName: 'Warehouse Manager',
+    defaultEmail: 'warehouse-manager@winterborn.com',
+    scopedToWarehouse: true,
   },
 ]
 
@@ -54,27 +69,49 @@ async function resolveMarketLocationId(): Promise<string | null> {
   return location?.id ?? null
 }
 
+/**
+ * Ensures the Main Warehouse row exists so warehouse-role users have a
+ * location to attach to. Idempotent -- upserts by name. Matches the row
+ * seed-locations.ts creates, so running either script (or both) yields
+ * the same warehouse. Kept here so a fresh `pnpm cli:seed-users` on an
+ * empty DB is self-sufficient and doesn't require seed-locations first.
+ */
+async function ensureMainWarehouse(): Promise<string> {
+  const row = await prisma.location.upsert({
+    where: { name: MAIN_WAREHOUSE_NAME },
+    create: { name: MAIN_WAREHOUSE_NAME, kind: 'WAREHOUSE', timezone: MAIN_WAREHOUSE_TIMEZONE },
+    update: {},
+  })
+  return row.id
+}
+
 function resolvePassword(spec: SeedUserSpec): string {
   return process.env[spec.envPassword] ?? process.env.SEED_DEFAULT_PASSWORD ?? DEFAULT_DEV_PASSWORD
 }
 
 async function main(): Promise<void> {
   const marketLocationId = await resolveMarketLocationId()
+  const warehouseLocationId = await ensureMainWarehouse()
 
   for (const spec of USERS) {
     const email = process.env[spec.envEmail] ?? spec.defaultEmail
+    const name = process.env[spec.envName] ?? spec.defaultName
     const password = resolvePassword(spec)
     const passwordHash = await hashArgon2(password)
-    const locationId = spec.scopedToMarket ? marketLocationId : null
+    const locationId = spec.scopedToMarket
+      ? marketLocationId
+      : spec.scopedToWarehouse
+        ? warehouseLocationId
+        : null
     if (spec.scopedToMarket && !locationId) {
       console.warn(`no MARKET location found -- seeding ${email} without a location scope`)
     }
     await prisma.user.upsert({
       where: { email },
-      create: { email, name: spec.name, role: spec.role, locationId, passwordHash },
-      update: { role: spec.role, locationId, passwordHash },
+      create: { email, name, role: spec.role, locationId, passwordHash },
+      update: { name, role: spec.role, locationId, passwordHash },
     })
-    console.log(`seeded ${spec.role} <${email}> password=${password}${locationId ? ` scoped to ${locationId}` : ''}`)
+    console.log(`seeded ${spec.role} <${email}> name="${name}" password=${password}${locationId ? ` scoped to ${locationId}` : ''}`)
   }
 }
 

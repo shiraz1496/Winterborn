@@ -11,6 +11,13 @@ import {
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 
+/// Roles whose "home" is the warehouse. In a single-warehouse deployment
+/// the API auto-attaches them to that warehouse -- the admin UI never
+/// asks for a location for these roles. When multi-warehouse becomes a
+/// thing, the UI will start passing an explicit locationId, and the
+/// auto-attach here becomes a fallback (only fires if caller omits it).
+const WAREHOUSE_ROLES = new Set<string>(['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'])
+
 /// Owner-only user administration. Everything password-related routes
 /// through @node-rs/argon2 with library defaults, matching cli:seed-users
 /// -- so a user created here is indistinguishable from one seeded.
@@ -36,7 +43,8 @@ export class AdminUsersService {
 
   async create(raw: CreateAdminUserInput): Promise<AdminUserWithPasswordDto> {
     const input = createAdminUserInputSchema.parse(raw)
-    await this.assertLocationValidForRole(input.role, input.locationId ?? null)
+    const locationId = await this.resolveLocationForRole(input.role, input.locationId ?? null)
+    await this.assertLocationValidForRole(input.role, locationId)
     const passwordHash = input.password ? await hashArgon2(input.password) : null
 
     try {
@@ -45,7 +53,7 @@ export class AdminUsersService {
           email: input.email,
           name: input.name,
           role: input.role,
-          locationId: input.locationId ?? null,
+          locationId,
           passwordHash,
         },
       })
@@ -65,7 +73,10 @@ export class AdminUsersService {
 
     const nextRole = input.role ?? existing.role
     // `locationId: undefined` means "don't touch"; `null` means "clear it".
-    const nextLocationId = input.locationId === undefined ? existing.locationId : input.locationId
+    const requestedLocationId = input.locationId === undefined ? existing.locationId : input.locationId
+    // Auto-attach the single warehouse for warehouse-role users when the
+    // caller didn't pick one (UI hides the dropdown for these roles).
+    const nextLocationId = await this.resolveLocationForRole(nextRole, requestedLocationId)
     await this.assertLocationValidForRole(nextRole, nextLocationId)
 
     if (input.isActive === false && existing.id === actorId) {
@@ -92,11 +103,30 @@ export class AdminUsersService {
         name: input.name,
         role: input.role,
         isActive: input.isActive,
-        locationId: input.locationId === undefined ? undefined : input.locationId,
+        // Write nextLocationId when the caller sent the field OR the role
+        // change forced an auto-attach; otherwise leave the row alone.
+        locationId:
+          input.locationId === undefined && nextLocationId === existing.locationId ? undefined : nextLocationId,
         passwordHash,
       },
     })
     return { ...toDto(updated), password: input.password ?? null }
+  }
+
+  /**
+   * Warehouse-role users are auto-attached to the single warehouse when
+   * the caller doesn't specify one. If the caller *does* specify one, we
+   * respect it (future multi-warehouse deployments will send explicit
+   * ids). Non-warehouse roles pass through unchanged.
+   */
+  private async resolveLocationForRole(role: string, requestedLocationId: string | null): Promise<string | null> {
+    if (!WAREHOUSE_ROLES.has(role)) return requestedLocationId
+    if (requestedLocationId) return requestedLocationId
+    const warehouse = await this.prisma.location.findFirst({
+      where: { kind: 'WAREHOUSE' },
+      orderBy: { name: 'asc' },
+    })
+    return warehouse?.id ?? null
   }
 
   private async assertLocationValidForRole(role: string, locationId: string | null): Promise<void> {
@@ -105,6 +135,9 @@ export class AdminUsersService {
     if (!loc) throw new BadRequestException(`location ${locationId} does not exist`)
     if (role === 'MARKET_MANAGER' && loc.kind !== 'MARKET') {
       throw new BadRequestException('a MARKET_MANAGER must be scoped to a MARKET location')
+    }
+    if (WAREHOUSE_ROLES.has(role) && loc.kind !== 'WAREHOUSE') {
+      throw new BadRequestException(`a ${role} must be scoped to a WAREHOUSE location`)
     }
   }
 }
