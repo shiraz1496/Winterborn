@@ -60,10 +60,12 @@ WORKDIR /app
 # (e.g. `pnpm deploy`) would put dist/ at a different depth and silently
 # break that path, so this copies /repo as-is rather than flattening it.
 COPY --from=build /repo ./
-# Not part of the build stage (build only ever COPYs packages/ and
-# apps/api/ from the host, never all of data/) -- added here from the
-# host build context. Small (hundreds of JPEGs) and not secret; if that
-# stops being true, serve it from object storage instead of baking it in.
-COPY data/photos ./data/photos
+# Photos are .gitignored on this repo (95MB, ~512 JPEGs) and therefore
+# absent from the CI / Render build context, so a plain COPY hard-fails
+# the build. Create an empty directory instead so useStaticAssets in
+# main.ts has a real path to serve from -- missing photos will 404 at
+# runtime, but the rest of the app boots. Long-term this content belongs
+# in object storage (S3 / R2), not baked into the image.
+RUN mkdir -p ./data/photos
 EXPOSE 3001
 CMD ["node", "apps/api/dist/main.js"]
