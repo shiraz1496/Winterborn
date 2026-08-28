@@ -428,7 +428,10 @@ function PackBody() {
         }
         const groups = new Map<string, FamilyGroup>()
         for (const line of request.lines) {
-          const g = groups.get(line.variationId) ?? {
+          // Explicit FamilyGroup annotation so the `lines: []` in the
+          // fallback literal widens to typeof request.lines instead of
+          // being inferred as never[] (which blocks the g.lines.push below).
+          const g: FamilyGroup = groups.get(line.variationId) ?? {
             variationId: line.variationId,
             lines: [],
             familyTotalRequested: 0,
