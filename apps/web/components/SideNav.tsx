@@ -83,7 +83,7 @@ const TABS: Tab[] = [
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/notifications', label: 'Notifications', icon: 'bell', roles: REQUEST_VIEW_ROLES },
-  { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  // { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/square-sync', label: 'Square sync', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
