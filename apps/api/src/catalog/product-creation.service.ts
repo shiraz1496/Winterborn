@@ -130,6 +130,7 @@ export class ProductCreationService {
       /// caught and the existing row reused so the retry is idempotent).
       const sizeOptionCache = new Map<string, string>()
       const colourVariantCache = new Map<string, string>()
+      const colourVariantHasPhoto = new Map<string, boolean>()
       const variationCache = new Map<string, string>()
 
       const createdSkus: Array<{
@@ -142,6 +143,7 @@ export class ProductCreationService {
         colourVariantName: string
         sizeOptionName: string
         warehouseSku: string
+        photoUrl: string | null
       }> = []
 
       for (const cell of nonZeroCells) {
@@ -162,6 +164,9 @@ export class ProductCreationService {
         const colourVariantName =
           cell.colour && style ? `${cell.colour} (${style})` : (cell.colour ?? style ?? NO_COLOUR_LABEL)
 
+        const matrixKey = `${cell.primary ?? NONE}::${cell.colour ?? NONE}`
+        const photoUrls = input.photoUrls[matrixKey] ?? []
+
         let sizeOptionId = sizeOptionCache.get(sizeName)
         if (!sizeOptionId) {
           const so = await tx.sizeOption.upsert({
@@ -181,6 +186,7 @@ export class ProductCreationService {
               colourFamilyId: colourFamily.id,
               name: colourVariantName,
               normalisedName: colourVariantName.trim().toLowerCase(),
+              photoUrl: photoUrls[0] ?? null,
               familyAssignmentSource: 'MANUAL',
               familyConfidence: 0,
             },
@@ -188,6 +194,13 @@ export class ProductCreationService {
           })
           colourVariantId = cv.id
           colourVariantCache.set(colourVariantName, colourVariantId)
+          colourVariantHasPhoto.set(colourVariantId, Boolean(cv.photoUrl))
+        }
+        // Backfill only -- never overwrite a colour's existing representative
+        // photo, same rule the Sortly importer's getOrCreateColourVariant uses.
+        if (!colourVariantHasPhoto.get(colourVariantId) && photoUrls[0]) {
+          await tx.colourVariant.update({ where: { id: colourVariantId }, data: { photoUrl: photoUrls[0] } })
+          colourVariantHasPhoto.set(colourVariantId, true)
         }
 
         const variationKey = `${itemGroup.id}::${colourFamily.id}::${sizeOptionId}`
@@ -221,7 +234,7 @@ export class ProductCreationService {
               variationId,
               warehouseSku,
               unitCostCents: input.unitCostCents,
-              photoUrls: [],
+              photoUrls,
             },
           })
         } catch (err) {
@@ -258,6 +271,7 @@ export class ProductCreationService {
           colourVariantName,
           sizeOptionName: sizeName,
           warehouseSku: wv.warehouseSku,
+          photoUrl: wv.photoUrls[0] ?? null,
         })
       }
 
@@ -300,7 +314,7 @@ export class ProductCreationService {
         colourVariantName: created.colourVariantName,
         sizeOptionName: created.sizeOptionName,
         warehouseSku: created.warehouseSku,
-        photoUrl: null,
+        photoUrl: created.photoUrl,
       }
       skus.push({
         warehouseVariant: summary,

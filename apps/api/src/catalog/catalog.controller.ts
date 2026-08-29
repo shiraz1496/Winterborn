@@ -10,6 +10,7 @@ import { CatalogReadService } from './catalog-read.service.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
+import { CloudinarySignatureService } from './cloudinary-signature.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// Read-only catalog/stock/location surface for the frontend, plus the one
@@ -26,6 +27,7 @@ export class CatalogController {
     private readonly squareCatalogSync: SquareCatalogSyncService,
     private readonly stockCorrection: StockCorrectionService,
     private readonly productCreation: ProductCreationService,
+    private readonly cloudinarySignature: CloudinarySignatureService,
   ) {}
 
   @Get('locations')
@@ -73,6 +75,15 @@ export class CatalogController {
   @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
   createProduct(@Body() body: CreateProductInput, @CurrentUser() user: CurrentUserPayload) {
     return this.productCreation.create(body, user)
+  }
+
+  /// Short-lived Cloudinary upload authorization for the intake modal's
+  /// photo capture (mobile/tablet only). No request body -- every signed
+  /// upload goes to the same server-configured folder.
+  @Post('catalog/products/upload-signature')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
+  uploadSignature() {
+    return this.cloudinarySignature.sign()
   }
 
   @Get('catalog/size-options')

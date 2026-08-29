@@ -41,7 +41,15 @@ export function FolderChainPicker({
   onChange: (chain: string[]) => void
 }) {
   const [levels, setLevels] = useState<LevelState[]>([])
-  const [rootId, setRootId] = useState<string | null>(null)
+  // A catalog with more than one top-level folder (no single root to
+  // auto-unwrap -- see browseFolder) legitimately has no root id even
+  // after a successful load. This used to be tracked by checking whether
+  // a `rootId` state was still null, which conflated "hasn't loaded yet"
+  // with "loaded, and there's no single root" -- the picker got stuck on
+  // "Loading folders…" forever whenever the catalog didn't have exactly
+  // one root. `loaded` tracks the real thing: has the initial fetch
+  // settled, success or not.
+  const [loaded, setLoaded] = useState(false)
   const [rootError, setRootError] = useState<string | null>(null)
 
   /// Fetch the direct children of `parentId` (or of the tree root when
@@ -69,7 +77,6 @@ export function FolderChainPicker({
       try {
         const { options, effectiveParentId, effectiveParentName } = await fetchChildren(null)
         if (cancelled) return
-        setRootId(effectiveParentId)
         setLevels([
           {
             parentId: effectiveParentId,
@@ -84,6 +91,8 @@ export function FolderChainPicker({
       } catch (err) {
         if (cancelled) return
         setRootError(err instanceof ApiError ? err.message : 'Could not load folders.')
+      } finally {
+        if (!cancelled) setLoaded(true)
       }
     })()
     return () => {
@@ -271,7 +280,7 @@ export function FolderChainPicker({
   if (rootError) {
     return <p className="error-banner">{rootError}</p>
   }
-  if (rootId === null) {
+  if (!loaded) {
     return (
       <div style={{ padding: 8, color: 'var(--text-dim)', fontSize: '0.85rem' }}>
         Loading folders…
