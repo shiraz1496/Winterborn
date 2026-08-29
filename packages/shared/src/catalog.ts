@@ -61,7 +61,10 @@ export const variationSummarySchema = z.object({
 export type VariationSummary = z.infer<typeof variationSummarySchema>
 
 /// Variant-level ("what's actually in the box") stock unit. StockLevel.warehouseVariantId
-/// points at rows of this shape.
+/// points at rows of this shape. `photoUrl` is the first Sortly-archived photo
+/// for this SKU (WarehouseVariant.photoUrls[0]) with the ColourVariant.photoUrl
+/// backfill as fallback — surfaced so browse screens can render a thumbnail
+/// without a second call.
 export const warehouseVariantSummarySchema = z.object({
   id: z.string(),
   variationId: z.string(),
@@ -69,6 +72,7 @@ export const warehouseVariantSummarySchema = z.object({
   colourVariantName: z.string(),
   sizeOptionName: z.string(),
   warehouseSku: z.string(),
+  photoUrl: z.string().nullable(),
 })
 export type WarehouseVariantSummary = z.infer<typeof warehouseVariantSummarySchema>
 
@@ -337,6 +341,142 @@ export const squareMappingOrphansSchema = z.object({
   ),
 })
 export type SquareMappingOrphans = z.infer<typeof squareMappingOrphansSchema>
+
+/// One row in the Sortly-style folder browser at either the category or
+/// item-group level. `subfolderCount` is 0 for item-group rows (the leaf
+/// level below is items, not more folders). `previewPhotoUrl` is the first
+/// available photo in that folder — used as the folder tile's thumbnail.
+/// Quantity and value are aggregated across warehouse-kind locations only,
+/// mirroring Sortly's "IN STOCK" root.
+export const catalogFolderRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  subfolderCount: z.number().int(),
+  itemCount: z.number().int(),
+  totalQty: z.number().int(),
+  totalValueCents: z.number().int(),
+  previewPhotoUrl: z.string().nullable(),
+})
+export type CatalogFolderRow = z.infer<typeof catalogFolderRowSchema>
+
+/// One breadcrumb step: parent id + name. The client renders these as
+/// links from root down to (but not including) the currently-viewed folder.
+export const catalogCrumbSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+})
+export type CatalogCrumb = z.infer<typeof catalogCrumbSchema>
+
+/// Tree-aware browse response for GET /catalog/browse?folderId=…. `folder`
+/// is null at the top level (no folderId supplied) — otherwise it's the
+/// current folder metadata. `breadcrumb` walks ancestors root-first,
+/// EXCLUDING the current folder. `subfolders` is the direct-child Category
+/// rows; `itemGroups` is the direct-child ItemGroup rows exposed with the
+/// same tile shape (they render as folders in the grid). A leaf folder
+/// with no children returns both arrays empty and the client redirects to
+/// its item-group view.
+export const catalogBrowseResponseSchema = z.object({
+  folder: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      parentId: z.string().nullable(),
+    })
+    .nullable(),
+  breadcrumb: z.array(catalogCrumbSchema),
+  subfolders: z.array(catalogFolderRowSchema),
+  itemGroups: z.array(catalogFolderRowSchema),
+})
+export type CatalogBrowseResponse = z.infer<typeof catalogBrowseResponseSchema>
+
+/// Leaf-level row: one WarehouseVariant, with warehouse-wide on-hand and
+/// unit cost. Value = onHand × unitCostCents (client renders as dollars).
+export const catalogItemRowSchema = z.object({
+  warehouseVariantId: z.string(),
+  itemGroupId: z.string(),
+  itemGroupName: z.string(),
+  colourVariantName: z.string(),
+  colourFamilyName: z.string(),
+  sizeOptionName: z.string(),
+  warehouseSku: z.string(),
+  photoUrl: z.string().nullable(),
+  onHand: z.number().int(),
+  unitCostCents: z.number().int().nullable(),
+})
+export type CatalogItemRow = z.infer<typeof catalogItemRowSchema>
+
+/// One item-group SKU-grid response: metadata about the group + its
+/// breadcrumb (so the client can render the crumb trail with one call)
+/// plus the leaf rows themselves.
+export const catalogItemGroupPageSchema = z.object({
+  itemGroup: z.object({
+    id: z.string(),
+    name: z.string(),
+    categoryId: z.string(),
+  }),
+  breadcrumb: z.array(catalogCrumbSchema),
+  items: z.array(catalogItemRowSchema),
+})
+export type CatalogItemGroupPage = z.infer<typeof catalogItemGroupPageSchema>
+
+/// Per-warehouse on-hand slice, so the detail screen can show the count at
+/// each warehouse if there are several. `locationName` is denormalised in
+/// so the UI can list "Warehouse: 42" without a separate /locations lookup.
+export const catalogItemStockRowSchema = z.object({
+  locationId: z.string(),
+  locationName: z.string(),
+  onHand: z.number().int(),
+})
+export type CatalogItemStockRow = z.infer<typeof catalogItemStockRowSchema>
+
+/// Full detail response for one WarehouseVariant. Includes breadcrumb parts
+/// (categoryId/Name, itemGroupId/Name) so the detail page can render its
+/// crumb trail from a single request; photoUrls is the whole Sortly archive
+/// (not just the first), for a lightbox/gallery.
+export const catalogItemDetailSchema = z.object({
+  warehouseVariantId: z.string(),
+  warehouseSku: z.string(),
+  categoryId: z.string(),
+  categoryName: z.string(),
+  itemGroupId: z.string(),
+  itemGroupName: z.string(),
+  variationId: z.string(),
+  colourVariantName: z.string(),
+  colourFamilyName: z.string(),
+  sizeOptionName: z.string(),
+  photoUrls: z.array(z.string()),
+  unitCostCents: z.number().int().nullable(),
+  totalOnHand: z.number().int(),
+  stockByLocation: z.array(catalogItemStockRowSchema),
+  /// Ancestors of the leaf Category root-first (INCLUDING the leaf
+  /// category itself). Lets the item-detail page render its full crumb
+  /// trail without a follow-up browse call.
+  breadcrumb: z.array(catalogCrumbSchema),
+})
+export type CatalogItemDetail = z.infer<typeof catalogItemDetailSchema>
+
+/// POST /stock/correction — user-entered target on-hand for a
+/// WarehouseVariant at a specific warehouse location. Server computes the
+/// signed delta against the current on-hand and appends a CORRECTION ledger
+/// event. `note` is captured for the audit trail (e.g. "physical count Q4
+/// 2025", "damaged during move").
+export const stockCorrectionInputSchema = z.object({
+  warehouseVariantId: z.string().min(1),
+  locationId: z.string().min(1),
+  newOnHand: z.number().int().min(0),
+  note: z.string().max(500).optional(),
+})
+export type StockCorrectionInput = z.infer<typeof stockCorrectionInputSchema>
+
+/// `delta` is 0 when the target already equals the current on-hand — the
+/// server returns `created: false` and no ledger row is appended.
+export const stockCorrectionResultSchema = z.object({
+  eventId: z.string().nullable(),
+  created: z.boolean(),
+  onHand: z.number().int(),
+  delta: z.number().int(),
+})
+export type StockCorrectionResult = z.infer<typeof stockCorrectionResultSchema>
 
 /// PATCH /catalog/item-groups/:id/square-id +
 /// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;

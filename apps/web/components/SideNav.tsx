@@ -61,6 +61,14 @@ const ICONS = {
       <path d="M9 9h6v6H9z" />
     </svg>
   ),
+  catalog: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="8" height="8" rx="1.5" />
+      <rect x="13" y="3" width="8" height="8" rx="1.5" />
+      <rect x="3" y="13" width="8" height="8" rx="1.5" />
+      <rect x="13" y="13" width="8" height="8" rx="1.5" />
+    </svg>
+  ),
 }
 
 const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
@@ -82,6 +90,7 @@ const TABS: Tab[] = [
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
+  { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: WAREHOUSE_ROLES },
   { href: '/notifications', label: 'Notifications', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   // { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },

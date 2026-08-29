@@ -2,6 +2,11 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import type {
+  CatalogBrowseResponse,
+  CatalogFolderRow,
+  CatalogItemDetail,
+  CatalogItemGroupPage,
+  CatalogItemRow,
   CategoryDto,
   ColourFamilyDto,
   CreateWarehouseVariantInput,
@@ -187,6 +192,7 @@ export class CatalogReadService {
         colourVariantName: colourVariant.name,
         sizeOptionName: sizeOption.name,
         warehouseSku: created.warehouseSku,
+        photoUrl: colourVariant.photoUrl ?? null,
       }
     })
   }
@@ -204,6 +210,7 @@ export class CatalogReadService {
       colourVariantName: r.colourVariant.name,
       sizeOptionName: r.sizeOption.name,
       warehouseSku: r.warehouseSku,
+      photoUrl: r.photoUrls[0] ?? r.colourVariant.photoUrl ?? null,
     }))
   }
 
@@ -696,6 +703,316 @@ export class CatalogReadService {
       .filter((ig) => ig.squareItemId === null || !linkedGroupSquareIds.has(ig.squareItemId))
       .map((ig) => ({ itemGroupId: ig.id, name: ig.name, categoryName: ig.category.name }))
     return { squareOnly, winterbornOnly }
+  }
+
+  /// Aggregate on-hand across warehouse-kind locations only, per
+  /// WarehouseVariant. Mirrors Sortly's "IN STOCK" root — market on-hand
+  /// (a market's copy of dispatched-but-not-sold stock) is deliberately
+  /// excluded because the folder browser is a warehouse tool.
+  private async warehouseOnHandByVariant(): Promise<Map<string, number>> {
+    const warehouses = await this.prisma.location.findMany({
+      where: { kind: 'WAREHOUSE' },
+      select: { id: true },
+    })
+    const warehouseIds = warehouses.map((w) => w.id)
+    if (warehouseIds.length === 0) return new Map()
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['warehouseVariantId'],
+      _sum: { quantity: true },
+      where: {
+        warehouseVariantId: { not: null },
+        locationId: { in: warehouseIds },
+      },
+    })
+    const out = new Map<string, number>()
+    for (const r of rows) {
+      if (r.warehouseVariantId) out.set(r.warehouseVariantId, r._sum.quantity ?? 0)
+    }
+    return out
+  }
+
+  /// Leaf rows: one WarehouseVariant per card, with warehouse-wide on-hand.
+  /// Response also carries the item group's parent Category chain so the
+  /// UI renders its breadcrumb from a single call.
+  async listItemGroupItems(itemGroupId: string): Promise<CatalogItemGroupPage> {
+    const itemGroup = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
+    if (!itemGroup) throw new NotFoundException(`item group ${itemGroupId} not found`)
+    const [variants, onHandMap, categories] = await Promise.all([
+      this.prisma.warehouseVariant.findMany({
+        where: { itemGroupId },
+        include: {
+          itemGroup: { select: { name: true } },
+          colourVariant: { select: { name: true, photoUrl: true, colourFamily: { select: { name: true } } } },
+          sizeOption: { select: { name: true } },
+          variation: { select: { colourFamily: { select: { name: true } } } },
+        },
+        orderBy: { warehouseSku: 'asc' },
+      }),
+      this.warehouseOnHandByVariant(),
+      this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
+    ])
+    const catById = new Map(categories.map((c) => [c.id, c]))
+    const breadcrumb: Array<{ id: string; name: string }> = []
+    let cursor: string | null = itemGroup.categoryId
+    while (cursor) {
+      const c = catById.get(cursor)
+      if (!c) break
+      breadcrumb.unshift({ id: c.id, name: c.name })
+      cursor = c.parentId
+    }
+    const items: CatalogItemRow[] = variants.map((wv) => ({
+      warehouseVariantId: wv.id,
+      itemGroupId: wv.itemGroupId,
+      itemGroupName: wv.itemGroup.name,
+      colourVariantName: wv.colourVariant.name,
+      colourFamilyName: wv.variation.colourFamily.name,
+      sizeOptionName: wv.sizeOption.name,
+      warehouseSku: wv.warehouseSku,
+      photoUrl: wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null,
+      onHand: onHandMap.get(wv.id) ?? 0,
+      unitCostCents: wv.unitCostCents,
+    }))
+    return {
+      itemGroup: { id: itemGroup.id, name: itemGroup.name, categoryId: itemGroup.categoryId },
+      breadcrumb,
+      items,
+    }
+  }
+
+  /// Full detail for one SKU: photos, breadcrumb parts, and a per-warehouse
+  /// on-hand breakdown so the "edit count" form knows which location it's
+  /// correcting. Only warehouse-kind locations are surfaced — market copies
+  /// aren't editable from this screen.
+  async getCatalogItemDetail(warehouseVariantId: string): Promise<CatalogItemDetail> {
+    const wv = await this.prisma.warehouseVariant.findUnique({
+      where: { id: warehouseVariantId },
+      include: {
+        itemGroup: { include: { category: true } },
+        colourVariant: { include: { colourFamily: true } },
+        sizeOption: true,
+        variation: { include: { colourFamily: true } },
+      },
+    })
+    if (!wv) throw new NotFoundException(`warehouse variant ${warehouseVariantId} not found`)
+    const [warehouses, allCategories] = await Promise.all([
+      this.prisma.location.findMany({ where: { kind: 'WAREHOUSE', isActive: true }, orderBy: { name: 'asc' } }),
+      this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
+    ])
+    const catById = new Map(allCategories.map((c) => [c.id, c]))
+    const breadcrumb: Array<{ id: string; name: string }> = []
+    let cursor: string | null = wv.itemGroup.category.id
+    while (cursor) {
+      const c = catById.get(cursor)
+      if (!c) break
+      breadcrumb.unshift({ id: c.id, name: c.name })
+      cursor = c.parentId
+    }
+    const rows = warehouses.length > 0
+      ? await this.prisma.ledgerEvent.groupBy({
+          by: ['locationId'],
+          _sum: { quantity: true },
+          where: {
+            warehouseVariantId,
+            locationId: { in: warehouses.map((w) => w.id) },
+          },
+        })
+      : []
+    const onHandByLoc = new Map(rows.map((r) => [r.locationId, r._sum.quantity ?? 0]))
+    const stockByLocation = warehouses.map((w) => ({
+      locationId: w.id,
+      locationName: w.name,
+      onHand: onHandByLoc.get(w.id) ?? 0,
+    }))
+    const totalOnHand = stockByLocation.reduce((s, r) => s + r.onHand, 0)
+    const backfillPhoto = wv.colourVariant.photoUrl
+    const photoUrls = wv.photoUrls.length > 0 ? wv.photoUrls : backfillPhoto ? [backfillPhoto] : []
+    return {
+      warehouseVariantId: wv.id,
+      warehouseSku: wv.warehouseSku,
+      categoryId: wv.itemGroup.category.id,
+      categoryName: wv.itemGroup.category.name,
+      itemGroupId: wv.itemGroup.id,
+      itemGroupName: wv.itemGroup.name,
+      variationId: wv.variationId,
+      colourVariantName: wv.colourVariant.name,
+      colourFamilyName: wv.variation.colourFamily.name,
+      sizeOptionName: wv.sizeOption.name,
+      photoUrls,
+      unitCostCents: wv.unitCostCents,
+      totalOnHand,
+      stockByLocation,
+      breadcrumb,
+    }
+  }
+
+  /// Tree-aware browse. Returns the direct children (subfolders and
+  /// item-groups) of the folder identified by `folderId`, or of the top
+  /// level if no id is given (in which case any root-parent Categories
+  /// surface — for Sortly-imported data that's just "BärHaus (IN STOCK)").
+  ///
+  /// Every subfolder tile carries totals aggregated over its ENTIRE
+  /// subtree (item count + warehouse on-hand + value), so the operator
+  /// can see "Footwear = 129 items, 12,670 units" without drilling in.
+  /// Item-group tiles carry only their own direct SKU totals — they're
+  /// leaves.
+  async browseFolder(folderId: string | null): Promise<CatalogBrowseResponse> {
+    // 1. Fetch every Category once (small, ~20 rows) and build parent/child
+    //    lookups. Everything below runs off these in-memory structures so
+    //    the response is one Category-level SELECT no matter how deep the
+    //    tree is.
+    const allCategories = await this.prisma.category.findMany({
+      orderBy: { name: 'asc' },
+    })
+    const catById = new Map(allCategories.map((c) => [c.id, c]))
+    const childrenOf = new Map<string | null, typeof allCategories>()
+    for (const c of allCategories) {
+      const bucket = childrenOf.get(c.parentId) ?? []
+      bucket.push(c)
+      childrenOf.set(c.parentId, bucket)
+    }
+
+    // 2. Resolve current folder + breadcrumb (root-first, excluding self).
+    const folder = folderId ? catById.get(folderId) ?? null : null
+    if (folderId && !folder) throw new NotFoundException(`folder ${folderId} not found`)
+    const breadcrumb: Array<{ id: string; name: string }> = []
+    if (folder) {
+      let cursor = folder.parentId ? catById.get(folder.parentId) : null
+      while (cursor) {
+        breadcrumb.unshift({ id: cursor.id, name: cursor.name })
+        cursor = cursor.parentId ? catById.get(cursor.parentId) : null
+      }
+    }
+
+    // 3. Aggregate SKU-level metrics (photo, count, on-hand, value) up
+    //    the ancestry so every folder in the tree knows its subtree
+    //    totals in one pass.
+    const [allVariants, onHandMap, allItemGroups] = await Promise.all([
+      this.prisma.warehouseVariant.findMany({
+        include: {
+          itemGroup: { select: { id: true, categoryId: true, name: true } },
+          colourVariant: { select: { photoUrl: true } },
+        },
+        orderBy: { warehouseSku: 'asc' },
+      }),
+      this.warehouseOnHandByVariant(),
+      this.prisma.itemGroup.findMany({ orderBy: { name: 'asc' } }),
+    ])
+
+    interface Bucket {
+      itemCount: number
+      totalQty: number
+      totalValueCents: number
+      previewPhotoUrl: string | null
+    }
+    const emptyBucket = (): Bucket => ({ itemCount: 0, totalQty: 0, totalValueCents: 0, previewPhotoUrl: null })
+
+    /// Per-Category subtree totals (walks descendants), and per-ItemGroup
+    /// direct totals. Photo is the deterministic first non-null preview
+    /// in warehouseSku order (already ordered by the query above).
+    const categoryTotals = new Map<string, Bucket>()
+    const itemGroupTotals = new Map<string, Bucket>()
+    for (const c of allCategories) categoryTotals.set(c.id, emptyBucket())
+    for (const ig of allItemGroups) itemGroupTotals.set(ig.id, emptyBucket())
+
+    /// Walk this WV up the category chain and credit every ancestor.
+    const creditAncestors = (leafCatId: string, itemCount: number, qty: number, valueCents: number, photo: string | null) => {
+      let cursor: string | null = leafCatId
+      while (cursor) {
+        const bucket = categoryTotals.get(cursor)
+        if (!bucket) break
+        bucket.itemCount += itemCount
+        bucket.totalQty += qty
+        bucket.totalValueCents += valueCents
+        if (bucket.previewPhotoUrl === null && photo) bucket.previewPhotoUrl = photo
+        const parent: string | null = catById.get(cursor)?.parentId ?? null
+        cursor = parent
+      }
+    }
+
+    for (const wv of allVariants) {
+      const onHand = onHandMap.get(wv.id) ?? 0
+      const valueCents = onHand * (wv.unitCostCents ?? 0)
+      const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
+
+      // Item group leaf totals (direct SKUs only)
+      const igBucket = itemGroupTotals.get(wv.itemGroup.id)
+      if (igBucket) {
+        igBucket.itemCount += 1
+        igBucket.totalQty += onHand
+        igBucket.totalValueCents += valueCents
+        if (igBucket.previewPhotoUrl === null && photo) igBucket.previewPhotoUrl = photo
+      }
+
+      // Subtree category totals: every ancestor Category up to root
+      creditAncestors(wv.itemGroup.categoryId, 1, onHand, valueCents, photo)
+    }
+
+    /// Materialise a Category as a folder tile. subfolderCount is the
+    /// number of *direct* children (subfolders + itemGroups), which is
+    /// what the tile's 📁 badge shows.
+    const toFolderRow = (cat: typeof allCategories[number]): CatalogFolderRow => {
+      const b = categoryTotals.get(cat.id) ?? emptyBucket()
+      const subCategoryCount = (childrenOf.get(cat.id) ?? []).length
+      const itemGroupChildCount = allItemGroups.filter((ig) => ig.categoryId === cat.id).length
+      return {
+        id: cat.id,
+        name: cat.name,
+        subfolderCount: subCategoryCount + itemGroupChildCount,
+        itemCount: b.itemCount,
+        totalQty: b.totalQty,
+        totalValueCents: b.totalValueCents,
+        previewPhotoUrl: b.previewPhotoUrl,
+      }
+    }
+
+    /// Materialise an ItemGroup as a "folder" tile — the UI treats it the
+    /// same as a subfolder but the client links to /catalog/g/:id when
+    /// clicked. subfolderCount is 0 because SKUs aren't folders.
+    const toItemGroupRow = (ig: typeof allItemGroups[number]): CatalogFolderRow => {
+      const b = itemGroupTotals.get(ig.id) ?? emptyBucket()
+      return {
+        id: ig.id,
+        name: ig.name,
+        subfolderCount: 0,
+        itemCount: b.itemCount,
+        totalQty: b.totalQty,
+        totalValueCents: b.totalValueCents,
+        previewPhotoUrl: b.previewPhotoUrl,
+      }
+    }
+
+    // 4. Pick the level to render.
+    //
+    // At the root (no folderId), auto-unwrap: if there's exactly one
+    // top-level folder (Sortly's "BärHaus (IN STOCK)"), show ITS children
+    // rather than a single-tile page containing only itself. The wrapper
+    // still exists as a real row (so future roots can co-exist and mapping
+    // metadata has somewhere to hang), it's just skipped visually.
+    let effectiveFolderId: string | null = folderId
+    let effectiveFolder = folder
+    if (!folderId) {
+      const roots = childrenOf.get(null) ?? []
+      if (roots.length === 1 && roots[0]) {
+        effectiveFolderId = roots[0].id
+        effectiveFolder = roots[0]
+      }
+    }
+
+    const subCategoryChildren = effectiveFolderId
+      ? childrenOf.get(effectiveFolderId) ?? []
+      : childrenOf.get(null) ?? []
+    const itemGroupChildren = effectiveFolderId
+      ? allItemGroups.filter((ig) => ig.categoryId === effectiveFolderId)
+      : []
+
+    return {
+      folder: effectiveFolder
+        ? { id: effectiveFolder.id, name: effectiveFolder.name, parentId: effectiveFolder.parentId }
+        : null,
+      breadcrumb,
+      subfolders: subCategoryChildren.map(toFolderRow),
+      itemGroups: itemGroupChildren.map(toItemGroupRow),
+    }
   }
 }
 

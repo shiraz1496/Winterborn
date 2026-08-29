@@ -29,6 +29,8 @@ export type ParsedSortlyItem = {
   primaryFolder: string
   subfolder1?: string
   subfolder2?: string
+  subfolder3?: string
+  subfolder4?: string
 }
 
 export type SkippedRow = { row: number; reason: string }
@@ -182,6 +184,8 @@ export function parseSortlyCsv(csvText: string): ParseResult {
       }
       const subfolder1 = clean(row['Subfolder-level1'])
       const subfolder2 = clean(row['Subfolder-level2'])
+      const subfolder3 = clean(row['Subfolder-level3'])
+      const subfolder4 = clean(row['Subfolder-level4'])
 
       items.push({
         entryName,
@@ -198,6 +202,8 @@ export function parseSortlyCsv(csvText: string): ParseResult {
         primaryFolder,
         subfolder1,
         subfolder2,
+        subfolder3,
+        subfolder4,
       })
     } catch (err) {
       skipped.push({ row: rowNumber, reason: (err as Error).message })

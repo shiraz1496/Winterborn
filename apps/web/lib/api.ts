@@ -8,6 +8,10 @@ import {
   boxLabelSchema,
   boxLineSchema,
   boxSchema,
+  catalogBrowseResponseSchema,
+  catalogItemDetailSchema,
+  catalogItemGroupPageSchema,
+  catalogItemRowSchema,
   categorySchema,
   colourFamilySchema,
   colourVariantSchema,
@@ -38,6 +42,8 @@ import {
   salesRowSchema,
   setSquareIdInputSchema,
   sizeOptionSchema,
+  stockCorrectionInputSchema,
+  stockCorrectionResultSchema,
   createProductAttributeInputSchema,
   createProductAttributeValueInputSchema,
   itemGroupDetailSchema,
@@ -63,6 +69,7 @@ import {
   type CreateWarehouseVariantInput,
   type IntakeInput,
   type PackBoxInput,
+  type StockCorrectionInput,
   type UpdateAdminUserInput,
   type UpdateRequestLineInput,
 } from '@winterborn/shared'
@@ -206,6 +213,42 @@ export function stockByVariant(locationId?: string) {
 
 export function salesSince(locationId?: string, days?: number) {
   return request('GET', `/stock/sales-since${qs({ locationId, days: days?.toString() })}`, z.array(salesRowSchema))
+}
+
+// ---- catalog browse (Sortly-style folder hierarchy) ----------------------
+
+/// Tree-aware folder browse. Pass no `folderId` for the root view; pass
+/// one to drill in. Response carries the current folder, breadcrumb (root
+/// down to parent, excluding self), direct-child subfolders, and direct-
+/// child item groups (rendered as folder tiles too, linking to the SKU
+/// grid).
+export function browseFolder(folderId?: string) {
+  return request(
+    'GET',
+    `/catalog/browse${qs({ folderId })}`,
+    catalogBrowseResponseSchema,
+  )
+}
+
+export function browseCatalogItems(itemGroupId: string) {
+  return request(
+    'GET',
+    `/catalog/browse/item-groups/${encodeURIComponent(itemGroupId)}/items`,
+    catalogItemGroupPageSchema,
+  )
+}
+
+export function getCatalogItemDetail(warehouseVariantId: string) {
+  return request(
+    'GET',
+    `/catalog/browse/items/${encodeURIComponent(warehouseVariantId)}`,
+    catalogItemDetailSchema,
+  )
+}
+
+export function correctStock(input: StockCorrectionInput) {
+  const body = stockCorrectionInputSchema.parse(input)
+  return request('POST', '/stock/correction', stockCorrectionResultSchema, body)
 }
 
 // ---- thresholds / decision queue -------------------------------------------
