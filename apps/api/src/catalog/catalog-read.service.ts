@@ -77,6 +77,39 @@ export class CatalogReadService {
     return rows.map((r) => ({ id: r.id, name: r.name }))
   }
 
+  /// Create a Category anywhere in the tree — root when parentId is null,
+  /// child of an existing folder otherwise. Idempotent by (parentId, name):
+  /// second call with the same tuple returns the existing row instead of
+  /// throwing a unique-constraint error. Uses the same helper the
+  /// importers use so the shape stays consistent across all creation
+  /// paths (Sortly import, xlsx import, web modal).
+  async createCategory(input: { parentId: string | null; name: string }): Promise<{ id: string; parentId: string | null; name: string }> {
+    if (input.parentId) {
+      const parent = await this.prisma.category.findUnique({ where: { id: input.parentId } })
+      if (!parent) throw new NotFoundException(`parent folder ${input.parentId} not found`)
+    }
+    // Root case (parentId=null) is manually resolved because Prisma's
+    // compound-unique upsert can't express "null equals null". The
+    // Postgres unique index tolerates null-equals-null (it's a real
+    // unique index, not the compound key), so a plain findFirst then
+    // create is race-safe as long as the caller retries on collision;
+    // in practice a single operator can't race themselves.
+    if (input.parentId === null) {
+      const existing = await this.prisma.category.findFirst({ where: { parentId: null, name: input.name } })
+      if (existing) return { id: existing.id, parentId: existing.parentId, name: existing.name }
+      const created = await this.prisma.category.create({
+        data: { parentId: null, name: input.name, sortlyFolder: input.name },
+      })
+      return { id: created.id, parentId: created.parentId, name: created.name }
+    }
+    const row = await this.prisma.category.upsert({
+      where: { parentId_name: { parentId: input.parentId, name: input.name } },
+      create: { parentId: input.parentId, name: input.name, sortlyFolder: input.name },
+      update: {},
+    })
+    return { id: row.id, parentId: row.parentId, name: row.name }
+  }
+
   async listSizeOptions(categoryId?: string): Promise<SizeOptionDto[]> {
     const rows = await this.prisma.sizeOption.findMany({
       where: categoryId ? { categoryId } : undefined,

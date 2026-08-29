@@ -13,8 +13,12 @@ import {
   catalogItemGroupPageSchema,
   catalogItemRowSchema,
   categorySchema,
+  categoryTreeNodeSchema,
   colourFamilySchema,
   colourVariantSchema,
+  createCategoryInputSchema,
+  createProductInputSchema,
+  createProductResultSchema,
   createWarehouseVariantInputSchema,
   createLoadInputSchema,
   createRequestInputSchema,
@@ -67,6 +71,8 @@ import {
   type CreateRequestInput,
   type CreateRequestLineInput,
   type CreateWarehouseVariantInput,
+  type CreateCategoryInput,
+  type CreateProductInput,
   type IntakeInput,
   type PackBoxInput,
   type StockCorrectionInput,
@@ -249,6 +255,18 @@ export function getCatalogItemDetail(warehouseVariantId: string) {
 export function correctStock(input: StockCorrectionInput) {
   const body = stockCorrectionInputSchema.parse(input)
   return request('POST', '/stock/correction', stockCorrectionResultSchema, body)
+}
+
+// ---- product creation (intake "+ Create new product" modal) --------------
+
+export function createCategory(input: CreateCategoryInput) {
+  const body = createCategoryInputSchema.parse(input)
+  return request('POST', '/catalog/categories', categoryTreeNodeSchema, body)
+}
+
+export function createProduct(input: CreateProductInput) {
+  const body = createProductInputSchema.parse(input)
+  return request('POST', '/catalog/products', createProductResultSchema, body)
 }
 
 // ---- thresholds / decision queue -------------------------------------------

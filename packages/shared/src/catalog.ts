@@ -478,6 +478,80 @@ export const stockCorrectionResultSchema = z.object({
 })
 export type StockCorrectionResult = z.infer<typeof stockCorrectionResultSchema>
 
+/// POST /catalog/categories — create a folder anywhere in the tree.
+/// Upsert semantics: if a Category with the same (parentId, name) already
+/// exists, the existing row is returned. Two operators naming the same
+/// folder end up pointing at the same row instead of creating siblings.
+export const createCategoryInputSchema = z.object({
+  parentId: z.string().nullable().optional(),
+  name: z.string().trim().min(1).max(120),
+})
+export type CreateCategoryInput = z.infer<typeof createCategoryInputSchema>
+
+export const categoryTreeNodeSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  parentId: z.string().nullable(),
+})
+export type CategoryTreeNode = z.infer<typeof categoryTreeNodeSchema>
+
+/// POST /catalog/products — bulk product creation via a matrix. The
+/// modal in the intake screen collects an optional primary axis (Size /
+/// Style / Custom) plus a colour list, then a qty per (primary × colour)
+/// cell. Every non-zero cell becomes one WarehouseVariant + one INTAKE
+/// event. `unitCostCents` applies to every created SKU. All colours and
+/// primary values get ProductAttribute + ProductAttributeValue rows so
+/// the Square-mapping modal sees the exact axes the operator declared.
+///
+/// Three shapes fit through this one schema:
+///   1. Matrix: primary axis with N values × colour list with M values
+///      → up to N × M SKUs
+///   2. Colours only (no primary): one row × colours → up to M SKUs
+///   3. Single SKU (no axes at all): `colors: []` and `primaryAxis: null`
+///      → exactly one SKU
+export const createProductInputSchema = z.object({
+  categoryId: z.string().min(1),
+  itemGroupName: z.string().trim().min(1).max(120),
+  /// The row axis. Named freely so operators can label it "Yarn count",
+  /// "Fit", etc. Canonical names (`Size`, `Style`) are treated no
+  /// differently from custom on the server side; the UI groups them.
+  primaryAxis: z
+    .object({
+      name: z.string().trim().min(1).max(50),
+      values: z.array(z.string().trim().min(1).max(100)).min(1),
+    })
+    .nullable(),
+  /// Colour axis values. Empty array = product has no colour axis (e.g.
+  /// Dryer Balls). Otherwise every colour becomes a ProductAttributeValue
+  /// under a `Color` axis and the matrix uses colours as columns.
+  colors: z.array(z.string().trim().min(1).max(100)).default([]),
+  /// Quantity per matrix cell. Keys are `${primaryValue ?? '__none__'}::${color ?? '__none__'}`.
+  /// Only non-zero cells produce SKUs; cells omitted or set to zero are
+  /// treated as "not carrying that combination yet" — a later intake
+  /// flow can still create them.
+  quantities: z.record(z.string(), z.number().int().min(0)),
+  /// Required. Applies to every created SKU.
+  unitCostCents: z.number().int().min(0),
+})
+export type CreateProductInput = z.input<typeof createProductInputSchema>
+
+/// One row per SKU that actually got created (non-zero cells only).
+export const createdProductSkuSchema = z.object({
+  warehouseVariant: warehouseVariantSummarySchema,
+  variationId: z.string(),
+  quantity: z.number().int(),
+  intakeEventId: z.string().nullable(),
+})
+export type CreatedProductSku = z.infer<typeof createdProductSkuSchema>
+
+export const createProductResultSchema = z.object({
+  itemGroupId: z.string(),
+  skusCreated: z.number().int(),
+  totalUnitsRecorded: z.number().int(),
+  skus: z.array(createdProductSkuSchema),
+})
+export type CreateProductResult = z.infer<typeof createProductResultSchema>
+
 /// PATCH /catalog/item-groups/:id/square-id +
 /// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;
 /// the empty string is coerced to null so a blank input field doesn't

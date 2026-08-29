@@ -2,23 +2,18 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type {
-  CategoryDto,
-  ColourFamilyDto,
   IntakeResult,
-  SizeOptionDto,
   VariationSummary,
   WarehouseVariantSummary,
 } from '@winterborn/shared'
+import { FolderChainPicker } from '../../components/FolderChainPicker'
 import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
 import { Swatch } from '../../components/Swatch'
 import { useAuth } from '../../lib/auth-context'
 import {
   ApiError,
-  createWarehouseVariant,
-  listCategories,
-  listColourFamilies,
-  listSizeOptions,
+  createProduct,
   listVariations,
   listWarehouseVariants,
   receiveIntake,
@@ -230,48 +225,22 @@ function IntakeBody() {
     }
   }
 
-  async function onCreated(newVariant: WarehouseVariantSummary) {
+  /// The matrix modal creates its SKUs and records their INTAKE events
+  /// itself, so all we need to do here is refresh the local catalog
+  /// cache (so the search dropdown finds the new items immediately) and
+  /// confirm to the operator that it landed. No auto-add to the intake
+  /// queue — that would double-count any qty the operator entered.
+  async function onProductCreated(summary: { skusCreated: number; totalUnitsRecorded: number; itemGroupName: string }) {
     setCreating(false)
-    // Refresh so the new variant is available under its family and can
-    // be selected without a page reload.
     const [freshVariations, freshVariants] = await Promise.all([listVariations(), listWarehouseVariants()])
     setVariations(freshVariations)
     setVariants(freshVariants)
-    const parentFamily = freshVariations.find((v) => v.id === newVariant.variationId)
-    if (parentFamily) {
-      const already = families.find((f) => f.variationId === parentFamily.id)
-      if (!already) {
-        addFamilyFromVariations(parentFamily, freshVariants)
-      } else {
-        setOpenId(parentFamily.id)
-      }
-    }
-    toast.success(`Created ${newVariant.itemGroupName} · ${newVariant.colourVariantName}`)
-  }
-
-  /// Helper for onCreated -- we need to seed a DraftFamily with freshly
-  /// fetched variants (not the stale state closure).
-  function addFamilyFromVariations(v: VariationSummary, allVariants: WarehouseVariantSummary[]) {
-    const familyVariants = allVariants.filter((wv) => wv.variationId === v.id)
-    familyVariants.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
-    const initialQty: Record<string, number> = {}
-    if (familyVariants.length === 1) initialQty[familyVariants[0]!.id] = 1
-    const tokens: Record<string, string> = {}
-    for (const wv of familyVariants) tokens[wv.id] = newIdempotencyToken()
-    setFamilies((prev) => [
-      ...prev,
-      {
-        variationId: v.id,
-        itemGroupName: v.itemGroupName,
-        familyName: v.colourFamilyName,
-        sizeName: v.sizeOptionName,
-        variants: familyVariants,
-        qtyByVariant: initialQty,
-        tokenByVariant: tokens,
-        note: '',
-      },
-    ])
-    setOpenId(v.id)
+    toast.success(
+      `Created ${summary.itemGroupName} — ${summary.skusCreated} SKU${summary.skusCreated === 1 ? '' : 's'}` +
+        (summary.totalUnitsRecorded > 0
+          ? `, ${summary.totalUnitsRecorded} unit${summary.totalUnitsRecorded === 1 ? '' : 's'} recorded`
+          : ''),
+    )
   }
 
   return (
@@ -358,15 +327,15 @@ function IntakeBody() {
         <div className="card" style={{ marginBottom: 20 }}>
           <p style={{ margin: 0, color: 'var(--text-dim)' }}>
             No product matched.{' '}
-            {/* {canCreate
+            {canCreate
               ? 'If this really is a new product, create it now:'
-              : "Product creation is warehouse-manager only — ask them to add it."} */}
+              : "Product creation is warehouse-manager only — ask them to add it."}
           </p>
-          {/* {canCreate && (
+          {canCreate && (
             <button type="button" className="btn" style={{ marginTop: 12 }} onClick={() => setCreating(true)}>
               + Create new product
             </button>
-          )} */}
+          )}
         </div>
       ) : null}
 
@@ -508,10 +477,18 @@ function IntakeBody() {
       </button>
 
       {creating && (
-        <NewProductModal initialItemGroup={query} onClose={() => setCreating(false)} onCreated={onCreated} />
+        <NewProductModal initialItemGroup={query} onClose={() => setCreating(false)} onCreated={onProductCreated} />
       )}
     </div>
   )
+}
+
+const PRIMARY_AXIS_CANDIDATES = ['Size', 'Style'] as const
+
+const NONE_KEY = '__none__'
+
+function matrixKey(primary: string | null, colour: string | null): string {
+  return `${primary ?? NONE_KEY}::${colour ?? NONE_KEY}`
 }
 
 function NewProductModal({
@@ -521,60 +498,155 @@ function NewProductModal({
 }: {
   initialItemGroup: string
   onClose: () => void
-  onCreated: (v: WarehouseVariantSummary) => void
+  onCreated: (summary: { skusCreated: number; totalUnitsRecorded: number; itemGroupName: string }) => void
 }) {
   const toast = useToast()
-  const [categories, setCategories] = useState<CategoryDto[]>([])
-  const [categoryId, setCategoryId] = useState('')
-  const [families, setFamilies] = useState<ColourFamilyDto[]>([])
-  const [colourFamilyId, setColourFamilyId] = useState('')
-  const [sizes, setSizes] = useState<SizeOptionDto[]>([])
-  const [sizeOptionId, setSizeOptionId] = useState('')
+  const [chain, setChain] = useState<string[]>([])
   const [itemGroupName, setItemGroupName] = useState(initialItemGroup)
-  const [colourVariantName, setColourVariantName] = useState('')
+  const [primaryAxisName, setPrimaryAxisName] = useState<string | null>(null)
+  const [addingCustomAxis, setAddingCustomAxis] = useState(false)
+  const [customAxisDraft, setCustomAxisDraft] = useState('')
+  const [primaryValues, setPrimaryValues] = useState<string[]>([])
+  const [primaryPending, setPrimaryPending] = useState('')
+  const [colors, setColors] = useState<string[]>([])
+  const [colorPending, setColorPending] = useState('')
+  const [quantities, setQuantities] = useState<Record<string, string>>({})
+  const [unitCostDollars, setUnitCostDollars] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    listCategories()
-      .then((rows) => {
-        setCategories(rows)
-        if (rows.length > 0) setCategoryId(rows[0]!.id)
-      })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load categories.'))
-  }, [])
+  const leafCategoryId = chain[chain.length - 1] ?? null
 
-  useEffect(() => {
-    if (!categoryId) return
-    // Reset dependent selections when the category changes -- a family/size
-    // from the previous category would fail server-side validation anyway.
-    setColourFamilyId('')
-    setSizeOptionId('')
-    Promise.all([listColourFamilies(categoryId), listSizeOptions(categoryId)])
-      .then(([f, s]) => {
-        setFamilies(f)
-        setSizes(s)
-        if (f.length > 0) setColourFamilyId(f[0]!.id)
-        if (s.length > 0) setSizeOptionId(s[0]!.id)
-      })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load vocabulary.'))
-  }, [categoryId])
+  function commitPrimaryValue() {
+    const v = primaryPending.trim()
+    if (!v || primaryValues.includes(v)) {
+      setPrimaryPending('')
+      return
+    }
+    setPrimaryValues((prev) => [...prev, v])
+    setPrimaryPending('')
+  }
+
+  function removePrimaryValue(v: string) {
+    setPrimaryValues((prev) => prev.filter((x) => x !== v))
+    // Drop qty cells that referenced this value.
+    setQuantities((prev) => {
+      const next: Record<string, string> = {}
+      for (const [k, val] of Object.entries(prev)) {
+        if (!k.startsWith(`${v}::`)) next[k] = val
+      }
+      return next
+    })
+  }
+
+  function commitColor() {
+    const v = colorPending.trim()
+    if (!v || colors.includes(v)) {
+      setColorPending('')
+      return
+    }
+    setColors((prev) => [...prev, v])
+    setColorPending('')
+  }
+
+  function removeColor(v: string) {
+    setColors((prev) => prev.filter((x) => x !== v))
+    setQuantities((prev) => {
+      const next: Record<string, string> = {}
+      for (const [k, val] of Object.entries(prev)) {
+        if (!k.endsWith(`::${v}`)) next[k] = val
+      }
+      return next
+    })
+  }
+
+  function pickPrimaryAxis(name: string) {
+    setPrimaryAxisName(name)
+    setAddingCustomAxis(false)
+    setCustomAxisDraft('')
+  }
+
+  function clearPrimaryAxis() {
+    setPrimaryAxisName(null)
+    setPrimaryValues([])
+    setPrimaryPending('')
+    // Rewrite existing keys: `primary::colour` → `__none__::colour`
+    setQuantities((prev) => {
+      const next: Record<string, string> = {}
+      for (const [k, val] of Object.entries(prev)) {
+        const [, colour] = k.split('::')
+        if (colour !== undefined) next[`${NONE_KEY}::${colour}`] = val
+      }
+      return next
+    })
+  }
+
+  function setCellQty(primary: string | null, colour: string | null, raw: string) {
+    setQuantities((prev) => ({ ...prev, [matrixKey(primary, colour)]: raw }))
+  }
+
+  const rows: Array<string | null> = primaryAxisName && primaryValues.length > 0 ? primaryValues : [null]
+  const cols: Array<string | null> = colors.length > 0 ? colors : [null]
+  const { nonZeroCount, totalUnits } = useMemo(() => {
+    let n = 0
+    let units = 0
+    for (const r of rows) {
+      for (const c of cols) {
+        const q = Number.parseInt(quantities[matrixKey(r, c)] ?? '0', 10)
+        if (Number.isFinite(q) && q > 0) {
+          n++
+          units += q
+        }
+      }
+    }
+    return { nonZeroCount: n, totalUnits: units }
+  }, [rows, cols, quantities])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      const created = await createWarehouseVariant({
-        categoryId,
-        colourFamilyId,
-        sizeOptionId,
+      if (!leafCategoryId) throw new Error('Pick a folder for this product.')
+      if (!itemGroupName.trim()) throw new Error('Product name is required.')
+      if (primaryAxisName && primaryValues.length === 0) {
+        throw new Error(`Add at least one ${primaryAxisName.toLowerCase()} value, or remove the axis.`)
+      }
+      const cost = unitCostDollars.trim()
+      if (!cost) throw new Error('Unit cost is required.')
+      const parsedCost = Number.parseFloat(cost)
+      if (!Number.isFinite(parsedCost) || parsedCost < 0) throw new Error('Unit cost must be a number ≥ 0.')
+      const unitCostCents = Math.round(parsedCost * 100)
+      if (nonZeroCount === 0) throw new Error('Enter a quantity for at least one variant.')
+
+      const quantitiesPayload: Record<string, number> = {}
+      for (const r of rows) {
+        for (const c of cols) {
+          const raw = quantities[matrixKey(r, c)]
+          if (!raw) continue
+          const q = Number.parseInt(raw, 10)
+          if (!Number.isFinite(q) || q <= 0) continue
+          quantitiesPayload[matrixKey(r, c)] = q
+        }
+      }
+
+      const res = await createProduct({
+        categoryId: leafCategoryId,
         itemGroupName: itemGroupName.trim(),
-        colourVariantName: colourVariantName.trim(),
+        primaryAxis: primaryAxisName && primaryValues.length > 0
+          ? { name: primaryAxisName, values: primaryValues }
+          : null,
+        colors,
+        quantities: quantitiesPayload,
+        unitCostCents,
       })
-      onCreated(created)
+      onCreated({
+        skusCreated: res.skusCreated,
+        totalUnitsRecorded: res.totalUnitsRecorded,
+        itemGroupName: itemGroupName.trim(),
+      })
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not create the product.'
+      const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Could not create the product.'
       setError(msg)
       toast.error(msg)
     } finally {
@@ -582,17 +654,14 @@ function NewProductModal({
     }
   }
 
-  const canSubmit =
-    !busy &&
-    categoryId.length > 0 &&
-    colourFamilyId.length > 0 &&
-    sizeOptionId.length > 0 &&
-    itemGroupName.trim().length > 0 &&
-    colourVariantName.trim().length > 0
-
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        style={{ maxWidth: 720 }}
+      >
         <div className="modal-head">
           <h2>New product</h2>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -603,89 +672,382 @@ function NewProductModal({
         {error && <p className="error-banner">{error}</p>}
 
         <p className="section-desc" style={{ marginTop: 0 }}>
-          Category, colour family, and size come from the controlled vocabulary. Item name and colour variant can be new
-          — we'll reuse an existing row if the spelling already matches.
+          Pick where this product lives, name it, define its variants (an optional Size / Style / custom axis, plus
+          colours), and enter the quantity you have of each combination. Every non-zero cell becomes a SKU with an
+          intake recorded at the primary warehouse.
         </p>
 
         <div className="field">
-          <label htmlFor="np-category">Category</label>
-          <select id="np-category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <label>Folder</label>
+          <FolderChainPicker value={chain} onChange={setChain} />
         </div>
 
         <div className="field">
-          <label htmlFor="np-item">Item name</label>
+          <label htmlFor="np-item">Product name</label>
           <input
             id="np-item"
             placeholder="e.g. Merino Beanie"
             value={itemGroupName}
             onChange={(e) => setItemGroupName(e.target.value)}
             maxLength={120}
-            autoFocus
           />
         </div>
 
         <div className="field">
-          <label htmlFor="np-family">Colour family</label>
-          <select
-            id="np-family"
-            value={colourFamilyId}
-            onChange={(e) => setColourFamilyId(e.target.value)}
-            disabled={families.length === 0}
-          >
-            {families.length === 0 && <option value="">—</option>}
-            {families.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
+          <label>Primary variant axis (optional)</label>
+          {!primaryAxisName && !addingCustomAxis && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {PRIMARY_AXIS_CANDIDATES.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className="btn"
+                  onClick={() => pickPrimaryAxis(name)}
+                  style={{ minHeight: 32, padding: '4px 12px', fontSize: '0.82rem' }}
+                >
+                  + {name}
+                </button>
+              ))}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setAddingCustomAxis(true)}
+                style={{ minHeight: 32, padding: '4px 12px', fontSize: '0.82rem' }}
+              >
+                + Custom axis…
+              </button>
+            </div>
+          )}
+          {!primaryAxisName && addingCustomAxis && (
+            <div style={axisCardStyle}>
+              <label style={labelStyle}>Custom axis name</label>
+              <input
+                autoFocus
+                type="text"
+                placeholder="e.g. Yarn count, Fit"
+                value={customAxisDraft}
+                onChange={(e) => setCustomAxisDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    const n = customAxisDraft.trim()
+                    if (n) pickPrimaryAxis(n)
+                  } else if (e.key === 'Escape') {
+                    setAddingCustomAxis(false)
+                    setCustomAxisDraft('')
+                  }
+                }}
+                style={inputStyle}
+              />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => { setAddingCustomAxis(false); setCustomAxisDraft('') }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!customAxisDraft.trim()}
+                  onClick={() => {
+                    const n = customAxisDraft.trim()
+                    if (n) pickPrimaryAxis(n)
+                  }}
+                >
+                  Add axis
+                </button>
+              </div>
+            </div>
+          )}
+          {primaryAxisName && (
+            <div style={axisCardStyle}>
+              <div className="row-between" style={{ marginBottom: 6 }}>
+                <strong style={{ fontSize: '0.9rem' }}>{primaryAxisName}</strong>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={clearPrimaryAxis}
+                  style={{ minHeight: 24, padding: '2px 8px', fontSize: '0.75rem' }}
+                >
+                  Remove axis
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                {primaryValues.map((v) => (
+                  <span key={v} style={chipStyle}>
+                    {v}
+                    <span
+                      onClick={() => removePrimaryValue(v)}
+                      style={{ marginLeft: 6, cursor: 'pointer', opacity: 0.7 }}
+                      aria-label="Remove value"
+                    >
+                      ×
+                    </span>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  type="text"
+                  placeholder={`Add ${primaryAxisName.toLowerCase()} value`}
+                  value={primaryPending}
+                  onChange={(e) => setPrimaryPending(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      commitPrimaryValue()
+                    }
+                  }}
+                  style={{ flex: 1, ...inputStyle }}
+                />
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={commitPrimaryValue}
+                  disabled={!primaryPending.trim()}
+                  style={{ minHeight: 34, padding: '0 12px', fontSize: '0.82rem' }}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="field">
-          <label htmlFor="np-variant">Colour variant name</label>
+          <label>Colours</label>
+          <div style={axisCardStyle}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              {colors.length === 0 && (
+                <span style={{ color: 'var(--text-dim)', fontSize: '0.8rem' }}>
+                  Leave empty for products with no colour axis (e.g. Dryer Balls).
+                </span>
+              )}
+              {colors.map((v) => (
+                <span key={v} style={chipStyle}>
+                  {v}
+                  <span
+                    onClick={() => removeColor(v)}
+                    style={{ marginLeft: 6, cursor: 'pointer', opacity: 0.7 }}
+                    aria-label="Remove colour"
+                  >
+                    ×
+                  </span>
+                </span>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                type="text"
+                placeholder="Add colour value"
+                value={colorPending}
+                onChange={(e) => setColorPending(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    commitColor()
+                  }
+                }}
+                style={{ flex: 1, ...inputStyle }}
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={commitColor}
+                disabled={!colorPending.trim()}
+                style={{ minHeight: 34, padding: '0 12px', fontSize: '0.82rem' }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="field">
+          <label>Quantities</label>
+          <MatrixTable
+            rows={rows}
+            cols={cols}
+            primaryAxisLabel={primaryAxisName ?? ''}
+            quantities={quantities}
+            onCellChange={setCellQty}
+          />
+          <p style={{ margin: '6px 0 0', color: 'var(--text-dim)', fontSize: '0.75rem' }}>
+            One SKU is created per non-zero cell. Cells left at 0 aren't created; add them later via a fresh intake.
+          </p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="np-cost">Unit cost (USD)</label>
           <input
-            id="np-variant"
-            placeholder="e.g. 40 Charcoal"
-            value={colourVariantName}
-            onChange={(e) => setColourVariantName(e.target.value)}
-            maxLength={120}
+            id="np-cost"
+            type="text"
+            inputMode="decimal"
+            placeholder="e.g. 12.50"
+            value={unitCostDollars}
+            onChange={(e) => setUnitCostDollars(e.target.value)}
+            required
           />
         </div>
 
-        <div className="field">
-          <label htmlFor="np-size">Size</label>
-          <select
-            id="np-size"
-            value={sizeOptionId}
-            onChange={(e) => setSizeOptionId(e.target.value)}
-            disabled={sizes.length === 0}
-          >
-            {sizes.length === 0 && <option value="">—</option>}
-            {sizes.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+        <div style={{ display: 'flex', gap: 8, marginTop: 20, alignItems: 'center' }}>
+          <span className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+            {nonZeroCount} SKU{nonZeroCount === 1 ? '' : 's'} · {totalUnits.toLocaleString()} unit{totalUnits === 1 ? '' : 's'}
+          </span>
+          <div style={{ flex: 1 }} />
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={busy || !leafCategoryId || !itemGroupName.trim() || nonZeroCount === 0}
+          >
             {busy ? 'Creating…' : 'Create product'}
           </button>
         </div>
       </form>
     </div>
   )
+}
+
+function MatrixTable({
+  rows,
+  cols,
+  primaryAxisLabel,
+  quantities,
+  onCellChange,
+}: {
+  rows: Array<string | null>
+  cols: Array<string | null>
+  primaryAxisLabel: string
+  quantities: Record<string, string>
+  onCellChange: (primary: string | null, colour: string | null, raw: string) => void
+}) {
+  const hasPrimary = rows.length > 1 || (rows[0] !== null && rows[0] !== undefined)
+  const hasColours = cols.length > 1 || (cols[0] !== null && cols[0] !== undefined)
+
+  // 1×1 case (no primary axis, no colours) — the matrix collapses to a
+  // single unlabelled input. Rendering it as a table with two dashed
+  // headers looks like broken data; show a plain "Quantity" input
+  // instead so it reads as "how many of this one product do you have?".
+  if (!hasPrimary && !hasColours) {
+    return (
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={quantities[matrixKey(null, null)] ?? ''}
+        onChange={(e) => onCellChange(null, null, e.target.value)}
+        placeholder="0"
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--line)',
+          background: 'var(--surface)',
+          fontSize: '0.9rem',
+          boxSizing: 'border-box',
+        }}
+      />
+    )
+  }
+
+  return (
+    <div style={{ overflowX: 'auto', border: '1px solid var(--line)', borderRadius: 'var(--radius-md)' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+        <thead>
+          <tr style={{ background: 'var(--surface-sunken)' }}>
+            <th style={cellHeader}>{primaryAxisLabel || ''}</th>
+            {cols.map((c, i) => (
+              <th key={`col-${i}`} style={cellHeader}>
+                {c ?? ''}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`row-${i}`} style={{ borderTop: '1px solid var(--line)' }}>
+              <th style={{ ...cellHeader, textAlign: 'left', background: 'var(--surface-raised)' }}>{r ?? ''}</th>
+              {cols.map((c, j) => (
+                <td key={`cell-${i}-${j}`} style={{ padding: 6 }}>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={quantities[matrixKey(r, c)] ?? ''}
+                    onChange={(e) => onCellChange(r, c, e.target.value)}
+                    placeholder="0"
+                    style={{
+                      width: '100%',
+                      padding: '6px 8px',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--line)',
+                      background: 'var(--surface)',
+                      fontSize: '0.85rem',
+                      textAlign: 'right',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const cellHeader = {
+  padding: '8px 10px',
+  fontWeight: 700,
+  fontSize: '0.78rem',
+  textAlign: 'center' as const,
+  color: 'var(--text-dim)',
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.04em',
+}
+
+const chipStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '3px 10px',
+  borderRadius: 999,
+  fontSize: '0.78rem',
+  border: '1px solid var(--line-strong)',
+  background: 'var(--surface)',
+  color: 'var(--text-dim)',
+} as const
+
+const axisCardStyle = {
+  padding: 10,
+  borderRadius: 'var(--radius-md)',
+  border: '1px solid var(--line)',
+  background: 'var(--surface-raised)',
+} as const
+
+const inputStyle = {
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--line)',
+  fontSize: '0.9rem',
+  background: 'var(--surface)',
+  boxSizing: 'border-box' as const,
+}
+
+const labelStyle = {
+  display: 'block',
+  fontSize: '0.75rem',
+  fontWeight: 700,
+  marginBottom: 4,
+  textTransform: 'uppercase' as const,
+  letterSpacing: '0.05em',
+  color: 'var(--text-dim)',
 }
 
 export default function IntakePage() {

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateWarehouseVariantInput, SetSquareIdInput, StockCorrectionInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
-import { createProductAttributeInputSchema, createProductAttributeValueInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, stockCorrectionInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
+import type { AssignColourFamilyInput, CreateCategoryInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateProductInput, CreateWarehouseVariantInput, SetSquareIdInput, StockCorrectionInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
+import { createCategoryInputSchema, createProductAttributeInputSchema, createProductAttributeValueInputSchema, createProductInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, stockCorrectionInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -9,6 +9,7 @@ import type { CurrentUserPayload } from '../auth/current-user.js'
 import { CatalogReadService } from './catalog-read.service.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { StockCorrectionService } from './stock-correction.service.js'
+import { ProductCreationService } from './product-creation.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// Read-only catalog/stock/location surface for the frontend, plus the one
@@ -24,6 +25,7 @@ export class CatalogController {
     private readonly ledgerRead: LedgerReadService,
     private readonly squareCatalogSync: SquareCatalogSyncService,
     private readonly stockCorrection: StockCorrectionService,
+    private readonly productCreation: ProductCreationService,
   ) {}
 
   @Get('locations')
@@ -51,6 +53,26 @@ export class CatalogController {
   @Get('catalog/categories')
   categories() {
     return this.catalog.listCategories()
+  }
+
+  /// Create a folder anywhere in the tree. Warehouse-side roles only —
+  /// non-warehouse roles have no reason to create catalog structure.
+  @Post('catalog/categories')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
+  createCategory(@Body() body: CreateCategoryInput) {
+    const parsed = createCategoryInputSchema.parse(body)
+    return this.catalog.createCategory({ parentId: parsed.parentId ?? null, name: parsed.name })
+  }
+
+  /// Full product creation from the intake modal — folder chain has
+  /// already been walked (categoryId points at the leaf), and this
+  /// endpoint upserts everything below in one transaction. Returns the
+  /// new WarehouseVariantSummary so the modal can slot it straight into
+  /// the intake queue.
+  @Post('catalog/products')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
+  createProduct(@Body() body: CreateProductInput, @CurrentUser() user: CurrentUserPayload) {
+    return this.productCreation.create(body, user)
   }
 
   @Get('catalog/size-options')
