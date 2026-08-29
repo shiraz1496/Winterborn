@@ -47,6 +47,14 @@ const ICONS = {
       <path d="M10 20a2 2 0 0 0 4 0" />
     </svg>
   ),
+  catalog: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="8" height="8" rx="1.5" />
+      <rect x="13" y="3" width="8" height="8" rx="1.5" />
+      <rect x="3" y="13" width="8" height="8" rx="1.5" />
+      <rect x="13" y="13" width="8" height="8" rx="1.5" />
+    </svg>
+  ),
 }
 
 interface Tab {
@@ -64,6 +72,7 @@ const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
+  { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: WAREHOUSE_ROLES },
   { href: '/notifications', label: 'Alerts', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
 ]

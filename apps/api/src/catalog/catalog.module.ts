@@ -8,6 +8,8 @@ import { LedgerModule } from '../ledger/ledger.module.js'
 import { CatalogReadService } from './catalog-read.service.js'
 import { CatalogController } from './catalog.controller.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
+import { StockCorrectionService } from './stock-correction.service.js'
+import { upsertSortlyFolderChain, type FolderCache } from './folder-tree.js'
 
 const UNIQUE_VIOLATION = 'P2002'
 
@@ -126,7 +128,7 @@ export class SortlyImportService {
 
     // In-run caches only: correctness comes from the DB find-or-create
     // below, these just save redundant round-trips within one pass.
-    const categoryCache = new Map<string, string>()
+    const folderCache: FolderCache = new Map()
     const familyCache = new Map<string, string>()
     const itemGroupCache = new Map<string, string>()
     const sizeOptionCache = new Map<string, string>()
@@ -134,18 +136,21 @@ export class SortlyImportService {
     const colourVariantHasPhoto = new Map<string, boolean>()
     const variationCache = new Map<string, string>()
 
-    const getOrCreateCategory = async (name: string): Promise<string> => {
-      const cached = categoryCache.get(name)
-      if (cached) return cached
-      const existing = await this.prisma.category.findUnique({ where: { name } })
-      if (existing) {
-        categoryCache.set(name, existing.id)
-        return existing.id
-      }
-      const row = await this.prisma.category.create({ data: { name, sortlyFolder: name } })
-      created.categories++
-      categoryCache.set(name, row.id)
-      return row.id
+    // Folder counting is done outside the helper so the "created" tally
+    // reflects only rows this import actually inserted, not the whole
+    // resolved chain (where the same primaryFolder might be shared across
+    // 500 rows). Snapshot the cache size before/after each chain call.
+    const trackFolderChain = async (item: {
+      primaryFolder?: string
+      subfolder1?: string
+      subfolder2?: string
+      subfolder3?: string
+      subfolder4?: string
+    }): Promise<string> => {
+      const before = folderCache.size
+      const leafId = await upsertSortlyFolderChain(this.prisma, item, folderCache)
+      created.categories += folderCache.size - before
+      return leafId
     }
 
     const getOrCreateUnassignedFamily = async (categoryId: string): Promise<string> => {
@@ -282,8 +287,11 @@ export class SortlyImportService {
 
     for (const item of items) {
       try {
-        const categoryName = item.subfolder1 ?? 'Uncategorised'
-        const categoryId = await getOrCreateCategory(categoryName)
+        // Sortly's folder chain becomes the Category tree: primaryFolder is
+        // the root ("BärHaus (IN STOCK)"), subfolder1..4 nest below. The
+        // ItemGroup attaches to the leaf — whichever level this row
+        // populates deepest.
+        const categoryId = await trackFolderChain(item)
         const familyId = await getOrCreateUnassignedFamily(categoryId)
         const itemGroupId = await getOrCreateItemGroup(categoryId, item.itemGroupName)
         const sizeName = item.size ?? DEFAULT_SIZE
@@ -412,7 +420,7 @@ export class SortlyImportService {
 @Module({
   imports: [PrismaModule, AuthModule, LedgerModule],
   controllers: [CatalogController],
-  providers: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
+  providers: [SortlyImportService, CatalogReadService, SquareCatalogSyncService, StockCorrectionService],
   exports: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
 })
 export class CatalogModule {}

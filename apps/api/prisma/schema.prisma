@@ -24,14 +24,27 @@ enum FamilyAssignmentSource {
   MANUAL
 }
 
+/// The catalog folder tree. Named "Category" for legacy reasons (retains
+/// the model + column names to avoid an app-wide rename); functionally
+/// it's a Sortly-style folder that nests. `parentId` is null at the root
+/// ("BärHaus (IN STOCK)"). Uniqueness is per-parent so "Scarves" can
+/// exist under two different regions if needed. ItemGroups attach to the
+/// LEAF folder (whichever level Sortly places the row at).
 model Category {
   id             String         @id @default(cuid())
-  name           String         @unique
+  parentId       String?
+  name           String
   sortlyFolder   String?
   itemGroups     ItemGroup[]
   colourFamilies ColourFamily[]
   sizeOptions    SizeOption[]
   createdAt      DateTime       @default(now())
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+
+  @@unique([parentId, name])
+  @@index([parentId])
 }
 
 model ItemGroup {

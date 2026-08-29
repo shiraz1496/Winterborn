@@ -1,11 +1,14 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateWarehouseVariantInput, SetSquareIdInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
-import { createProductAttributeInputSchema, createProductAttributeValueInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
+import type { AssignColourFamilyInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateWarehouseVariantInput, SetSquareIdInput, StockCorrectionInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
+import { createProductAttributeInputSchema, createProductAttributeValueInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, stockCorrectionInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
+import { CurrentUser } from '../auth/current-user.decorator.js'
+import type { CurrentUserPayload } from '../auth/current-user.js'
 import { CatalogReadService } from './catalog-read.service.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
+import { StockCorrectionService } from './stock-correction.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// Read-only catalog/stock/location surface for the frontend, plus the one
@@ -20,6 +23,7 @@ export class CatalogController {
     private readonly catalog: CatalogReadService,
     private readonly ledgerRead: LedgerReadService,
     private readonly squareCatalogSync: SquareCatalogSyncService,
+    private readonly stockCorrection: StockCorrectionService,
   ) {}
 
   @Get('locations')
@@ -210,5 +214,37 @@ export class CatalogController {
     const windowDays = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : 7
     const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
     return this.ledgerRead.salesSince(since, locationId)
+  }
+
+  /// Sortly-style folder browser. One endpoint at each drill-in step —
+  /// omit `folderId` at the root, pass it to drill into a Category. The
+  /// response has both direct-child Categories (subfolders) and direct-
+  /// child ItemGroups (leaf folders whose contents are SKUs). Warehouse-
+  /// only aggregation: markets are excluded because dispatched-not-yet-
+  /// sold stock is not the number a warehouse operator is looking for.
+  @Get('catalog/browse')
+  browse(@Query('folderId') folderId?: string) {
+    return this.catalog.browseFolder(folderId ?? null)
+  }
+
+  /// One item-group's leaf SKUs, unchanged from the pre-tree layout.
+  @Get('catalog/browse/item-groups/:itemGroupId/items')
+  browseItems(@Param('itemGroupId') itemGroupId: string) {
+    return this.catalog.listItemGroupItems(itemGroupId)
+  }
+
+  @Get('catalog/browse/items/:warehouseVariantId')
+  browseItemDetail(@Param('warehouseVariantId') warehouseVariantId: string) {
+    return this.catalog.getCatalogItemDetail(warehouseVariantId)
+  }
+
+  /// Manual physical-count correction. User supplies a target on-hand and
+  /// the server computes the signed delta. One CORRECTION ledger row, or
+  /// none if the delta is zero.
+  @Post('stock/correction')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
+  correctStock(@Body() body: StockCorrectionInput, @CurrentUser() user: CurrentUserPayload) {
+    const parsed = stockCorrectionInputSchema.parse(body)
+    return this.stockCorrection.correct(parsed, user)
   }
 }

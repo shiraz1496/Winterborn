@@ -5,6 +5,7 @@ loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.e
 import { readFileSync } from 'node:fs'
 import { read, utils } from 'xlsx'
 import { PrismaClient, Prisma } from '@prisma/client'
+import { upsertSortlyFolderChain, type FolderCache } from '../catalog/folder-tree.js'
 
 /**
  * xlsx-driven Sortly importer.
@@ -41,7 +42,18 @@ interface SortlyRow {
   attributes: Array<{ name: string; value: string }>
   quantity: number
   price: number | null
-  category: string
+  /// Ordered folder chain from Sortly's export: [primaryFolder,
+  /// subfolder1..4]. Nulls dropped by the folder-tree helper. The old
+  /// "deepest folder wins" flattening (which collapsed the tree into a
+  /// mixed list of level-1 and level-2 names) is gone — the whole chain
+  /// is preserved and rebuilt as Category rows with parent links.
+  folderChain: {
+    primaryFolder?: string
+    subfolder1?: string
+    subfolder2?: string
+    subfolder3?: string
+    subfolder4?: string
+  }
   photoUrls: string[]
 }
 
@@ -74,16 +86,13 @@ function parseRow(row: Record<string, unknown>): SortlyRow | null {
     if (name && value) attributes.push({ name, value })
   }
 
-  // Take the deepest non-empty subfolder as the category; folder1 is usually
-  // "Footwear" / "Garments" etc., which matches how the app groups catalog.
-  const folders = [
-    xlsxCell(row, 'Subfolder-level4'),
-    xlsxCell(row, 'Subfolder-level3'),
-    xlsxCell(row, 'Subfolder-level2'),
-    xlsxCell(row, 'Subfolder-level1'),
-    xlsxCell(row, 'Primary Folder'),
-  ]
-  const category = folders.find((f) => f !== null) ?? 'Uncategorised'
+  const folderChain = {
+    primaryFolder: xlsxCell(row, 'Primary Folder') ?? undefined,
+    subfolder1: xlsxCell(row, 'Subfolder-level1') ?? undefined,
+    subfolder2: xlsxCell(row, 'Subfolder-level2') ?? undefined,
+    subfolder3: xlsxCell(row, 'Subfolder-level3') ?? undefined,
+    subfolder4: xlsxCell(row, 'Subfolder-level4') ?? undefined,
+  }
 
   const photoUrls: string[] = []
   for (let i = 1; i <= 8; i++) {
@@ -99,7 +108,7 @@ function parseRow(row: Record<string, unknown>): SortlyRow | null {
     attributes,
     quantity: xlsxNumber(row, 'Quantity') ?? 0,
     price: xlsxNumber(row, 'Price'),
-    category,
+    folderChain,
     photoUrls,
   }
 }
@@ -203,8 +212,8 @@ async function main(): Promise<void> {
     return colour ?? style ?? NO_COLOUR_LABEL
   }
 
+  const folderCache: FolderCache = new Map()
   const cache = {
-    category: new Map<string, string>(),
     itemGroup: new Map<string, string>(),
     unassignedFamily: new Map<string, string>(),
     colourVariant: new Map<string, string>(),
@@ -214,16 +223,15 @@ async function main(): Promise<void> {
     productAttributeValue: new Map<string, string>(),
   }
 
-  async function upsertCategory(name: string): Promise<string> {
-    if (cache.category.has(name)) return cache.category.get(name)!
-    const row = await prisma.category.upsert({
-      where: { name },
-      create: { name },
-      update: {},
-    })
-    cache.category.set(name, row.id)
-    counts.categories++
-    return row.id
+  /// Walk this row's folder chain via the shared helper (same code both the
+  /// xlsx CLI and the CSV importer call), then bump `counts.categories` by
+  /// however many nodes this call actually created. Cache size delta lets
+  /// us count new folders per row without tracking them inside the helper.
+  async function upsertFolderForRow(row: SortlyRow): Promise<string> {
+    const before = folderCache.size
+    const leafId = await upsertSortlyFolderChain(prisma, row.folderChain, folderCache)
+    counts.categories += folderCache.size - before
+    return leafId
   }
 
   async function upsertItemGroup(categoryId: string, name: string): Promise<string> {
@@ -331,9 +339,26 @@ async function main(): Promise<void> {
   }
   const axisPlanByItemGroup = new Map<string, Map<string, AxisPlan>>()
 
+  /// Key the axis-plan bucket by the row's full folder chain + itemGroupName.
+  /// The chain is stable across duplicate SIDs for the same product (same
+  /// row of Sortly's tree, just repeated), so this collapses to one bucket
+  /// per real ItemGroup — same behaviour the old `r.category` key had, but
+  /// now correct for products that share a name across sibling folders.
+  const axisPlanKey = (r: SortlyRow): string => {
+    const chain = [
+      r.folderChain.primaryFolder,
+      r.folderChain.subfolder1,
+      r.folderChain.subfolder2,
+      r.folderChain.subfolder3,
+      r.folderChain.subfolder4,
+    ]
+      .filter((s): s is string => Boolean(s?.trim()))
+      .join(' > ')
+    return `${chain}::${r.itemGroupName}`
+  }
+
   for (const r of rows) {
-    // key by (category, itemGroupName) to match how ItemGroup unique constraint works
-    const key = `${r.category}::${r.itemGroupName}`
+    const key = axisPlanKey(r)
     let plans = axisPlanByItemGroup.get(key)
     if (!plans) {
       plans = new Map()
@@ -355,11 +380,11 @@ async function main(): Promise<void> {
   console.log('\nWriting catalog…')
   for (const r of rows) {
     try {
-      const categoryId = await upsertCategory(r.category)
+      const categoryId = await upsertFolderForRow(r)
       const itemGroupId = await upsertItemGroup(categoryId, r.itemGroupName)
 
       // Ensure the ProductAttribute + Value rows exist for this ItemGroup
-      const plans = axisPlanByItemGroup.get(`${r.category}::${r.itemGroupName}`) ?? new Map()
+      const plans = axisPlanByItemGroup.get(axisPlanKey(r)) ?? new Map()
       const attributeIdByName = new Map<string, string>()
       for (const [name, plan] of plans) {
         const attrId = await upsertProductAttribute(itemGroupId, name, plan.order)

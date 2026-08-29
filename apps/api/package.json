@@ -34,7 +34,9 @@
     "cli:migrate-to-flexible-attributes": "tsx src/cli/migrate-to-flexible-attributes.ts",
     "cli:sync-square-catalog": "tsx src/cli/sync-square-catalog.ts",
     "cli:reset-db-keep-users": "tsx src/cli/reset-db-keep-users.ts",
-    "cli:import-sortly-xlsx": "tsx src/cli/import-sortly-xlsx.ts"
+    "cli:import-sortly-xlsx": "tsx src/cli/import-sortly-xlsx.ts",
+    "cli:reset-catalog": "tsx src/cli/reset-catalog.ts",
+    "reseed:catalog": "pnpm cli:reset-catalog -- --confirm && pnpm cli:import-sortly-xlsx"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

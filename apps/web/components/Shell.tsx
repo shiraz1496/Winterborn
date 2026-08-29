@@ -13,12 +13,14 @@ const TITLES: Record<string, string> = {
   '/pack': 'Pack',
   '/notifications': 'Notifications',
   '/admin/colours': 'Colours',
+  '/admin/catalog': 'Catalog',
   '/admin/users': 'Users',
 }
 
 function titleFor(pathname: string): string {
   if (pathname.startsWith('/requests/')) return 'Request'
   if (pathname.startsWith('/pack/')) return 'Pack'
+  if (pathname.startsWith('/admin/catalog/')) return 'Catalog'
   for (const [prefix, title] of Object.entries(TITLES)) {
     if (prefix !== '/' && pathname.startsWith(prefix)) return title
   }
