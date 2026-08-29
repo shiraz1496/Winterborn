@@ -353,7 +353,7 @@ function PhotoGallery({
 
 export default function ItemDetailPage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']}>
       <ItemDetail />
     </RequireAuth>
   )

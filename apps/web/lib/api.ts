@@ -8,13 +8,19 @@ import {
   boxLabelSchema,
   boxLineSchema,
   boxSchema,
+  receiveBoxInputSchema,
+  receiveBoxResultSchema,
   catalogBrowseResponseSchema,
   catalogItemDetailSchema,
   catalogItemGroupPageSchema,
   catalogItemRowSchema,
   categorySchema,
+  categoryTreeNodeSchema,
   colourFamilySchema,
   colourVariantSchema,
+  createCategoryInputSchema,
+  createProductInputSchema,
+  createProductResultSchema,
   createWarehouseVariantInputSchema,
   createLoadInputSchema,
   createRequestInputSchema,
@@ -67,6 +73,8 @@ import {
   type CreateRequestInput,
   type CreateRequestLineInput,
   type CreateWarehouseVariantInput,
+  type CreateCategoryInput,
+  type CreateProductInput,
   type IntakeInput,
   type PackBoxInput,
   type StockCorrectionInput,
@@ -217,23 +225,23 @@ export function salesSince(locationId?: string, days?: number) {
 
 // ---- catalog browse (Sortly-style folder hierarchy) ----------------------
 
-/// Tree-aware folder browse. Pass no `folderId` for the root view; pass
-/// one to drill in. Response carries the current folder, breadcrumb (root
-/// down to parent, excluding self), direct-child subfolders, and direct-
-/// child item groups (rendered as folder tiles too, linking to the SKU
-/// grid).
-export function browseFolder(folderId?: string) {
+/// Tree-aware folder browse. `folderId` picks a folder to drill into
+/// (omit for root); `locationId` scopes on-hand aggregates to a specific
+/// warehouse or market. Owner/WM omitting `locationId` defaults server-
+/// side to the first warehouse; MM is always pinned to their own market
+/// regardless of what they pass.
+export function browseFolder(folderId?: string, locationId?: string) {
   return request(
     'GET',
-    `/catalog/browse${qs({ folderId })}`,
+    `/catalog/browse${qs({ folderId, locationId })}`,
     catalogBrowseResponseSchema,
   )
 }
 
-export function browseCatalogItems(itemGroupId: string) {
+export function browseCatalogItems(itemGroupId: string, locationId?: string) {
   return request(
     'GET',
-    `/catalog/browse/item-groups/${encodeURIComponent(itemGroupId)}/items`,
+    `/catalog/browse/item-groups/${encodeURIComponent(itemGroupId)}/items${qs({ locationId })}`,
     catalogItemGroupPageSchema,
   )
 }
@@ -249,6 +257,18 @@ export function getCatalogItemDetail(warehouseVariantId: string) {
 export function correctStock(input: StockCorrectionInput) {
   const body = stockCorrectionInputSchema.parse(input)
   return request('POST', '/stock/correction', stockCorrectionResultSchema, body)
+}
+
+// ---- product creation (intake "+ Create new product" modal) --------------
+
+export function createCategory(input: CreateCategoryInput) {
+  const body = createCategoryInputSchema.parse(input)
+  return request('POST', '/catalog/categories', categoryTreeNodeSchema, body)
+}
+
+export function createProduct(input: CreateProductInput) {
+  const body = createProductInputSchema.parse(input)
+  return request('POST', '/catalog/products', createProductResultSchema, body)
 }
 
 // ---- thresholds / decision queue -------------------------------------------
@@ -446,6 +466,11 @@ export function dispatchBox(id: string) {
 
 export function getBoxLabel(id: string) {
   return request('GET', `/boxes/${id}/label`, boxLabelSchema)
+}
+
+export function receiveBox(qrToken: string, expectedRequestId?: string) {
+  const body = receiveBoxInputSchema.parse({ qrToken, expectedRequestId })
+  return request('POST', '/boxes/receive', receiveBoxResultSchema, body)
 }
 
 // ---- loads --------------------------------------------------------------------
