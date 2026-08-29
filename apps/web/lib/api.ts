@@ -468,8 +468,8 @@ export function getBoxLabel(id: string) {
   return request('GET', `/boxes/${id}/label`, boxLabelSchema)
 }
 
-export function receiveBox(qrToken: string) {
-  const body = receiveBoxInputSchema.parse({ qrToken })
+export function receiveBox(qrToken: string, expectedRequestId?: string) {
+  const body = receiveBoxInputSchema.parse({ qrToken, expectedRequestId })
   return request('POST', '/boxes/receive', receiveBoxResultSchema, body)
 }
 

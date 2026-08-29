@@ -136,6 +136,42 @@ function RequestDetailBody() {
     [warehouseVariants],
   )
   const analysisByLine = useMemo(() => new Map(analysis.map((a) => [a.lineId, a])), [analysis])
+
+  /// Per-request-line: how many units the warehouse actually packed +
+  /// dispatched. Request lines are at the family (Variation) level; a
+  /// warehouse-variant-specific line matches only its own SKU, a
+  /// family-level line matches every SKU under that variation.
+  /// Comparing this to line.qtyRequested surfaces "we asked for 3,
+  /// warehouse only sent 2 (the third wasn't available)".
+  const shippedByLine = useMemo(() => {
+    const wvVariationById = new Map(warehouseVariants.map((wv) => [wv.id, wv.variationId]))
+    const out = new Map<string, number>()
+    if (!request) return out
+    for (const line of request.lines) {
+      let shipped = 0
+      for (const box of boxes) {
+        for (const boxLine of box.lines) {
+          if (line.warehouseVariantId) {
+            if (boxLine.warehouseVariantId === line.warehouseVariantId) shipped += boxLine.quantity
+          } else {
+            if (wvVariationById.get(boxLine.warehouseVariantId) === line.variationId) {
+              shipped += boxLine.quantity
+            }
+          }
+        }
+      }
+      out.set(line.id, shipped)
+    }
+    return out
+  }, [request, boxes, warehouseVariants])
+
+  const packingHasStarted = request
+    ? request.state === 'PACKING' ||
+      request.state === 'DISPATCHED' ||
+      request.state === 'ARRIVED' ||
+      request.state === 'CLOSED'
+    : false
+
   const locationName = locations.find((l) => l.id === request?.locationId)?.name ?? request?.locationId
 
   async function setQty(lineId: string, qty: number) {
@@ -345,6 +381,34 @@ function RequestDetailBody() {
                     ? warehouseVariantById.get(line.warehouseVariantId)!.warehouseSku
                     : meta?.sizeOptionName}
                 </div>
+                {packingHasStarted && (() => {
+                  const shipped = shippedByLine.get(line.id) ?? 0
+                  const requested = line.qtyRequested
+                  if (shipped >= requested) {
+                    return (
+                      <div style={{ marginTop: 6 }}>
+                        <span className="chip chip-pine">Shipped {shipped}</span>
+                      </div>
+                    )
+                  }
+                  if (shipped === 0) {
+                    return (
+                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span className="chip chip-rust">Not shipped</span>
+                        <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+                          Warehouse didn&apos;t include this item.
+                        </span>
+                      </div>
+                    )
+                  }
+                  return (
+                    <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span className="chip chip-signal">
+                        Short — {shipped} of {requested} shipped
+                      </span>
+                    </div>
+                  )
+                })()}
                 {(rec || alloc) && (
                   <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {rec && rec.qty != null && rec.qty !== line.qtyRequested && (
@@ -468,16 +532,29 @@ function RequestDetailBody() {
         onScanned={(res) => {
           setScannerOpen(false)
           const boxLabel = res.box.qrToken.slice(0, 8).toUpperCase()
+          // Summarise what's actually in the box so the operator sees
+          // the truth of what landed at the market (not just a count).
+          // Truncated to keep the toast readable — full contents are
+          // still visible on the request page's Boxes section.
+          const contentsSummary = res.box.contents.length === 0
+            ? ''
+            : res.box.contents.length <= 2
+              ? ` (${res.box.contents.map((c) => `${c.colourVariantName} ×${c.quantity}`).join(', ')})`
+              : ` (${res.box.contents
+                  .slice(0, 2)
+                  .map((c) => `${c.colourVariantName} ×${c.quantity}`)
+                  .join(', ')} + ${res.box.contents.length - 2} more)`
+
           if (res.box.alreadyReceived) {
             toast.info(`Box ${boxLabel} was already received.`)
           } else if (res.request?.closed) {
-            toast.success(`Box ${boxLabel} received — request closed.`)
+            toast.success(`Box ${boxLabel} received${contentsSummary} — request closed.`)
           } else if (res.request) {
             toast.success(
-              `Box ${boxLabel} received — ${res.request.boxesReceived} of ${res.request.boxesTotal} in.`,
+              `Box ${boxLabel} received${contentsSummary} — ${res.request.boxesReceived} of ${res.request.boxesTotal} in.`,
             )
           } else {
-            toast.success(`Box ${boxLabel} received.`)
+            toast.success(`Box ${boxLabel} received${contentsSummary}.`)
           }
           void load()
         }}

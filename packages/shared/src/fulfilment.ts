@@ -92,6 +92,16 @@ export const receiveBoxResultSchema = z.object({
     lineCount: z.number().int(),
     arrivedAt: z.coerce.date(),
     alreadyReceived: z.boolean(),
+    /// What actually landed at the market on this scan. The client
+    /// uses this to show the operator exactly what came in (versus
+    /// what the request asked for) — the difference between "we
+    /// received 2 of 3 requested lines" is visible from this list
+    /// alone.
+    ///
+    /// Defaulted to `[]` so a browser talking to an older-shape API
+    /// (added `contents` in a later deploy) still parses cleanly —
+    /// only the toast's per-item breakdown degrades to a plain count.
+    contents: z.array(boxLabelLineSchema).default([]),
   }),
   request: z.object({
     id: z.string(),

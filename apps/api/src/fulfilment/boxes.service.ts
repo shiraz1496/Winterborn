@@ -423,7 +423,21 @@ export class BoxesService {
   ): Promise<ReceiveBoxResult> {
     const box = await this.prisma.box.findUnique({
       where: { qrToken },
-      include: { lines: true, destinationLocation: true, request: true },
+      include: {
+        destinationLocation: true,
+        request: true,
+        lines: {
+          include: {
+            warehouseVariant: {
+              include: {
+                itemGroup: { select: { name: true } },
+                colourVariant: { select: { name: true } },
+                sizeOption: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
     })
     if (!box) throw new NotFoundException(`unknown box QR — no box matches this code`)
 
@@ -532,6 +546,14 @@ export class BoxesService {
         lineCount: box.lines.length,
         arrivedAt,
         alreadyReceived,
+        contents: box.lines.map((l) => ({
+          warehouseVariantId: l.warehouseVariantId,
+          itemGroupName: l.warehouseVariant.itemGroup.name,
+          colourVariantName: l.warehouseVariant.colourVariant.name,
+          sizeOptionName: l.warehouseVariant.sizeOption.name,
+          warehouseSku: l.warehouseVariant.warehouseSku,
+          quantity: l.quantity,
+        })),
       },
       request: requestInfo,
     }

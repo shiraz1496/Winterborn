@@ -27,16 +27,25 @@ function ScanBody() {
         onClose={() => router.back()}
         onScanned={(res) => {
           const boxLabel = res.box.qrToken.slice(0, 8).toUpperCase()
+          const contentsSummary = res.box.contents.length === 0
+            ? ''
+            : res.box.contents.length <= 2
+              ? ` (${res.box.contents.map((c) => `${c.colourVariantName} ×${c.quantity}`).join(', ')})`
+              : ` (${res.box.contents
+                  .slice(0, 2)
+                  .map((c) => `${c.colourVariantName} ×${c.quantity}`)
+                  .join(', ')} + ${res.box.contents.length - 2} more)`
+
           if (res.box.alreadyReceived) {
             toast.info(`Box ${boxLabel} was already received.`)
           } else if (res.request?.closed) {
-            toast.success(`Box ${boxLabel} received — request closed.`)
+            toast.success(`Box ${boxLabel} received${contentsSummary} — request closed.`)
           } else if (res.request) {
             toast.success(
-              `Box ${boxLabel} received — ${res.request.boxesReceived} of ${res.request.boxesTotal} in.`,
+              `Box ${boxLabel} received${contentsSummary} — ${res.request.boxesReceived} of ${res.request.boxesTotal} in.`,
             )
           } else {
-            toast.success(`Box ${boxLabel} received.`)
+            toast.success(`Box ${boxLabel} received${contentsSummary}.`)
           }
           if (res.request) {
             router.push(`/requests/${res.request.id}`)
