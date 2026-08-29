@@ -263,9 +263,9 @@ function IntakeBody() {
     setVariants(freshVariants)
     toast.success(
       `Created ${summary.itemGroupName} — ${summary.skusCreated} SKU${summary.skusCreated === 1 ? '' : 's'}` +
-        (summary.totalUnitsRecorded > 0
-          ? `, ${summary.totalUnitsRecorded} unit${summary.totalUnitsRecorded === 1 ? '' : 's'} recorded`
-          : ''),
+      (summary.totalUnitsRecorded > 0
+        ? `, ${summary.totalUnitsRecorded} unit${summary.totalUnitsRecorded === 1 ? '' : 's'} recorded`
+        : ''),
     )
   }
 
@@ -947,7 +947,7 @@ function NewProductModal({
           </p>
         </div>
 
-        {canAttachPhotos && nonZeroCount > 0 && (
+        {nonZeroCount > 0 && (
           <div className="field">
             <label>Photos</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

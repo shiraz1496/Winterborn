@@ -130,7 +130,6 @@ export class ProductCreationService {
       /// caught and the existing row reused so the retry is idempotent).
       const sizeOptionCache = new Map<string, string>()
       const colourVariantCache = new Map<string, string>()
-      const colourVariantHasPhoto = new Map<string, boolean>()
       const variationCache = new Map<string, string>()
 
       const createdSkus: Array<{
@@ -180,13 +179,21 @@ export class ProductCreationService {
 
         let colourVariantId = colourVariantCache.get(colourVariantName)
         if (!colourVariantId) {
+          // ColourVariant is shared across every ItemGroup that uses a
+          // colour with the same name in the same category — the
+          // upsert key is (colourFamilyId, name). Photos MUST NOT be
+          // written to this shared row: a photo saved here for one
+          // product would bleed into every other product that reuses
+          // "Red" in the same category (via catalog-read's fallback
+          // `wv.photoUrls[0] ?? wv.colourVariant.photoUrl`). Photos
+          // live on WarehouseVariant.photoUrls, which is per-SKU and
+          // stays scoped to the product that uploaded them.
           const cv = await tx.colourVariant.upsert({
             where: { colourFamilyId_name: { colourFamilyId: colourFamily.id, name: colourVariantName } },
             create: {
               colourFamilyId: colourFamily.id,
               name: colourVariantName,
               normalisedName: colourVariantName.trim().toLowerCase(),
-              photoUrl: photoUrls[0] ?? null,
               familyAssignmentSource: 'MANUAL',
               familyConfidence: 0,
             },
@@ -194,13 +201,6 @@ export class ProductCreationService {
           })
           colourVariantId = cv.id
           colourVariantCache.set(colourVariantName, colourVariantId)
-          colourVariantHasPhoto.set(colourVariantId, Boolean(cv.photoUrl))
-        }
-        // Backfill only -- never overwrite a colour's existing representative
-        // photo, same rule the Sortly importer's getOrCreateColourVariant uses.
-        if (!colourVariantHasPhoto.get(colourVariantId) && photoUrls[0]) {
-          await tx.colourVariant.update({ where: { id: colourVariantId }, data: { photoUrl: photoUrls[0] } })
-          colourVariantHasPhoto.set(colourVariantId, true)
         }
 
         const variationKey = `${itemGroup.id}::${colourFamily.id}::${sizeOptionId}`
