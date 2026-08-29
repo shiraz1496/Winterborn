@@ -22,6 +22,7 @@ coverage/
 *.log
 .vscode/
 .idea/
+.sf/
 
 # source conversations - contain commercial negotiation detail, keep local
 claude-web-chat-export.md
