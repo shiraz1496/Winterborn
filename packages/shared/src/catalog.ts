@@ -386,6 +386,16 @@ export const catalogBrowseResponseSchema = z.object({
   breadcrumb: z.array(catalogCrumbSchema),
   subfolders: z.array(catalogFolderRowSchema),
   itemGroups: z.array(catalogFolderRowSchema),
+  /// The location the numbers on this response are scoped to. Owner/WM
+  /// picked it (or the server defaulted to the first warehouse); MM is
+  /// pinned to their own market. Client uses `id` to preserve selection
+  /// across navigation and `kind` to decide whether "physical count"
+  /// corrections should be offered.
+  location: z.object({
+    id: z.string(),
+    name: z.string(),
+    kind: z.enum(['WAREHOUSE', 'MARKET']),
+  }).nullable(),
 })
 export type CatalogBrowseResponse = z.infer<typeof catalogBrowseResponseSchema>
 
@@ -416,6 +426,14 @@ export const catalogItemGroupPageSchema = z.object({
   }),
   breadcrumb: z.array(catalogCrumbSchema),
   items: z.array(catalogItemRowSchema),
+  /// Same location resolution as the folder browse — SKU tile counts
+  /// are scoped to whichever location the caller picked (or the default
+  /// warehouse / the MM's own market).
+  location: z.object({
+    id: z.string(),
+    name: z.string(),
+    kind: z.enum(['WAREHOUSE', 'MARKET']),
+  }).nullable(),
 })
 export type CatalogItemGroupPage = z.infer<typeof catalogItemGroupPageSchema>
 

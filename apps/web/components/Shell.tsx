@@ -15,6 +15,7 @@ const TITLES: Record<string, string> = {
   '/admin/colours': 'Colours',
   '/admin/catalog': 'Catalog',
   '/admin/users': 'Users',
+  '/scan': 'Scan',
 }
 
 function titleFor(pathname: string): string {

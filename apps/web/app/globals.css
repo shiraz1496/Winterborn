@@ -1512,6 +1512,29 @@ textarea {
   body {
     background: #fff;
   }
+
+  /* Scoped-label print: when the operator hits Print on a specific box
+     label, the click handler flips body.is-printing-label + marks the
+     target element with .print-target. Everything else on the page goes
+     invisible; only the target and its descendants print. Using
+     visibility (not display) preserves the target's own layout while
+     the absolute position pins it to the top-left of the printed page
+     so ancestor containers can't push it around. */
+  body.is-printing-label * {
+    visibility: hidden !important;
+  }
+  body.is-printing-label .print-target,
+  body.is-printing-label .print-target * {
+    visibility: visible !important;
+  }
+  body.is-printing-label .print-target {
+    position: absolute !important;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 20px;
+    background: #fff;
+  }
 }
 
 /* ---- desktop shell (kept last so it always beats mobile base rules) ------

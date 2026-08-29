@@ -1,33 +1,47 @@
 'use client'
 
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
-import type { CatalogItemGroupPage as ItemGroupPageDto, CatalogItemRow } from '@winterborn/shared'
+import type { CatalogItemGroupPage as ItemGroupPageDto, CatalogItemRow, LocationDto } from '@winterborn/shared'
+import { LocationPicker } from '../../../../../components/LocationPicker'
 import { PageHeader } from '../../../../../components/PageHeader'
 import { RequireAuth } from '../../../../../components/RequireAuth'
 import { Swatch } from '../../../../../components/Swatch'
-import { ApiError, browseCatalogItems } from '../../../../../lib/api'
-import { Breadcrumbs, CatalogStats, catalogSearchClass, formatMoney } from '../../_shared'
+import { useAuth } from '../../../../../lib/auth-context'
+import { ApiError, browseCatalogItems, listLocations } from '../../../../../lib/api'
+import { Breadcrumbs, CatalogStats, catalogSearchClass, formatMoney, withLoc } from '../../_shared'
 
 function ItemGroupView() {
   const params = useParams<{ itemGroupId: string }>()
   const itemGroupId = params.itemGroupId
+  const { user } = useAuth()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const requestedLoc = searchParams.get('loc')
+
+  const canSwitchLocation = user?.role !== 'MARKET_MANAGER'
+
   const [data, setData] = useState<ItemGroupPageDto | null>(null)
+  const [locations, setLocations] = useState<LocationDto[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
   useEffect(() => {
     setLoading(true)
-    browseCatalogItems(itemGroupId)
-      .then((res) => {
+    Promise.all([
+      browseCatalogItems(itemGroupId, requestedLoc ?? undefined),
+      listLocations(),
+    ])
+      .then(([res, locs]) => {
         setData(res)
+        setLocations(locs)
         setError(null)
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load this item group.'))
       .finally(() => setLoading(false))
-  }, [itemGroupId])
+  }, [itemGroupId, requestedLoc])
 
   const filtered = useMemo(() => {
     if (!data) return []
@@ -53,6 +67,12 @@ function ItemGroupView() {
     return { totalQty, totalValueCents }
   }, [data])
 
+  function pickLocation(nextId: string) {
+    router.replace(
+      `/admin/catalog/g/${encodeURIComponent(itemGroupId)}?loc=${encodeURIComponent(nextId)}`,
+    )
+  }
+
   if (loading) {
     return (
       <div className="screen-loading">
@@ -61,13 +81,15 @@ function ItemGroupView() {
     )
   }
 
+  const currentLocationId = data?.location?.id ?? null
+
   return (
     <div>
       <Breadcrumbs
         crumbs={[
-          { href: '/admin/catalog', label: 'Catalog' },
+          { href: withLoc('/admin/catalog', currentLocationId), label: 'Catalog' },
           ...(data?.breadcrumb.map((c) => ({
-            href: `/admin/catalog/f/${encodeURIComponent(c.id)}`,
+            href: withLoc(`/admin/catalog/f/${encodeURIComponent(c.id)}`, currentLocationId),
             label: c.name,
           })) ?? []),
           { label: data?.itemGroup.name ?? '…' },
@@ -76,10 +98,19 @@ function ItemGroupView() {
       <PageHeader
         eyebrow="Item group"
         title={data?.itemGroup.name ?? 'Item group'}
-        description="Every SKU in this group with its warehouse on-hand. Click a card to see photos, per-warehouse counts, and edit."
+        description="Every SKU in this group with its on-hand at the selected location. Click a card to see photos, per-warehouse counts, and edit."
       />
 
       {error && <p className="error-banner">{error}</p>}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <LocationPicker
+          value={currentLocationId}
+          onChange={pickLocation}
+          locations={locations}
+          canSwitch={canSwitchLocation}
+        />
+      </div>
 
       <CatalogStats
         left={[
@@ -117,7 +148,7 @@ function ItemGroupView() {
           {filtered.map((it) => (
             <Link
               key={it.warehouseVariantId}
-              href={`/admin/catalog/i/${encodeURIComponent(it.warehouseVariantId)}`}
+              href={withLoc(`/admin/catalog/i/${encodeURIComponent(it.warehouseVariantId)}`, currentLocationId)}
               style={{ textDecoration: 'none', color: 'inherit' }}
             >
               <ItemTile item={it} />
@@ -202,7 +233,7 @@ function ItemTile({ item }: { item: CatalogItemRow }) {
 
 export default function ItemGroupPage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']}>
       <ItemGroupView />
     </RequireAuth>
   )

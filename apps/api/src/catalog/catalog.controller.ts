@@ -238,21 +238,31 @@ export class CatalogController {
     return this.ledgerRead.salesSince(since, locationId)
   }
 
-  /// Sortly-style folder browser. One endpoint at each drill-in step —
-  /// omit `folderId` at the root, pass it to drill into a Category. The
-  /// response has both direct-child Categories (subfolders) and direct-
-  /// child ItemGroups (leaf folders whose contents are SKUs). Warehouse-
-  /// only aggregation: markets are excluded because dispatched-not-yet-
-  /// sold stock is not the number a warehouse operator is looking for.
+  /// Sortly-style folder browser. Owner/WM pass an optional `locationId`
+  /// to scope on-hand aggregates to a specific warehouse or market;
+  /// omitting it falls back to the first WAREHOUSE-kind location so the
+  /// default view stays "your main warehouse". MARKET_MANAGER is
+  /// available too and is server-side pinned to their own location — a
+  /// different locationId 403s so the boundary is explicit.
   @Get('catalog/browse')
-  browse(@Query('folderId') folderId?: string) {
-    return this.catalog.browseFolder(folderId ?? null)
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')
+  browse(
+    @CurrentUser() user: CurrentUserPayload,
+    @Query('folderId') folderId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.catalog.browseFolder(folderId ?? null, user, locationId ?? null)
   }
 
-  /// One item-group's leaf SKUs, unchanged from the pre-tree layout.
+  /// One item-group's leaf SKUs — same locationId semantics as browse.
   @Get('catalog/browse/item-groups/:itemGroupId/items')
-  browseItems(@Param('itemGroupId') itemGroupId: string) {
-    return this.catalog.listItemGroupItems(itemGroupId)
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')
+  browseItems(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('itemGroupId') itemGroupId: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.catalog.listItemGroupItems(itemGroupId, user, locationId ?? null)
   }
 
   @Get('catalog/browse/items/:warehouseVariantId')

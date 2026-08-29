@@ -1,31 +1,45 @@
 'use client'
 
-import { useParams } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
-import type { CatalogBrowseResponse } from '@winterborn/shared'
+import type { CatalogBrowseResponse, LocationDto } from '@winterborn/shared'
+import { LocationPicker } from '../../../../../components/LocationPicker'
 import { PageHeader } from '../../../../../components/PageHeader'
 import { RequireAuth } from '../../../../../components/RequireAuth'
-import { ApiError, browseFolder } from '../../../../../lib/api'
-import { Breadcrumbs, CatalogStats, TileGrid, catalogSearchClass, formatMoney } from '../../_shared'
+import { useAuth } from '../../../../../lib/auth-context'
+import { ApiError, browseFolder, listLocations } from '../../../../../lib/api'
+import { Breadcrumbs, CatalogStats, TileGrid, catalogSearchClass, formatMoney, withLoc } from '../../_shared'
 
 function FolderView() {
   const params = useParams<{ folderId: string }>()
   const folderId = params.folderId
+  const { user } = useAuth()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const requestedLoc = searchParams.get('loc')
+
+  const canSwitchLocation = user?.role !== 'MARKET_MANAGER'
+
   const [data, setData] = useState<CatalogBrowseResponse | null>(null)
+  const [locations, setLocations] = useState<LocationDto[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
   useEffect(() => {
     setLoading(true)
-    browseFolder(folderId)
-      .then((res) => {
+    Promise.all([
+      browseFolder(folderId, requestedLoc ?? undefined),
+      listLocations(),
+    ])
+      .then(([res, locs]) => {
         setData(res)
+        setLocations(locs)
         setError(null)
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load this folder.'))
       .finally(() => setLoading(false))
-  }, [folderId])
+  }, [folderId, requestedLoc])
 
   const filtered = useMemo(() => {
     if (!data) return { subfolders: [], itemGroups: [] }
@@ -51,6 +65,12 @@ function FolderView() {
     return { folderCount: all.length, itemCount, totalQty, totalValueCents }
   }, [data])
 
+  function pickLocation(nextId: string) {
+    router.replace(
+      `/admin/catalog/f/${encodeURIComponent(folderId)}?loc=${encodeURIComponent(nextId)}`,
+    )
+  }
+
   if (loading) {
     return (
       <div className="screen-loading">
@@ -59,13 +79,15 @@ function FolderView() {
     )
   }
 
+  const currentLocationId = data?.location?.id ?? null
+
   return (
     <div>
       <Breadcrumbs
         crumbs={[
-          { href: '/admin/catalog', label: 'Catalog' },
+          { href: withLoc('/admin/catalog', currentLocationId), label: 'Catalog' },
           ...(data?.breadcrumb.map((c) => ({
-            href: `/admin/catalog/f/${encodeURIComponent(c.id)}`,
+            href: withLoc(`/admin/catalog/f/${encodeURIComponent(c.id)}`, currentLocationId),
             label: c.name,
           })) ?? []),
           { label: data?.folder?.name ?? '…' },
@@ -74,10 +96,19 @@ function FolderView() {
       <PageHeader
         eyebrow="Folder"
         title={data?.folder?.name ?? 'Folder'}
-        description="Sub-folders and item groups inside this folder. Aggregates roll up across the whole subtree."
+        description="Sub-folders and item groups inside this folder. Aggregates roll up across the whole subtree at the selected location."
       />
 
       {error && <p className="error-banner">{error}</p>}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <LocationPicker
+          value={currentLocationId}
+          onChange={pickLocation}
+          locations={locations}
+          canSwitch={canSwitchLocation}
+        />
+      </div>
 
       <CatalogStats
         left={[
@@ -98,14 +129,18 @@ function FolderView() {
         />
       </div>
 
-      <TileGrid subfolders={filtered.subfolders} itemGroups={filtered.itemGroups} />
+      <TileGrid
+        subfolders={filtered.subfolders}
+        itemGroups={filtered.itemGroups}
+        locationId={currentLocationId}
+      />
     </div>
   )
 }
 
 export default function FolderPage() {
   return (
-    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']}>
+    <RequireAuth roles={['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']}>
       <FolderView />
     </RequireAuth>
   )

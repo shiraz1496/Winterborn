@@ -1,6 +1,6 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { transferKeyPrefix } from '@winterborn/shared'
+import { transferKeyPrefix, type ReceiveBoxResult } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
@@ -35,12 +35,22 @@ export interface PackBoxInput {
   lines: PackBoxLineInput[]
 }
 
+export interface BoxLabelLine {
+  warehouseVariantId: string
+  itemGroupName: string
+  colourVariantName: string
+  sizeOptionName: string
+  warehouseSku: string
+  quantity: number
+}
+
 export interface BoxLabel {
   qrToken: string
   destinationLocationId: string
   destinationLocationName: string
   lineCount: number
   packedAt: Date | null
+  lines: BoxLabelLine[]
 }
 
 /**
@@ -153,11 +163,21 @@ export class BoxesService {
   /// Filters are AND'd together; both are optional so /pack/[requestId] can
   /// ask "boxes for this request" and a plain box browser can ask "boxes
   /// headed to this market" without two endpoints.
-  async list(filter: { requestId?: string; destinationLocationId?: string }) {
+  async list(
+    filter: { requestId?: string; destinationLocationId?: string },
+    actor?: CurrentUserPayload,
+  ) {
+    // Market managers are scoped to their own market's boxes — the UI
+    // shows box progress for a request they're closing, and they have
+    // no reason to see other markets' boxes. Warehouse roles see
+    // everything and don't get filtered.
+    const scopedLocationId =
+      actor?.role === 'MARKET_MANAGER' ? actor.locationId ?? undefined : undefined
     return this.prisma.box.findMany({
       where: {
         ...(filter.requestId ? { requestId: filter.requestId } : {}),
         ...(filter.destinationLocationId ? { destinationLocationId: filter.destinationLocationId } : {}),
+        ...(scopedLocationId ? { destinationLocationId: scopedLocationId } : {}),
       },
       include: { lines: true },
       orderBy: { packedAt: 'desc' },
@@ -354,7 +374,20 @@ export class BoxesService {
   async getLabel(boxId: string): Promise<BoxLabel> {
     const box = await this.prisma.box.findUniqueOrThrow({
       where: { id: boxId },
-      include: { lines: true, destinationLocation: true },
+      include: {
+        destinationLocation: true,
+        lines: {
+          include: {
+            warehouseVariant: {
+              include: {
+                itemGroup: { select: { name: true } },
+                colourVariant: { select: { name: true } },
+                sizeOption: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
     })
     return {
       qrToken: box.qrToken,
@@ -362,6 +395,145 @@ export class BoxesService {
       destinationLocationName: box.destinationLocation.name,
       lineCount: box.lines.length,
       packedAt: box.packedAt,
+      lines: box.lines.map((l) => ({
+        warehouseVariantId: l.warehouseVariantId,
+        itemGroupName: l.warehouseVariant.itemGroup.name,
+        colourVariantName: l.warehouseVariant.colourVariant.name,
+        sizeOptionName: l.warehouseVariant.sizeOption.name,
+        warehouseSku: l.warehouseVariant.warehouseSku,
+        quantity: l.quantity,
+      })),
+    }
+  }
+
+  /// Market-manager scans a box QR. Looks up the box by qrToken, verifies
+  /// the scanner is at the destination, marks the box ARRIVED, and posts
+  /// an INTAKE ledger row for each line. If this was the last unreceived
+  /// box for the parent request, the request auto-closes.
+  ///
+  /// Fully idempotent: re-scanning an already-ARRIVED box returns the
+  /// existing state (`alreadyReceived: true`) without duplicate ledger
+  /// rows — the INTAKE idempotencyKey matches `receiveForRequest`'s, so
+  /// bulk-receive-then-scan or scan-then-bulk-receive both converge on
+  /// exactly one INTAKE per line.
+  async receiveByToken(
+    qrToken: string,
+    actor: CurrentUserPayload,
+    expectedRequestId?: string,
+  ): Promise<ReceiveBoxResult> {
+    const box = await this.prisma.box.findUnique({
+      where: { qrToken },
+      include: { lines: true, destinationLocation: true, request: true },
+    })
+    if (!box) throw new NotFoundException(`unknown box QR — no box matches this code`)
+
+    if (actor.role === 'MARKET_MANAGER' && actor.locationId !== box.destinationLocationId) {
+      throw new ForbiddenException(
+        `this box is bound for ${box.destinationLocation.name}, not your market`,
+      )
+    }
+
+    // Wrong-request check runs BEFORE any write. When the market
+    // manager scans from a specific request's detail page, we get an
+    // expectedRequestId — if it doesn't match, refuse loudly and
+    // append nothing. This is what stops a mis-scan from silently
+    // adding stock to the market because the client caught the
+    // mismatch only after the fact.
+    if (expectedRequestId && box.requestId !== expectedRequestId) {
+      throw new BadRequestException({
+        message: `This box belongs to a different request. Nothing was recorded.`,
+        code: 'WRONG_REQUEST',
+        details: { boxRequestId: box.requestId },
+      })
+    }
+
+    if (box.state !== 'DISPATCHED' && box.state !== 'ARRIVED') {
+      throw new BadRequestException(
+        `box is not ready to be received (state=${box.state}) — it must be dispatched first`,
+      )
+    }
+
+    const alreadyReceived = box.state === 'ARRIVED' && box.arrivedAt !== null
+    const arrivedAt = alreadyReceived ? box.arrivedAt! : new Date()
+
+    if (!alreadyReceived) {
+      const existing = await this.prisma.ledgerEvent.findFirst({
+        where: { sourceRef: box.id, type: 'DISPATCH' },
+        select: { transferId: true },
+      })
+      const transferId = existing?.transferId ?? undefined
+      for (const line of box.lines) {
+        const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({
+          where: { id: line.warehouseVariantId },
+        })
+        await this.ledger.append({
+          type: 'INTAKE',
+          locationId: box.destinationLocationId,
+          variationId: wv.variationId,
+          warehouseVariantId: wv.id,
+          quantity: line.quantity,
+          occurredAt: arrivedAt,
+          source: 'UI',
+          sourceRef: box.id,
+          idempotencyKey: `${transferKeyPrefix('dispatch', box.id, wv.id)}:to`,
+          actorId: actor.id,
+          transferId,
+        })
+      }
+      await this.prisma.box.update({
+        where: { id: box.id },
+        data: { state: 'ARRIVED', arrivedAt },
+      })
+    }
+
+    // Parent-request progress + auto-close. Only meaningful if the box
+    // was packed against a request in the first place (loose boxes with
+    // requestId=null skip this).
+    let requestInfo: ReceiveBoxResult['request'] = null
+    if (box.requestId) {
+      const siblingBoxes = await this.prisma.box.findMany({
+        where: { requestId: box.requestId },
+        select: { state: true },
+      })
+      const boxesTotal = siblingBoxes.length
+      const boxesReceived = siblingBoxes.filter((b) => b.state === 'ARRIVED').length
+      const allReceived = boxesTotal > 0 && boxesReceived === boxesTotal
+      const request = await this.prisma.restockRequest.findUnique({ where: { id: box.requestId } })
+      let currentState = request?.state ?? 'CLOSED'
+      let closed = currentState === 'CLOSED'
+
+      if (allReceived && request && request.state !== 'CLOSED') {
+        // Close directly here rather than going through RequestsService.
+        // The role gate has already been passed by this endpoint's own
+        // guards, and we've already posted every INTAKE row —
+        // receiveForRequest would just re-idempotency-check them.
+        const updated = await this.prisma.restockRequest.update({
+          where: { id: request.id },
+          data: { state: 'CLOSED', closedAt: new Date() },
+        })
+        currentState = updated.state
+        closed = true
+      }
+
+      requestInfo = {
+        id: box.requestId,
+        state: currentState,
+        boxesReceived,
+        boxesTotal,
+        closed,
+      }
+    }
+
+    return {
+      box: {
+        id: box.id,
+        qrToken: box.qrToken,
+        destinationLocationName: box.destinationLocation.name,
+        lineCount: box.lines.length,
+        arrivedAt,
+        alreadyReceived,
+      },
+      request: requestInfo,
     }
   }
 }

@@ -184,15 +184,28 @@ export function CatalogWrap({ children }: { children: ReactNode }) {
   return <div>{children}</div>
 }
 
+/// Append the location filter to a drill-in href so navigation preserves
+/// whichever location the operator was viewing. Passing null omits the
+/// query — server-side default (first warehouse) applies.
+export function withLoc(href: string, locationId: string | null): string {
+  if (!locationId) return href
+  const sep = href.includes('?') ? '&' : '?'
+  return `${href}${sep}loc=${encodeURIComponent(locationId)}`
+}
+
 /// A subfolder tile wraps `FolderTile` with a link to `/admin/catalog/f/[id]`.
 /// An item-group tile links to `/admin/catalog/g/[id]`. Both share the same
 /// visual because they read the same at the parent level (Sortly parity).
+/// `locationId` (when set) is appended so the drill-in stays scoped to
+/// the same location.
 export function TileGrid({
   subfolders,
   itemGroups,
+  locationId,
 }: {
   subfolders: CatalogFolderRow[]
   itemGroups: CatalogFolderRow[]
+  locationId: string | null
 }) {
   if (subfolders.length === 0 && itemGroups.length === 0) {
     return (
@@ -215,7 +228,7 @@ export function TileGrid({
       {subfolders.map((f) => (
         <Link
           key={`f:${f.id}`}
-          href={`/admin/catalog/f/${encodeURIComponent(f.id)}`}
+          href={withLoc(`/admin/catalog/f/${encodeURIComponent(f.id)}`, locationId)}
           style={{ textDecoration: 'none', color: 'inherit' }}
         >
           <FolderTile folder={f} />
@@ -224,7 +237,7 @@ export function TileGrid({
       {itemGroups.map((ig) => (
         <Link
           key={`g:${ig.id}`}
-          href={`/admin/catalog/g/${encodeURIComponent(ig.id)}`}
+          href={withLoc(`/admin/catalog/g/${encodeURIComponent(ig.id)}`, locationId)}
           style={{ textDecoration: 'none', color: 'inherit' }}
         >
           <FolderTile folder={ig} />

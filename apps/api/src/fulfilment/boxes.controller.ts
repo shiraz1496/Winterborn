@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common'
+import { receiveBoxInputSchema, type ReceiveBoxInput } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -12,14 +13,31 @@ import { BoxesService, type PackBoxInput, type PackBoxLineInput } from './boxes.
 export class BoxesController {
   constructor(private readonly boxes: BoxesService) {}
 
+  /// Scan-to-receive. Overrides the class-level @Roles guard because
+  /// this endpoint is meant for market managers (the destination) — the
+  /// whole warehouse side has no reason to mark a box "arrived" via
+  /// scan. OWNER is included as a support/override role for the same
+  /// reasons OWNER can transition any request.
+  @Post('receive')
+  @Roles('MARKET_MANAGER', 'OWNER')
+  receive(@Body() body: ReceiveBoxInput, @CurrentUser() user: CurrentUserPayload) {
+    const parsed = receiveBoxInputSchema.parse(body)
+    return this.boxes.receiveByToken(parsed.qrToken, user, parsed.expectedRequestId)
+  }
+
   @Post()
   pack(@Body() body: PackBoxInput, @CurrentUser() user: CurrentUserPayload) {
     return this.boxes.pack(body, user)
   }
 
   @Get()
-  list(@Query('requestId') requestId?: string, @Query('destinationLocationId') destinationLocationId?: string) {
-    return this.boxes.list({ requestId, destinationLocationId })
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')
+  list(
+    @CurrentUser() user: CurrentUserPayload,
+    @Query('requestId') requestId?: string,
+    @Query('destinationLocationId') destinationLocationId?: string,
+  ) {
+    return this.boxes.list({ requestId, destinationLocationId }, user)
   }
 
   @Get('by-token/:qrToken')

@@ -8,6 +8,7 @@ import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Swatch } from '../../../components/Swatch'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { printLabelElement } from '../../../lib/print-label'
 import { useToast } from '../../../lib/toast'
 import {
   ApiError,
@@ -657,7 +658,7 @@ function PackBody() {
               </div>
               <div className="row" style={{ marginTop: 12 }}>
                 <button className="btn" onClick={() => loadLabel(box.id)}>
-                  {labels[box.id] ? 'Hide label' : 'Label'}
+                  {labels[box.id] ? 'Hide QR label' : 'Show QR label'}
                 </button>
                 {box.state === 'PACKING' && (
                   <button className="btn btn-primary" onClick={() => doDispatch(box.id)} disabled={busy}>
@@ -666,9 +667,13 @@ function PackBody() {
                 )}
               </div>
               {labels[box.id] && (
-                <div style={{ marginTop: 14 }}>
+                <div id={`box-label-wrap-${box.id}`} style={{ marginTop: 14 }}>
                   <BoxLabel label={labels[box.id]!} />
-                  <button className="btn btn-block no-print" style={{ marginTop: 10 }} onClick={() => window.print()}>
+                  <button
+                    className="btn btn-block no-print"
+                    style={{ marginTop: 10 }}
+                    onClick={() => printLabelElement(`box-label-wrap-${box.id}`)}
+                  >
                     Print
                   </button>
                 </div>

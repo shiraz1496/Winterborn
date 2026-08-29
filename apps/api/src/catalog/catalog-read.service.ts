@@ -1,5 +1,5 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma } from '@prisma/client'
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
+import { Prisma, type LocationKind } from '@prisma/client'
 import { createHash } from 'node:crypto'
 import type {
   CatalogBrowseResponse,
@@ -20,6 +20,7 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
+import type { CurrentUserPayload } from '../auth/current-user.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// The name catalog-import (Task 2 of the earlier catalog plan) leaves every
@@ -738,23 +739,19 @@ export class CatalogReadService {
     return { squareOnly, winterbornOnly }
   }
 
-  /// Aggregate on-hand across warehouse-kind locations only, per
-  /// WarehouseVariant. Mirrors Sortly's "IN STOCK" root — market on-hand
-  /// (a market's copy of dispatched-but-not-sold stock) is deliberately
-  /// excluded because the folder browser is a warehouse tool.
-  private async warehouseOnHandByVariant(): Promise<Map<string, number>> {
-    const warehouses = await this.prisma.location.findMany({
-      where: { kind: 'WAREHOUSE' },
-      select: { id: true },
-    })
-    const warehouseIds = warehouses.map((w) => w.id)
-    if (warehouseIds.length === 0) return new Map()
+  /// Per-WarehouseVariant on-hand at ONE specific location. The catalog
+  /// browser now has a location dropdown (warehouses + markets), so
+  /// aggregates are always scoped to whichever one the operator is
+  /// viewing — Owner/WM switching a warehouse, MM anchored to their
+  /// market. Falls back to an empty map for an unknown location so the
+  /// UI still renders (all zeros) instead of throwing.
+  private async onHandByVariantAtLocation(locationId: string): Promise<Map<string, number>> {
     const rows = await this.prisma.ledgerEvent.groupBy({
       by: ['warehouseVariantId'],
       _sum: { quantity: true },
       where: {
         warehouseVariantId: { not: null },
-        locationId: { in: warehouseIds },
+        locationId,
       },
     })
     const out = new Map<string, number>()
@@ -764,12 +761,85 @@ export class CatalogReadService {
     return out
   }
 
+  /// Set of WarehouseVariant ids that have EVER had a ledger event at
+  /// this location. Used to decide which SKUs "belong to" a market's
+  /// catalog — a market that has never received a Beanie shouldn't have
+  /// Beanies show up at 0 alongside things it actually carries. A
+  /// market that received-then-sold-out still shows the SKU, because
+  /// the ledger still contains its DISPATCH row.
+  ///
+  /// Warehouses skip this filter (they hold the master catalog), so
+  /// this helper is only called when scoping to a MARKET location.
+  private async variantsSeenAtLocation(locationId: string): Promise<Set<string>> {
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['warehouseVariantId'],
+      where: {
+        warehouseVariantId: { not: null },
+        locationId,
+      },
+    })
+    const out = new Set<string>()
+    for (const r of rows) {
+      if (r.warehouseVariantId) out.add(r.warehouseVariantId)
+    }
+    return out
+  }
+
+  /// Resolves the caller-supplied locationId into the location that
+  /// should actually be used. Owner/WM: honours the value they picked,
+  /// or falls back to the first WAREHOUSE-kind location alphabetically
+  /// when they didn't pick anything (deterministic default that matches
+  /// the pattern intake + product creation use). MM: forced to their
+  /// own market — if they pass a different id, it's a 403 rather than a
+  /// silent override so they see a clear boundary. Returns null when no
+  /// warehouse exists at all so the caller can short-circuit gracefully.
+  private async resolveBrowseLocation(
+    actor: CurrentUserPayload,
+    requestedLocationId: string | null,
+  ): Promise<{ id: string; name: string; kind: LocationKind } | null> {
+    if (actor.role === 'MARKET_MANAGER') {
+      if (!actor.locationId) {
+        throw new ForbiddenException('market manager has no assigned location')
+      }
+      if (requestedLocationId && requestedLocationId !== actor.locationId) {
+        throw new ForbiddenException("cannot browse another location's catalog")
+      }
+      const loc = await this.prisma.location.findUnique({
+        where: { id: actor.locationId },
+        select: { id: true, name: true, kind: true },
+      })
+      if (!loc) throw new NotFoundException(`location ${actor.locationId} not found`)
+      return loc
+    }
+
+    if (requestedLocationId) {
+      const loc = await this.prisma.location.findUnique({
+        where: { id: requestedLocationId },
+        select: { id: true, name: true, kind: true },
+      })
+      if (!loc) throw new NotFoundException(`location ${requestedLocationId} not found`)
+      return loc
+    }
+
+    const fallback = await this.prisma.location.findFirst({
+      where: { kind: 'WAREHOUSE' },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, kind: true },
+    })
+    return fallback ?? null
+  }
+
   /// Leaf rows: one WarehouseVariant per card, with warehouse-wide on-hand.
   /// Response also carries the item group's parent Category chain so the
   /// UI renders its breadcrumb from a single call.
-  async listItemGroupItems(itemGroupId: string): Promise<CatalogItemGroupPage> {
+  async listItemGroupItems(
+    itemGroupId: string,
+    actor: CurrentUserPayload,
+    requestedLocationId: string | null = null,
+  ): Promise<CatalogItemGroupPage> {
     const itemGroup = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
     if (!itemGroup) throw new NotFoundException(`item group ${itemGroupId} not found`)
+    const scopedLocation = await this.resolveBrowseLocation(actor, requestedLocationId)
     const [variants, onHandMap, categories] = await Promise.all([
       this.prisma.warehouseVariant.findMany({
         where: { itemGroupId },
@@ -781,7 +851,7 @@ export class CatalogReadService {
         },
         orderBy: { warehouseSku: 'asc' },
       }),
-      this.warehouseOnHandByVariant(),
+      scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
       this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
     ])
     const catById = new Map(categories.map((c) => [c.id, c]))
@@ -793,22 +863,31 @@ export class CatalogReadService {
       breadcrumb.unshift({ id: c.id, name: c.name })
       cursor = c.parentId
     }
-    const items: CatalogItemRow[] = variants.map((wv) => ({
-      warehouseVariantId: wv.id,
-      itemGroupId: wv.itemGroupId,
-      itemGroupName: wv.itemGroup.name,
-      colourVariantName: wv.colourVariant.name,
-      colourFamilyName: wv.variation.colourFamily.name,
-      sizeOptionName: wv.sizeOption.name,
-      warehouseSku: wv.warehouseSku,
-      photoUrl: wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null,
-      onHand: onHandMap.get(wv.id) ?? 0,
-      unitCostCents: wv.unitCostCents,
-    }))
+    // At a market, drop SKUs that this location has never seen — same
+    // rule as the folder-level filter in browseFolder.
+    const seenAtMarket =
+      scopedLocation?.kind === 'MARKET' ? await this.variantsSeenAtLocation(scopedLocation.id) : null
+    const items: CatalogItemRow[] = variants
+      .filter((wv) => !seenAtMarket || seenAtMarket.has(wv.id))
+      .map((wv) => ({
+        warehouseVariantId: wv.id,
+        itemGroupId: wv.itemGroupId,
+        itemGroupName: wv.itemGroup.name,
+        colourVariantName: wv.colourVariant.name,
+        colourFamilyName: wv.variation.colourFamily.name,
+        sizeOptionName: wv.sizeOption.name,
+        warehouseSku: wv.warehouseSku,
+        photoUrl: wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null,
+        onHand: onHandMap.get(wv.id) ?? 0,
+        unitCostCents: wv.unitCostCents,
+      }))
     return {
       itemGroup: { id: itemGroup.id, name: itemGroup.name, categoryId: itemGroup.categoryId },
       breadcrumb,
       items,
+      location: scopedLocation
+        ? { id: scopedLocation.id, name: scopedLocation.name, kind: scopedLocation.kind }
+        : null,
     }
   }
 
@@ -888,7 +967,12 @@ export class CatalogReadService {
   /// can see "Footwear = 129 items, 12,670 units" without drilling in.
   /// Item-group tiles carry only their own direct SKU totals — they're
   /// leaves.
-  async browseFolder(folderId: string | null): Promise<CatalogBrowseResponse> {
+  async browseFolder(
+    folderId: string | null,
+    actor: CurrentUserPayload,
+    requestedLocationId: string | null = null,
+  ): Promise<CatalogBrowseResponse> {
+    const scopedLocation = await this.resolveBrowseLocation(actor, requestedLocationId)
     // 1. Fetch every Category once (small, ~20 rows) and build parent/child
     //    lookups. Everything below runs off these in-memory structures so
     //    the response is one Category-level SELECT no matter how deep the
@@ -919,7 +1003,13 @@ export class CatalogReadService {
     // 3. Aggregate SKU-level metrics (photo, count, on-hand, value) up
     //    the ancestry so every folder in the tree knows its subtree
     //    totals in one pass.
-    const [allVariants, onHandMap, allItemGroups] = await Promise.all([
+    //
+    //    For MARKET locations we also fetch the "seen-here" SKU set so
+    //    we can filter the catalog to only what actually flowed through
+    //    this market. Warehouses hold the master catalog, so they skip
+    //    the filter and show every folder as before.
+    const isMarketScope = scopedLocation?.kind === 'MARKET'
+    const [allVariants, onHandMap, allItemGroups, seenVariantIds] = await Promise.all([
       this.prisma.warehouseVariant.findMany({
         include: {
           itemGroup: { select: { id: true, categoryId: true, name: true } },
@@ -927,8 +1017,9 @@ export class CatalogReadService {
         },
         orderBy: { warehouseSku: 'asc' },
       }),
-      this.warehouseOnHandByVariant(),
+      scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
       this.prisma.itemGroup.findMany({ orderBy: { name: 'asc' } }),
+      isMarketScope ? this.variantsSeenAtLocation(scopedLocation!.id) : Promise.resolve(null as Set<string> | null),
     ])
 
     interface Bucket {
@@ -963,6 +1054,11 @@ export class CatalogReadService {
     }
 
     for (const wv of allVariants) {
+      // Market scope: skip any SKU this location has never seen. That's
+      // what stops "Beanies · 0 units" showing up on an Atlanta market
+      // page when Atlanta has never received a Beanie.
+      if (seenVariantIds && !seenVariantIds.has(wv.id)) continue
+
       const onHand = onHandMap.get(wv.id) ?? 0
       const valueCents = onHand * (wv.unitCostCents ?? 0)
       const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
@@ -980,17 +1076,25 @@ export class CatalogReadService {
       creditAncestors(wv.itemGroup.categoryId, 1, onHand, valueCents, photo)
     }
 
-    /// Materialise a Category as a folder tile. subfolderCount is the
-    /// number of *direct* children (subfolders + itemGroups), which is
-    /// what the tile's 📁 badge shows.
+    /// Materialise a Category as a folder tile. `subfolderCount` counts
+    /// only *visible* direct children — at a market this drops the
+    /// sub-folders and item-groups that filtered out to zero seen SKUs
+    /// so the badge doesn't advertise phantom folders the user can't
+    /// drill into.
     const toFolderRow = (cat: typeof allCategories[number]): CatalogFolderRow => {
       const b = categoryTotals.get(cat.id) ?? emptyBucket()
-      const subCategoryCount = (childrenOf.get(cat.id) ?? []).length
-      const itemGroupChildCount = allItemGroups.filter((ig) => ig.categoryId === cat.id).length
+      const subCategoryChildren = childrenOf.get(cat.id) ?? []
+      const itemGroupChildren = allItemGroups.filter((ig) => ig.categoryId === cat.id)
+      const visibleSubCategories = isMarketScope
+        ? subCategoryChildren.filter((c) => (categoryTotals.get(c.id)?.itemCount ?? 0) > 0)
+        : subCategoryChildren
+      const visibleItemGroups = isMarketScope
+        ? itemGroupChildren.filter((ig) => (itemGroupTotals.get(ig.id)?.itemCount ?? 0) > 0)
+        : itemGroupChildren
       return {
         id: cat.id,
         name: cat.name,
-        subfolderCount: subCategoryCount + itemGroupChildCount,
+        subfolderCount: visibleSubCategories.length + visibleItemGroups.length,
         itemCount: b.itemCount,
         totalQty: b.totalQty,
         totalValueCents: b.totalValueCents,
@@ -1013,6 +1117,11 @@ export class CatalogReadService {
         previewPhotoUrl: b.previewPhotoUrl,
       }
     }
+
+    /// At a market, hide folders/item-groups that this location has
+    /// never received. Warehouses see the whole tree either way.
+    const keepAtScope = <T extends { itemCount: number }>(rows: T[]): T[] =>
+      isMarketScope ? rows.filter((r) => r.itemCount > 0) : rows
 
     // 4. Pick the level to render.
     //
@@ -1043,8 +1152,11 @@ export class CatalogReadService {
         ? { id: effectiveFolder.id, name: effectiveFolder.name, parentId: effectiveFolder.parentId }
         : null,
       breadcrumb,
-      subfolders: subCategoryChildren.map(toFolderRow),
-      itemGroups: itemGroupChildren.map(toItemGroupRow),
+      subfolders: keepAtScope(subCategoryChildren.map(toFolderRow)),
+      itemGroups: keepAtScope(itemGroupChildren.map(toItemGroupRow)),
+      location: scopedLocation
+        ? { id: scopedLocation.id, name: scopedLocation.name, kind: scopedLocation.kind }
+        : null,
     }
   }
 }

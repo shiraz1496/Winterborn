@@ -55,6 +55,12 @@ const ICONS = {
       <rect x="13" y="13" width="8" height="8" rx="1.5" />
     </svg>
   ),
+  scan: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M4 16v2a2 2 0 0 0 2 2h2M16 20h2a2 2 0 0 0 2-2v-2" />
+      <path d="M8 12h8" />
+    </svg>
+  ),
 }
 
 interface Tab {
@@ -72,7 +78,8 @@ const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
-  { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: WAREHOUSE_ROLES },
+  { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
+  { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER'] },
   { href: '/notifications', label: 'Alerts', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   { href: '/admin/colours', label: 'Colours', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
 ]
