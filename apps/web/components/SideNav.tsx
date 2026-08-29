@@ -98,11 +98,13 @@ const TABS: Tab[] = [
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
   { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER'] },
-  { href: '/notifications', label: 'Notifications', icon: 'bell', roles: REQUEST_VIEW_ROLES },
+  // Temporarily hidden from the nav — the underlying routes still work
+  // if visited directly, so this is nav-only. Uncomment to restore.
+  // { href: '/notifications', label: 'Notifications', icon: 'bell', roles: REQUEST_VIEW_ROLES },
   // { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
-  { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
-  { href: '/admin/square-sync', label: 'Square sync', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
-  { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  // { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  // { href: '/admin/square-sync', label: 'Square sync', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  // { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
 ]
 
