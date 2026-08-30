@@ -82,9 +82,23 @@ import {
   type UpdateRequestLineInput,
 } from '@winterborn/shared'
 
-/// Every path below is relative to this. Override with
-/// NEXT_PUBLIC_API_URL for anything other than local dev.
-export const API_ORIGIN = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'
+/// Every path below is relative to this. NEXT_PUBLIC_API_URL, when set,
+/// wins outright (needed for real deployments, where the API lives on its
+/// own domain). Otherwise this is derived from whatever host is actually
+/// viewing the page, not hardcoded to "localhost" -- the session cookie is
+/// SameSite=Lax, which a cross-site fetch cannot set even with CORS
+/// configured correctly. Pin the API to one fixed host (e.g. a LAN IP,
+/// for phone/tablet testing) and it silently breaks login for anyone
+/// viewing the app from a different host (e.g. plain "localhost"), since
+/// the browser drops the Set-Cookie response instead of erroring loudly.
+/// Matching hosts (only the port differs) keeps every viewer same-site.
+function resolveApiOrigin(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL
+  if (typeof window !== 'undefined') return `http://${window.location.hostname}:3001`
+  return 'http://localhost:3001'
+}
+
+export const API_ORIGIN = resolveApiOrigin()
 
 /**
  * Thrown for any non-2xx response. Carries the HTTP status so callers can

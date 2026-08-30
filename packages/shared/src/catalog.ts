@@ -550,6 +550,10 @@ export const createProductInputSchema = z.object({
   quantities: z.record(z.string(), z.number().int().min(0)),
   /// Required. Applies to every created SKU.
   unitCostCents: z.number().int().min(0),
+  /// Photos per matrix cell, keyed identically to `quantities`. Already
+  /// uploaded (to Cloudinary) by the time this arrives -- these are
+  /// URLs, not file bytes. A cell absent here just gets photoUrls: [].
+  photoUrls: z.record(z.string(), z.array(z.string().url())).default({}),
 })
 export type CreateProductInput = z.input<typeof createProductInputSchema>
 
@@ -569,6 +573,18 @@ export const createProductResultSchema = z.object({
   skus: z.array(createdProductSkuSchema),
 })
 export type CreateProductResult = z.infer<typeof createProductResultSchema>
+
+/// POST .../upload-signature response. Server-generated, not user input --
+/// no parse-time validation needed on either side. `signature` authorizes
+/// exactly this `timestamp` + `folder` pair with Cloudinary; nothing else
+/// is signable from the client.
+export interface UploadSignatureResult {
+  timestamp: number
+  signature: string
+  apiKey: string
+  cloudName: string
+  folder: string
+}
 
 /// PATCH /catalog/item-groups/:id/square-id +
 /// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;

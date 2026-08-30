@@ -20,6 +20,32 @@ import {
 } from '../../lib/api'
 import { useToast } from '../../lib/toast'
 
+/// Duplicated from lib/photo-upload.ts rather than imported statically --
+/// that module pulls in browser-image-compression, and a static import
+/// would ship it in every intake-page bundle regardless of viewport. The
+/// real functions are dynamically imported only where photo capture is
+/// actually reachable (mobile/tablet), so desktop never fetches that chunk.
+const MAX_PHOTOS_PER_SKU = 8
+
+/// Camera/upload photo capture only makes sense on the device staff
+/// actually does intake on -- a phone or tablet in the warehouse, not a
+/// desktop browser. Re-checks on resize/orientation change so rotating a
+/// tablet doesn't lose the affordance mid-form.
+function useIsMobileOrTablet(breakpoint = 1024): boolean {
+  const [isSmall, setIsSmall] = useState(false)
+  useEffect(() => {
+    const check = () => setIsSmall(window.innerWidth < breakpoint)
+    check()
+    window.addEventListener('resize', check)
+    window.addEventListener('orientationchange', check)
+    return () => {
+      window.removeEventListener('resize', check)
+      window.removeEventListener('orientationchange', check)
+    }
+  }, [breakpoint])
+  return isSmall
+}
+
 /// Doc 3 §3.1. Receive inventory: pick a warehouse SKU, enter quantity,
 /// confirm. Mirrors the New Request page's UX so warehouse staff never
 /// have to relearn a second pattern -- search a family, expand it, enter
@@ -237,9 +263,9 @@ function IntakeBody() {
     setVariants(freshVariants)
     toast.success(
       `Created ${summary.itemGroupName} — ${summary.skusCreated} SKU${summary.skusCreated === 1 ? '' : 's'}` +
-        (summary.totalUnitsRecorded > 0
-          ? `, ${summary.totalUnitsRecorded} unit${summary.totalUnitsRecorded === 1 ? '' : 's'} recorded`
-          : ''),
+      (summary.totalUnitsRecorded > 0
+        ? `, ${summary.totalUnitsRecorded} unit${summary.totalUnitsRecorded === 1 ? '' : 's'} recorded`
+        : ''),
     )
   }
 
@@ -514,8 +540,43 @@ function NewProductModal({
   const [unitCostDollars, setUnitCostDollars] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [photosByCell, setPhotosByCell] = useState<Record<string, File[]>>({})
+  const [photoErrors, setPhotoErrors] = useState<Record<string, string>>({})
+  const canAttachPhotos = useIsMobileOrTablet()
 
   const leafCategoryId = chain[chain.length - 1] ?? null
+
+  async function addPhotos(primary: string | null, colour: string | null, fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return
+    // Snapshot into a plain array before any `await` -- FileList is a live
+    // reference tied to the <input>, and the caller clears the input's
+    // value right after invoking this (so the same element can pick the
+    // same file again later). Reading `fileList` after an await point would
+    // silently see an already-emptied list.
+    const files = Array.from(fileList)
+    const key = matrixKey(primary, colour)
+    setPhotoErrors((prev) => ({ ...prev, [key]: '' }))
+    const room = Math.max(0, MAX_PHOTOS_PER_SKU - (photosByCell[key]?.length ?? 0))
+    const dropped = files.length > room
+    if (dropped) {
+      setPhotoErrors((prev) => ({ ...prev, [key]: `Only ${MAX_PHOTOS_PER_SKU} photos per variant -- some were not added.` }))
+    }
+    const { prepareProductPhoto } = await import('../../lib/photo-upload')
+    for (const file of files.slice(0, room)) {
+      try {
+        const prepared = await prepareProductPhoto(file)
+        setPhotosByCell((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), prepared] }))
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Could not use that photo.'
+        setPhotoErrors((prev) => ({ ...prev, [key]: msg }))
+      }
+    }
+  }
+
+  function removePhoto(primary: string | null, colour: string | null, index: number) {
+    const key = matrixKey(primary, colour)
+    setPhotosByCell((prev) => ({ ...prev, [key]: (prev[key] ?? []).filter((_, i) => i !== index) }))
+  }
 
   function commitPrimaryValue() {
     const v = primaryPending.trim()
@@ -630,6 +691,12 @@ function NewProductModal({
         }
       }
 
+      const cellsBeingCreated = Object.fromEntries(
+        Object.entries(photosByCell).filter(([key]) => key in quantitiesPayload),
+      )
+      const hasPhotos = Object.values(cellsBeingCreated).some((files) => files.length > 0)
+      const photoUrls = hasPhotos ? await (await import('../../lib/photo-upload')).uploadProductPhotos(cellsBeingCreated) : {}
+
       const res = await createProduct({
         categoryId: leafCategoryId,
         itemGroupName: itemGroupName.trim(),
@@ -639,6 +706,7 @@ function NewProductModal({
         colors,
         quantities: quantitiesPayload,
         unitCostCents,
+        photoUrls,
       })
       onCreated({
         skusCreated: res.skusCreated,
@@ -879,6 +947,65 @@ function NewProductModal({
           </p>
         </div>
 
+        {nonZeroCount > 0 && (
+          <div className="field">
+            <label>Photos</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {rows.flatMap((r) =>
+                cols
+                  .filter((c) => {
+                    const q = Number.parseInt(quantities[matrixKey(r, c)] ?? '0', 10)
+                    return Number.isFinite(q) && q > 0
+                  })
+                  .map((c) => {
+                    const key = matrixKey(r, c)
+                    const label = [r, c].filter(Boolean).join(' · ') || itemGroupName.trim() || 'Product'
+                    const files = photosByCell[key] ?? []
+                    return (
+                      <div key={key} style={{ border: '1px solid var(--line)', borderRadius: 'var(--radius-md)', padding: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                          <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>{label}</span>
+                          <div style={{ flex: 1 }} />
+                          <label
+                            className="btn btn-ghost"
+                            style={{ minHeight: 30, padding: '0 10px', fontSize: '0.78rem', cursor: files.length >= MAX_PHOTOS_PER_SKU ? 'not-allowed' : 'pointer' }}
+                          >
+                            + Add photo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              multiple
+                              disabled={files.length >= MAX_PHOTOS_PER_SKU}
+                              onChange={(e) => {
+                                void addPhotos(r, c, e.target.files)
+                                e.target.value = ''
+                              }}
+                              style={{ display: 'none' }}
+                            />
+                          </label>
+                        </div>
+                        {files.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                            {files.map((file, i) => (
+                              <PhotoThumb key={i} file={file} onRemove={() => removePhoto(r, c, i)} />
+                            ))}
+                          </div>
+                        )}
+                        {photoErrors[key] && (
+                          <p style={{ margin: '6px 0 0', color: 'var(--danger, #c0392b)', fontSize: '0.75rem' }}>{photoErrors[key]}</p>
+                        )}
+                      </div>
+                    )
+                  }),
+              )}
+            </div>
+            <p style={{ margin: '6px 0 0', color: 'var(--text-dim)', fontSize: '0.75rem' }}>
+              Up to {MAX_PHOTOS_PER_SKU} photos per variant. Uploaded when you submit the product below.
+            </p>
+          </div>
+        )}
+
         <div className="field">
           <label htmlFor="np-cost">Unit cost (USD)</label>
           <input
@@ -909,6 +1036,44 @@ function NewProductModal({
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+/// Local object URL per File, revoked on unmount/replacement so a long
+/// intake session doesn't accumulate blob: URLs.
+function PhotoThumb({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const url = useMemo(() => URL.createObjectURL(file), [file])
+  useEffect(() => () => URL.revokeObjectURL(url), [url])
+  return (
+    <div style={{ position: 'relative', width: 64, height: 64 }}>
+      {/* eslint-disable-next-line @next/next/no-img-element -- local blob: preview, not an optimizable remote asset */}
+      <img
+        src={url}
+        alt=""
+        style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 'var(--radius-sm)', border: '1px solid var(--line)' }}
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="Remove photo"
+        style={{
+          position: 'absolute',
+          top: -6,
+          right: -6,
+          width: 20,
+          height: 20,
+          borderRadius: '50%',
+          border: '1px solid var(--line)',
+          background: 'var(--surface)',
+          fontSize: '0.7rem',
+          lineHeight: '18px',
+          padding: 0,
+          cursor: 'pointer',
+        }}
+      >
+        ×
+      </button>
     </div>
   )
 }

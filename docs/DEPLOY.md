@@ -78,6 +78,10 @@ value comes from, and who can produce it.
 | `SQUARE_WEBHOOK_SIGNATURE_KEY` | Verifies every inbound webhook (`webhook.controller.ts`, constant-time HMAC compare) | Square Developer Console, created against this service's real URL | **YES -- see §4** |
 | `SQUARE_WEBHOOK_NOTIFICATION_URL` | Must byte-for-byte match the URL registered with Square -- the signature is HMAC'd over `notificationUrl + body` | `https://<render-service>.onrender.com/square/webhook` | No, but easy to get wrong -- trailing slash or `http` vs `https` silently fails every webhook until the 20-minute poll self-heals it |
 | `INBOX_DRAIN_INTERVAL_MS` | Poll interval for `cli:drain-inbox` | Literal, defaults to 10000 if unset | No |
+| `CLOUDINARY_CLOUD_NAME` | Product photo storage (mobile/tablet upload in intake modal) | Cloudinary dashboard -> Settings -> API Keys | No |
+| `CLOUDINARY_API_KEY` | Product photo storage | Cloudinary dashboard | No |
+| `CLOUDINARY_API_SECRET` | Signs short-lived upload authorizations server-side (`cloudinary-signature.service.ts`); never sent to the browser | Cloudinary dashboard | **YES** |
+| `CLOUDINARY_UPLOAD_FOLDER` | Media library folder prefix for uploaded photos | Literal, defaults to `winterborn/products` if unset | No |
 
 Auth is password-based (`auth.service.ts`, Argon2id via `@node-rs/argon2`)
 -- no mail transport, no sending domain, no `MAIL_TRANSPORT`/`RESEND_API_KEY`
