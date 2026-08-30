@@ -10,6 +10,7 @@ import { CatalogController } from './catalog.controller.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
+import { CloudinarySignatureService } from './cloudinary-signature.service.js'
 import { upsertSortlyFolderChain, type FolderCache } from './folder-tree.js'
 
 const UNIQUE_VIOLATION = 'P2002'
@@ -421,7 +422,14 @@ export class SortlyImportService {
 @Module({
   imports: [PrismaModule, AuthModule, LedgerModule],
   controllers: [CatalogController],
-  providers: [SortlyImportService, CatalogReadService, SquareCatalogSyncService, StockCorrectionService, ProductCreationService],
+  providers: [
+    SortlyImportService,
+    CatalogReadService,
+    SquareCatalogSyncService,
+    StockCorrectionService,
+    ProductCreationService,
+    CloudinarySignatureService,
+  ],
   exports: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
 })
 export class CatalogModule {}

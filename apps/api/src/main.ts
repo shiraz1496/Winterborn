@@ -25,7 +25,14 @@ async function bootstrap(): Promise<void> {
   // body will not match, so this must be set before the app ever
   // receives a webhook. See square/webhook.controller.ts.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true })
-  app.enableCors({ origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000', credentials: true })
+  // Comma-separated so local dev can serve both localhost (desktop) and a
+  // LAN IP (phone/tablet on the same Wi-Fi) at once without editing env
+  // vars every time someone switches devices.
+  const webOrigins = (process.env.WEB_ORIGIN ?? 'http://localhost:3000')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+  app.enableCors({ origin: webOrigins, credentials: true })
   // Archived warehouse photos, so /admin/colours can show one beside its
   // family picker without proxying every image through a Nest handler.
   // Prefix matches ColourVariant.photoUrl verbatim ("data/photos/<sid>.jpg",

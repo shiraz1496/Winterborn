@@ -142,6 +142,7 @@ export class ProductCreationService {
         colourVariantName: string
         sizeOptionName: string
         warehouseSku: string
+        photoUrl: string | null
       }> = []
 
       for (const cell of nonZeroCells) {
@@ -162,6 +163,9 @@ export class ProductCreationService {
         const colourVariantName =
           cell.colour && style ? `${cell.colour} (${style})` : (cell.colour ?? style ?? NO_COLOUR_LABEL)
 
+        const matrixKey = `${cell.primary ?? NONE}::${cell.colour ?? NONE}`
+        const photoUrls = input.photoUrls[matrixKey] ?? []
+
         let sizeOptionId = sizeOptionCache.get(sizeName)
         if (!sizeOptionId) {
           const so = await tx.sizeOption.upsert({
@@ -175,6 +179,15 @@ export class ProductCreationService {
 
         let colourVariantId = colourVariantCache.get(colourVariantName)
         if (!colourVariantId) {
+          // ColourVariant is shared across every ItemGroup that uses a
+          // colour with the same name in the same category — the
+          // upsert key is (colourFamilyId, name). Photos MUST NOT be
+          // written to this shared row: a photo saved here for one
+          // product would bleed into every other product that reuses
+          // "Red" in the same category (via catalog-read's fallback
+          // `wv.photoUrls[0] ?? wv.colourVariant.photoUrl`). Photos
+          // live on WarehouseVariant.photoUrls, which is per-SKU and
+          // stays scoped to the product that uploaded them.
           const cv = await tx.colourVariant.upsert({
             where: { colourFamilyId_name: { colourFamilyId: colourFamily.id, name: colourVariantName } },
             create: {
@@ -221,7 +234,7 @@ export class ProductCreationService {
               variationId,
               warehouseSku,
               unitCostCents: input.unitCostCents,
-              photoUrls: [],
+              photoUrls,
             },
           })
         } catch (err) {
@@ -258,6 +271,7 @@ export class ProductCreationService {
           colourVariantName,
           sizeOptionName: sizeName,
           warehouseSku: wv.warehouseSku,
+          photoUrl: wv.photoUrls[0] ?? null,
         })
       }
 
@@ -300,7 +314,7 @@ export class ProductCreationService {
         colourVariantName: created.colourVariantName,
         sizeOptionName: created.sizeOptionName,
         warehouseSku: created.warehouseSku,
-        photoUrl: null,
+        photoUrl: created.photoUrl,
       }
       skus.push({
         warehouseVariant: summary,
