@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common'
 import { receiveBoxInputSchema, type ReceiveBoxInput } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
@@ -58,6 +58,14 @@ export class BoxesController {
   @Post(':id/dispatch')
   dispatch(@Param('id') id: string, @CurrentUser() user: CurrentUserPayload) {
     return this.boxes.dispatch(id, user)
+  }
+
+  /// Delete a PACKING box (re-pack flow). Owner + warehouse-side only
+  /// (the class-level @Roles guard already scopes to those). DISPATCHED
+  /// or later state → 400 from the service.
+  @Delete(':id')
+  discard(@Param('id') id: string) {
+    return this.boxes.discard(id)
   }
 
   @Get(':id/label')

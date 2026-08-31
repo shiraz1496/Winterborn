@@ -2,13 +2,14 @@
 
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
-import type { CatalogBrowseResponse, LocationDto } from '@winterborn/shared'
+import type { CatalogBrowseResponse, CatalogSearchHit, LocationDto } from '@winterborn/shared'
+import { CopyButton } from '../../../../../components/CopyButton'
 import { LocationPicker } from '../../../../../components/LocationPicker'
 import { PageHeader } from '../../../../../components/PageHeader'
 import { RequireAuth } from '../../../../../components/RequireAuth'
 import { useAuth } from '../../../../../lib/auth-context'
-import { ApiError, browseFolder, listLocations } from '../../../../../lib/api'
-import { Breadcrumbs, CatalogStats, TileGrid, catalogSearchClass, formatMoney, withLoc } from '../../_shared'
+import { ApiError, browseFolder, listLocations, searchCatalog } from '../../../../../lib/api'
+import { Breadcrumbs, CatalogStats, SearchResults, TileGrid, catalogSearchClass, formatMoney, withLoc } from '../../_shared'
 
 function FolderView() {
   const params = useParams<{ folderId: string }>()
@@ -25,6 +26,8 @@ function FolderView() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [searchHits, setSearchHits] = useState<CatalogSearchHit[] | null>(null)
+  const [searching, setSearching] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -41,15 +44,29 @@ function FolderView() {
       .finally(() => setLoading(false))
   }, [folderId, requestedLoc])
 
-  const filtered = useMemo(() => {
-    if (!data) return { subfolders: [], itemGroups: [] }
-    const q = query.trim().toLowerCase()
-    if (q.length === 0) return { subfolders: data.subfolders, itemGroups: data.itemGroups }
-    return {
-      subfolders: data.subfolders.filter((f) => f.name.toLowerCase().includes(q)),
-      itemGroups: data.itemGroups.filter((f) => f.name.toLowerCase().includes(q)),
+  /// Deep search from any folder level: same endpoint as the root page.
+  /// Debounced 700ms so we don't hammer the endpoint mid-typing. Search
+  /// is always tree-wide (not scoped to the current folder) so an operator
+  /// who's drilled into Apparel can still type "Beanie" and find it
+  /// wherever it lives, even outside Apparel.
+  useEffect(() => {
+    const q = query.trim()
+    if (q.length === 0) {
+      setSearchHits(null)
+      setSearching(false)
+      return
     }
-  }, [data, query])
+    setSearching(true)
+    const handle = setTimeout(() => {
+      searchCatalog(q, requestedLoc ?? undefined)
+        .then((res) => {
+          if (res.query === q) setSearchHits(res.hits)
+        })
+        .catch((err) => setError(err instanceof ApiError ? err.message : 'Search failed.'))
+        .finally(() => setSearching(false))
+    }, 700)
+    return () => clearTimeout(handle)
+  }, [query, requestedLoc])
 
   const totals = useMemo(() => {
     if (!data) return { folderCount: 0, itemCount: 0, totalQty: 0, totalValueCents: 0 }
@@ -97,6 +114,11 @@ function FolderView() {
         eyebrow="Folder"
         title={data?.folder?.name ?? 'Folder'}
         description="Sub-folders and item groups inside this folder. Aggregates roll up across the whole subtree at the selected location."
+        titleAdornment={
+          data?.folder?.name ? (
+            <CopyButton text={data.folder.name} label="Copy folder name" size="sm" />
+          ) : undefined
+        }
       />
 
       {error && <p className="error-banner">{error}</p>}
@@ -122,18 +144,22 @@ function FolderView() {
       <div style={{ marginTop: 18, marginBottom: 14 }}>
         <input
           type="search"
-          placeholder="Search folders…"
+          placeholder="Search folder, item, colour, size, or SKU"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className={catalogSearchClass}
         />
       </div>
 
-      <TileGrid
-        subfolders={filtered.subfolders}
-        itemGroups={filtered.itemGroups}
-        locationId={currentLocationId}
-      />
+      {searchHits !== null ? (
+        <SearchResults hits={searchHits} loading={searching} locationId={currentLocationId} />
+      ) : (
+        <TileGrid
+          subfolders={data?.subfolders ?? []}
+          itemGroups={data?.itemGroups ?? []}
+          locationId={currentLocationId}
+        />
+      )}
     </div>
   )
 }

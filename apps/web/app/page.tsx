@@ -15,11 +15,13 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { classifyStock } from '@winterborn/shared'
+import { InfoTooltip } from '../components/InfoTooltip'
 import { PageHeader } from '../components/PageHeader'
+import { ProductThumb, firstPhoto } from '../components/ProductThumb'
 import { RequireAuth } from '../components/RequireAuth'
+import { SearchableSelect } from '../components/SearchableSelect'
 import { StatusLegend } from '../components/StatusLegend'
 import { StockStatusChip } from '../components/StockStatusChip'
-import { Swatch } from '../components/Swatch'
 import { useAuth } from '../lib/auth-context'
 import {
   ApiError,
@@ -150,6 +152,25 @@ function DashboardBody() {
   }, [isMarketManager, locationId])
 
   const variationById = useMemo(() => new Map(variations.map((v) => [v.id, v])), [variations])
+
+  /// Combined variant catalog (warehouse + market MM views). Any row on
+  /// the dashboard that displays a family looks up its variants here so
+  /// the tile can pull the first non-null product photo. Empty when
+  /// neither catalog has loaded yet — ProductThumb falls back to Swatch.
+  const variantsByVariation = useMemo(() => {
+    const m = new Map<string, WarehouseVariantSummary[]>()
+    const seen = new Set<string>()
+    for (const wv of [...warehouseVariantCatalog, ...marketVariantCatalog]) {
+      if (seen.has(wv.id)) continue
+      seen.add(wv.id)
+      const list = m.get(wv.variationId) ?? []
+      list.push(wv)
+      m.set(wv.variationId, list)
+    }
+    return m
+  }, [warehouseVariantCatalog, marketVariantCatalog])
+  const photoForVariation = (variationId: string | undefined | null): string | null =>
+    variationId ? firstPhoto(variantsByVariation.get(variationId) ?? []) : null
   const markets = useMemo(() => locations.filter((l) => l.kind === 'MARKET'), [locations])
   const currentMarket = locations.find((l) => l.id === locationId)
 
@@ -169,15 +190,6 @@ function DashboardBody() {
         .filter((s) => s.meta)
         .sort((a, b) => (a.meta!.itemGroupName + a.meta!.colourFamilyName).localeCompare(b.meta!.itemGroupName + b.meta!.colourFamilyName)),
     [stock, variationById, minLevelById],
-  )
-
-  const lowRows = useMemo(
-    () =>
-      low
-        .map((l) => ({ ...l, meta: variationById.get(l.variationId), status: classifyStock(l.onHand, l.minLevel) }))
-        .filter((l) => l.meta)
-        .sort((a, b) => a.onHand - b.onHand),
-    [low, variationById],
   )
 
   // Doc 3 §3.2: dashboard leads with what is flagged. OOS first, then
@@ -203,8 +215,15 @@ function DashboardBody() {
   }, [stockRows])
 
   const openRequests = useMemo(
-    () => requests.filter((r) => r.state !== 'CLOSED').slice(0, 8),
-    [requests],
+    () =>
+      requests
+        .filter((r) => r.state !== 'CLOSED')
+        // Scope to the market the picker is on so the panel stays
+        // consistent with the rest of the dashboard (flagged / on-hand
+        // are already market-scoped).
+        .filter((r) => (locationId ? r.locationId === locationId : true))
+        .slice(0, 8),
+    [requests, locationId],
   )
 
   const locationById = useMemo(() => new Map(locations.map((l) => [l.id, l])), [locations])
@@ -278,16 +297,29 @@ function DashboardBody() {
     for (const [, list] of variantsByVariation) {
       list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
     }
+    /// Products that don't actually have colour/style axes (e.g. Bags,
+    /// Dryer Balls) live as a single WarehouseVariant whose colour name
+    /// is the em-dash placeholder ("—" from NO_COLOUR_LABEL in the
+    /// product creation service). Expanding a family to reveal one
+    /// "— · SKU" row adds nothing — hide the expander for those.
+    const hasMeaningfulSubVariants = (list: WarehouseVariantSummary[]) => {
+      if (list.length === 0) return false
+      if (list.length > 1) return true
+      return list[0]!.colourVariantName !== '—'
+    }
     return variations
-      .map((meta) => ({
-        variationId: meta.id,
-        meta,
-        onHand: onHandByVariation.get(meta.id) ?? 0,
-        variants: (variantsByVariation.get(meta.id) ?? []).map((wv) => ({
-          ...wv,
-          onHand: onHandByVariant.get(wv.id) ?? 0,
-        })),
-      }))
+      .map((meta) => {
+        const raw = variantsByVariation.get(meta.id) ?? []
+        const variants = hasMeaningfulSubVariants(raw)
+          ? raw.map((wv) => ({ ...wv, onHand: onHandByVariant.get(wv.id) ?? 0 }))
+          : []
+        return {
+          variationId: meta.id,
+          meta,
+          onHand: onHandByVariation.get(meta.id) ?? 0,
+          variants,
+        }
+      })
       // Highest stock first, then alphabetical for the long 0 tail.
       .sort((a, b) => {
         if (b.onHand !== a.onHand) return b.onHand - a.onHand
@@ -313,7 +345,7 @@ function DashboardBody() {
     const variantMetaById = new Map(marketVariantCatalog.map((wv) => [wv.id, wv]))
     const variantsByVariation = new Map<
       string,
-      Array<{ id: string; colourVariantName: string; warehouseSku: string; onHand: number }>
+      Array<{ id: string; colourVariantName: string; warehouseSku: string; photoUrl: string | null; onHand: number }>
     >()
     for (const s of marketVariantStock) {
       if (!s.warehouseVariantId) continue
@@ -324,6 +356,7 @@ function DashboardBody() {
         id: meta.id,
         colourVariantName: meta.colourVariantName,
         warehouseSku: meta.warehouseSku,
+        photoUrl: meta.photoUrl,
         onHand: s.onHand,
       })
       variantsByVariation.set(s.variationId, list)
@@ -335,11 +368,19 @@ function DashboardBody() {
       .map((s) => {
         const meta = variationById.get(s.variationId)
         if (!meta) return null
+        const raw = variantsByVariation.get(s.variationId) ?? []
+        // Same placeholder rule as the warehouse drawer — a single "—"
+        // variant is the product itself, not a sub-choice, so drop it
+        // to avoid a "1 variant" expander over a meaningless em-dash.
+        const variants =
+          raw.length > 1 || (raw.length === 1 && raw[0]!.colourVariantName !== '—')
+            ? raw
+            : []
         return {
           variationId: s.variationId,
           meta,
           onHand: s.onHand,
-          variants: variantsByVariation.get(s.variationId) ?? [],
+          variants,
         }
       })
       .filter((r): r is NonNullable<typeof r> => r !== null)
@@ -363,25 +404,15 @@ function DashboardBody() {
         }
         actions={
           !isMarketManager && markets.length > 1 ? (
-            <select
-              value={locationId ?? ''}
-              onChange={(e) => setLocationId(e.target.value)}
-              aria-label="Market"
-              style={{
-                background: 'var(--surface-sunken)',
-                color: 'var(--text)',
-                border: '1px solid var(--line-strong)',
-                borderRadius: 'var(--radius-md)',
-                padding: '10px 12px',
-                fontSize: '0.9rem',
-              }}
-            >
-              {markets.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
+            <div style={{ minWidth: 220 }}>
+              <SearchableSelect
+                value={locationId || null}
+                options={markets.map((m) => ({ id: m.id, label: m.name }))}
+                onChange={(id) => id && setLocationId(id)}
+                showId={false}
+                allowClear={false}
+              />
+            </div>
           ) : null
         }
       />
@@ -488,14 +519,16 @@ function DashboardBody() {
       <div className="dash-columns">
         <div>
           <div className="section-heading">
-            <h2>Flagged at this market</h2>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <h2>Flagged at this market</h2>
+              <InfoTooltip label="What is Flagged at this market?">
+                Everything below its restock threshold or empty. Worst first.
+              </InfoTooltip>
+            </div>
             <span className="eyebrow">
               {flaggedCounts.OUT_OF_STOCK} out · {flaggedCounts.CRITICAL} critical · {flaggedCounts.LOW} low
             </span>
           </div>
-          <p className="section-desc">
-            Everything below its restock threshold or empty. Worst first.
-          </p>
           {loading ? (
             <div className="screen-loading">
               <div className="spinner" aria-hidden="true" />
@@ -509,21 +542,23 @@ function DashboardBody() {
           ) : (
             <div className="stock-grid">
               {flaggedRows.map((row) => (
-                <StockTile key={row.variationId} row={row} />
+                <StockTile key={row.variationId} row={row} photoUrl={photoForVariation(row.meta?.id)} />
               ))}
             </div>
           )}
 
           <div className="section-heading">
-            <h2>On hand by family</h2>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <h2>On hand by family</h2>
+              <InfoTooltip label="What is On hand by family?">
+                Every colour family this market carries, sorted alphabetically. Number on the right is on-hand;
+                smaller number after it is the minimum-level threshold.
+              </InfoTooltip>
+            </div>
             <span className="eyebrow">
               {flaggedCounts.HEALTHY} healthy · {stockRows.length} total
             </span>
           </div>
-          <p className="section-desc">
-            Every colour family this market carries, sorted alphabetically. Number on the right is on-hand;
-            smaller number after it is the minimum-level threshold.
-          </p>
           {!loading && stockRows.length === 0 ? (
             <div className="card">
               <p style={{ margin: 0, color: 'var(--text-dim)' }}>No stock movement recorded here yet.</p>
@@ -531,7 +566,7 @@ function DashboardBody() {
           ) : (
             <div className="stock-grid">
               {stockRows.map((row) => (
-                <StockTile key={row.variationId} row={row} />
+                <StockTile key={row.variationId} row={row} photoUrl={photoForVariation(row.meta?.id)} />
               ))}
             </div>
           )}
@@ -541,12 +576,14 @@ function DashboardBody() {
           {canReviewQueue && (
             <>
               <div className="section-heading">
-                <h2>Decision queue</h2>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <h2>Decision queue</h2>
+                  <InfoTooltip label="What is the Decision queue?">
+                    Auto-drafted restock requests waiting on review. Tap one to adjust quantities and open it for packing.
+                  </InfoTooltip>
+                </div>
                 <span className="eyebrow">{queue.length}</span>
               </div>
-              <p className="section-desc">
-                Auto-drafted restock requests waiting on review. Tap one to adjust quantities and open it for packing.
-              </p>
               {queue.length === 0 ? (
                 <div className="card">
                   <p style={{ margin: 0, color: 'var(--text-dim)' }}>
@@ -574,12 +611,14 @@ function DashboardBody() {
           )}
 
           <div className="section-heading">
-            <h2>Sales this week</h2>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <h2>Sales this week</h2>
+              <InfoTooltip label="What is Sales this week?">
+                Top-selling colour families over the last seven days at this market, straight from Square.
+              </InfoTooltip>
+            </div>
             <span className="eyebrow">{salesTotal} units</span>
           </div>
-          <p className="section-desc">
-            Top-selling colour families over the last seven days at this market, straight from Square.
-          </p>
           {!loading && salesRows.length === 0 ? (
             <div className="card">
               <p style={{ margin: 0, color: 'var(--text-dim)' }}>No sales recorded here in the last 7 days.</p>
@@ -588,7 +627,11 @@ function DashboardBody() {
             <div className="stack">
               {salesRows.slice(0, 8).map((row) => (
                 <div key={row.variationId} className="stock-tile">
-                  <Swatch familyName={row.meta?.colourFamilyName} />
+                  <ProductThumb
+                    photoUrl={photoForVariation(row.meta?.id)}
+                    familyName={row.meta?.colourFamilyName ?? ''}
+                    alt={row.meta?.itemGroupName ?? ''}
+                  />
                   <div className="stock-tile-body">
                     <div className="stock-tile-title">{row.meta?.itemGroupName}</div>
                     <div className="stock-tile-meta">
@@ -602,12 +645,16 @@ function DashboardBody() {
           )}
 
           <div className="section-heading">
-            <h2>Open requests</h2>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <h2>Open requests</h2>
+              <InfoTooltip label="What is Open requests?">
+                Requests in flight — draft, open, packing or dispatched.
+              </InfoTooltip>
+            </div>
             <Link href="/requests" className="eyebrow">
               View all
             </Link>
           </div>
-          <p className="section-desc">Requests in flight — draft, open, packing or dispatched.</p>
           {openRequests.length === 0 ? (
             <div className="empty-state">
               <p className="empty-state-title">No open requests</p>
@@ -731,7 +778,11 @@ function DashboardBody() {
                           }}
                           aria-expanded={hasVariants ? open : undefined}
                         >
-                          <Swatch familyName={row.meta.colourFamilyName} />
+                          <ProductThumb
+                            photoUrl={photoForVariation(row.meta.id)}
+                            familyName={row.meta.colourFamilyName}
+                            alt={row.meta.itemGroupName}
+                          />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div className="list-row-title">{row.meta.itemGroupName}</div>
                             <div className="list-row-meta">
@@ -779,6 +830,11 @@ function DashboardBody() {
                                   padding: '4px 0',
                                 }}
                               >
+                                <ProductThumb
+                                  photoUrl={v.photoUrl}
+                                  familyName={v.colourVariantName}
+                                  alt={v.colourVariantName}
+                                />
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <div style={{ fontSize: '0.85rem' }}>{v.colourVariantName}</div>
                                   <div className="mono" style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
@@ -904,7 +960,11 @@ function DashboardBody() {
                           }}
                           aria-expanded={hasVariants ? open : undefined}
                         >
-                          <Swatch familyName={row.meta.colourFamilyName} />
+                          <ProductThumb
+                            photoUrl={photoForVariation(row.meta.id)}
+                            familyName={row.meta.colourFamilyName}
+                            alt={row.meta.itemGroupName}
+                          />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div className="list-row-title">{row.meta.itemGroupName}</div>
                             <div className="list-row-meta">
@@ -952,6 +1012,11 @@ function DashboardBody() {
                                   padding: '4px 0',
                                 }}
                               >
+                                <ProductThumb
+                                  photoUrl={v.photoUrl}
+                                  familyName={v.colourVariantName}
+                                  alt={v.colourVariantName}
+                                />
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <div style={{ fontSize: '0.85rem' }}>{v.colourVariantName}</div>
                                   <div className="mono" style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
@@ -991,6 +1056,7 @@ function DashboardBody() {
 /// each, so ~500 tiles remain scannable rather than an endless column.
 function StockTile({
   row,
+  photoUrl,
 }: {
   row: {
     variationId: string
@@ -999,10 +1065,15 @@ function StockTile({
     minLevel: number | null
     status: StockStatus
   }
+  photoUrl: string | null
 }) {
   return (
     <div className="stock-tile">
-      <Swatch familyName={row.meta?.colourFamilyName} />
+      <ProductThumb
+        photoUrl={photoUrl}
+        familyName={row.meta?.colourFamilyName ?? ''}
+        alt={row.meta?.itemGroupName ?? ''}
+      />
       <div className="stock-tile-body">
         <div className="stock-tile-title">{row.meta?.itemGroupName}</div>
         <div className="stock-tile-meta">

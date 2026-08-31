@@ -265,6 +265,20 @@ export class CatalogController {
     return this.catalog.browseFolder(folderId ?? null, user, locationId ?? null)
   }
 
+  /// Deep, tree-wide search over Category and ItemGroup names.
+  /// Location-scoped like /catalog/browse (MARKET filters out folders
+  /// this location has never received). Empty `q` returns zero hits; the
+  /// client falls back to the browse view.
+  @Get('catalog/search')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')
+  searchCatalog(
+    @CurrentUser() user: CurrentUserPayload,
+    @Query('q') q?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.catalog.searchCatalog(q ?? '', user, locationId ?? null)
+  }
+
   /// One item-group's leaf SKUs — same locationId semantics as browse.
   @Get('catalog/browse/item-groups/:itemGroupId/items')
   @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER')

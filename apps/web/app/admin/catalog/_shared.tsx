@@ -2,7 +2,8 @@
 
 import Link from 'next/link'
 import type { CSSProperties, ReactNode } from 'react'
-import type { CatalogFolderRow } from '@winterborn/shared'
+import type { CatalogFolderRow, CatalogSearchHit } from '@winterborn/shared'
+import { CopyButton } from '../../../components/CopyButton'
 import { Swatch } from '../../../components/Swatch'
 
 /// Utility-class fallback for the search input across catalog screens. Kept
@@ -62,11 +63,16 @@ export function FolderTile({ folder }: { folder: CatalogFolderRow }) {
       <FolderThumb photoUrl={folder.previewPhotoUrl} name={folder.name} />
       <div style={{ minWidth: 0 }}>
         <div
-          className="list-row-title"
-          style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-          title={folder.name}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}
         >
-          {folder.name}
+          <div
+            className="list-row-title"
+            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+            title={folder.name}
+          >
+            {folder.name}
+          </div>
+          <CopyButton text={folder.name} label="Copy name" size="sm" />
         </div>
         <div
           className="list-row-meta"
@@ -243,6 +249,210 @@ export function TileGrid({
           <FolderTile folder={ig} />
         </Link>
       ))}
+    </div>
+  )
+}
+
+/// Deep-search results view. Compact row layout: small thumbnail on the
+/// left, name + breadcrumb path in the middle, item count and value on
+/// the right. Optimised for scanning many hits without eating the whole
+/// viewport per row. Folder hits link to the folder itself; item-group
+/// hits link to the group page. Empty-state and loading states live here
+/// so both callers stay simple.
+export function SearchResults({
+  hits,
+  loading,
+  locationId,
+}: {
+  hits: CatalogSearchHit[]
+  loading: boolean
+  locationId: string | null
+}) {
+  if (loading && hits.length === 0) {
+    return (
+      <div className="empty-state">
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>Searching…</p>
+      </div>
+    )
+  }
+  if (hits.length === 0) {
+    return (
+      <div className="empty-state">
+        <p className="empty-state-title">No matches</p>
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+          Try a different folder or product name.
+        </p>
+      </div>
+    )
+  }
+
+  const folderHits = hits.filter((h) => h.kind === 'folder')
+  const itemGroupHits = hits.filter((h) => h.kind === 'item-group')
+  const itemHits = hits.filter((h) => h.kind === 'item')
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {itemHits.length > 0 && (
+        <SearchGroup title="Items" count={itemHits.length} hits={itemHits} locationId={locationId} />
+      )}
+      {itemGroupHits.length > 0 && (
+        <SearchGroup title="Products" count={itemGroupHits.length} hits={itemGroupHits} locationId={locationId} />
+      )}
+      {folderHits.length > 0 && (
+        <SearchGroup title="Folders" count={folderHits.length} hits={folderHits} locationId={locationId} />
+      )}
+    </div>
+  )
+}
+
+function SearchGroup({
+  title,
+  count,
+  hits,
+  locationId,
+}: {
+  title: string
+  count: number
+  hits: CatalogSearchHit[]
+  locationId: string | null
+}) {
+  return (
+    <section>
+      <header
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          padding: '4px 0 8px',
+          fontSize: '0.78rem',
+          color: 'var(--text-dim)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.06em',
+        }}
+      >
+        <span>{title}</span>
+        <span style={{ color: 'var(--text-faint)' }}>{count}</span>
+      </header>
+      <div
+        className="card"
+        style={{ display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}
+      >
+        {hits.map((hit, i) => (
+          <SearchRow key={`${hit.kind}:${hit.row.id}`} hit={hit} locationId={locationId} last={i === hits.length - 1} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function SearchRow({
+  hit,
+  locationId,
+  last,
+}: {
+  hit: CatalogSearchHit
+  locationId: string | null
+  last: boolean
+}) {
+  const href =
+    hit.kind === 'folder'
+      ? withLoc(`/admin/catalog/f/${encodeURIComponent(hit.row.id)}`, locationId)
+      : hit.kind === 'item'
+        ? withLoc(`/admin/catalog/i/${encodeURIComponent(hit.row.id)}`, locationId)
+        : withLoc(`/admin/catalog/g/${encodeURIComponent(hit.row.id)}`, locationId)
+  return (
+    <Link
+      href={href}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '10px 12px',
+        borderBottom: last ? 'none' : '1px solid var(--line)',
+        textDecoration: 'none',
+        color: 'inherit',
+      }}
+    >
+      <SearchThumb photoUrl={hit.row.previewPhotoUrl} name={hit.row.name} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            fontWeight: 600,
+            fontSize: '0.95rem',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={hit.row.name}
+        >
+          {hit.row.name}
+        </div>
+        {hit.path.length > 0 && (
+          <div
+            style={{
+              fontSize: '0.75rem',
+              color: 'var(--text-dim)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={hit.path.map((c) => c.name).join(' › ')}
+          >
+            in {hit.path.map((c) => c.name).join(' › ')}
+          </div>
+        )}
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          gap: 14,
+          alignItems: 'center',
+          fontSize: '0.78rem',
+          color: 'var(--text-dim)',
+          flexShrink: 0,
+        }}
+      >
+        {hit.kind === 'folder' && hit.row.subfolderCount > 0 && (
+          <IconStat glyph="folder" value={hit.row.subfolderCount} />
+        )}
+        <IconStat glyph="stack" value={hit.row.itemCount} />
+        <span style={{ minWidth: 72, textAlign: 'right' }}>
+          {formatMoney(hit.row.totalValueCents)}
+        </span>
+      </div>
+    </Link>
+  )
+}
+
+function SearchThumb({ photoUrl, name }: { photoUrl: string | null; name: string }) {
+  return (
+    <div
+      style={{
+        width: 48,
+        height: 48,
+        borderRadius: 'var(--radius-sm)',
+        background: 'var(--surface-sunken)',
+        overflow: 'hidden',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {photoUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={photoUrl}
+          alt={name}
+          loading="lazy"
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          onError={(e) => {
+            e.currentTarget.style.display = 'none'
+          }}
+        />
+      ) : (
+        <Swatch familyName={null} size="md" />
+      )}
     </div>
   )
 }

@@ -18,7 +18,7 @@ import { InfoTooltip } from '../../../components/InfoTooltip'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Scanner } from '../../../components/Scanner'
-import { Swatch } from '../../../components/Swatch'
+import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { useAuth } from '../../../lib/auth-context'
 import { printLabelElement } from '../../../lib/print-label'
 import { useToast } from '../../../lib/toast'
@@ -135,14 +135,29 @@ function RequestDetailBody() {
     () => new Map(warehouseVariants.map((wv) => [wv.id, wv])),
     [warehouseVariants],
   )
+  /// Grouped by variation so a family card can pull the first non-null
+  /// photo across its variants for the thumbnail (same pattern as pack /
+  /// shipment views).
+  const warehouseVariantsByVariation = useMemo(() => {
+    const m = new Map<string, WarehouseVariantSummary[]>()
+    for (const wv of warehouseVariants) {
+      const list = m.get(wv.variationId) ?? []
+      list.push(wv)
+      m.set(wv.variationId, list)
+    }
+    return m
+  }, [warehouseVariants])
   const analysisByLine = useMemo(() => new Map(analysis.map((a) => [a.lineId, a])), [analysis])
 
   /// Per-request-line: how many units the warehouse actually packed +
-  /// dispatched. Request lines are at the family (Variation) level; a
+  /// dispatched FOR THIS REQUEST. Multi-request boxes carry lines that
+  /// belong to sibling requests too; we filter by the line's own
+  /// requestId (falling back to Box.requestId for the single-request
+  /// path) so a shared box doesn't double-count.
+  ///
+  /// Request lines are at the family (Variation) level; a
   /// warehouse-variant-specific line matches only its own SKU, a
   /// family-level line matches every SKU under that variation.
-  /// Comparing this to line.qtyRequested surfaces "we asked for 3,
-  /// warehouse only sent 2 (the third wasn't available)".
   const shippedByLine = useMemo(() => {
     const wvVariationById = new Map(warehouseVariants.map((wv) => [wv.id, wv.variationId]))
     const out = new Map<string, number>()
@@ -151,6 +166,9 @@ function RequestDetailBody() {
       let shipped = 0
       for (const box of boxes) {
         for (const boxLine of box.lines) {
+          // Only credit lines that are actually owned by this request.
+          const lineRequestId = boxLine.requestId ?? box.requestId ?? null
+          if (lineRequestId !== request.id) continue
           if (line.warehouseVariantId) {
             if (boxLine.warehouseVariantId === line.warehouseVariantId) shipped += boxLine.quantity
           } else {
@@ -345,7 +363,11 @@ function RequestDetailBody() {
                       cursor: 'pointer',
                     }}
                   >
-                    <Swatch familyName={familyMeta?.colourFamilyName} />
+                    <ProductThumb
+                      photoUrl={firstPhoto(warehouseVariantsByVariation.get(variationId) ?? [])}
+                      familyName={familyMeta?.colourFamilyName ?? ''}
+                      alt={familyMeta?.itemGroupName ?? ''}
+                    />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="list-row-title">{familyMeta?.itemGroupName ?? variationId}</div>
                       <div className="list-row-meta">
@@ -369,7 +391,25 @@ function RequestDetailBody() {
         const alloc = a?.allocation
         return (
           <div key={line.id} className="list-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', border: '1px solid var(--line)' }}>
-              <Swatch familyName={line.warehouseVariantId ? warehouseVariantById.get(line.warehouseVariantId)?.colourVariantName : meta?.colourFamilyName} />
+              {(() => {
+                const wv = line.warehouseVariantId
+                  ? warehouseVariantById.get(line.warehouseVariantId)
+                  : undefined
+                // Variant-level line: use that specific SKU's photo.
+                // Family-level line: fall back to the first photo across
+                // the family's variants so the row isn't blank.
+                const photoUrl = wv
+                  ? wv.photoUrl
+                  : firstPhoto(warehouseVariantsByVariation.get(line.variationId) ?? [])
+                const familyName = wv?.colourVariantName ?? meta?.colourFamilyName ?? ''
+                return (
+                  <ProductThumb
+                    photoUrl={photoUrl}
+                    familyName={familyName}
+                    alt={wv?.colourVariantName ?? meta?.itemGroupName ?? ''}
+                  />
+                )
+              })()}
               <div className="list-row-body">
                 <div className="list-row-title">
                   {line.warehouseVariantId && warehouseVariantById.get(line.warehouseVariantId)
@@ -545,8 +585,22 @@ function RequestDetailBody() {
                   .map((c) => `${c.colourVariantName} ×${c.quantity}`)
                   .join(', ')} + ${res.box.contents.length - 2} more)`
 
+          const multi = res.requests.length > 1
+          const closed = res.requests.filter((r) => r.closed).map((r) => `#${r.id.slice(0, 6)}`)
+          const advanced = res.requests
+            .filter((r) => !r.closed)
+            .map((r) => `#${r.id.slice(0, 6)} (${r.boxesReceived}/${r.boxesTotal})`)
+          const summary = [
+            closed.length > 0 ? `closed ${closed.join(', ')}` : null,
+            advanced.length > 0 ? `advanced ${advanced.join(', ')}` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')
+
           if (res.box.alreadyReceived) {
             toast.info(`Box ${boxLabel} was already received.`)
+          } else if (multi) {
+            toast.success(`Box ${boxLabel} received${contentsSummary} — ${summary}`)
           } else if (res.request?.closed) {
             toast.success(`Box ${boxLabel} received${contentsSummary} — request closed.`)
           } else if (res.request) {
@@ -570,20 +624,83 @@ function RequestDetailBody() {
         if (!user || boxes.length === 0) return null
         const warehouseRoles: AppRole[] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
         if (!warehouseRoles.includes(user.role as AppRole)) return null
+
+        /// Shared boxes live in the shipment view — one QR covers the
+        /// whole group, so surfacing it under a single request would
+        /// duplicate it across each grouped request's detail page. Only
+        /// show boxes that are exclusively this request's. Anything
+        /// shared is redirected via a shipment link at the top of the
+        /// list.
+        const isSharedBox = (box: (typeof boxes)[number]) => {
+          const ids = new Set<string>()
+          if (box.requestId) ids.add(box.requestId)
+          for (const line of box.lines) if (line.requestId) ids.add(line.requestId)
+          if (ids.size === 0) return false
+          for (const id of ids) if (id !== request.id) return true
+          return false
+        }
+        const soloBoxes = boxes.filter((b) => !isSharedBox(b))
+        const sharedBoxes = boxes.filter(isSharedBox)
+
+        // Build the shipment link from every distinct request touched
+        // by any of the shared boxes so one link covers them all.
+        const groupedIds = new Set<string>([request.id])
+        for (const box of sharedBoxes) {
+          if (box.requestId) groupedIds.add(box.requestId)
+          for (const line of box.lines) if (line.requestId) groupedIds.add(line.requestId)
+        }
+        const shipmentHref = `/requests/shipment?ids=${[...groupedIds]
+          .map((id) => encodeURIComponent(id))
+          .join(',')}`
+
+        if (soloBoxes.length === 0 && sharedBoxes.length === 0) return null
+
         return (
           <div className="section" style={{ marginTop: 24 }}>
             <div className="section-heading">
               <h2>Boxes</h2>
               <span className="eyebrow">
-                {boxes.length} box{boxes.length === 1 ? '' : 'es'}
+                {soloBoxes.length} box{soloBoxes.length === 1 ? '' : 'es'}
+                {sharedBoxes.length > 0
+                  ? ` · ${sharedBoxes.length} in shared shipment`
+                  : ''}
               </span>
             </div>
-            <p className="section-desc" style={{ marginTop: 0 }}>
-              Every packed box for this request. Show the QR label to print, reprint, or hand to the market
-              manager to scan on arrival.
-            </p>
+            {sharedBoxes.length > 0 && (
+              <div
+                className="card"
+                style={{ padding: 12, marginBottom: 12, borderColor: 'var(--pine)' }}
+              >
+                <div className="row-between" style={{ gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <strong>
+                      {sharedBoxes.length} box{sharedBoxes.length === 1 ? '' : 'es'} shared with{' '}
+                      {groupedIds.size - 1} other request
+                      {groupedIds.size - 1 === 1 ? '' : 's'}
+                    </strong>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: 2 }}>
+                      QR labels for shared boxes live on the shipment view so one label
+                      isn't printed from three places.
+                    </div>
+                  </div>
+                  <Link href={shipmentHref} className="btn">
+                    → Open shipment
+                  </Link>
+                </div>
+              </div>
+            )}
+            {soloBoxes.length === 0 ? (
+              <p className="section-desc" style={{ marginTop: 0 }}>
+                No boxes exclusive to this request — every box is shared with the shipment above.
+              </p>
+            ) : (
+              <p className="section-desc" style={{ marginTop: 0 }}>
+                Every packed box for this request. Show the QR label to print, reprint, or hand to
+                the market manager to scan on arrival.
+              </p>
+            )}
             <div className="stack" style={{ gap: 10 }}>
-              {boxes.map((box) => {
+              {soloBoxes.map((box) => {
                 const isOpen = openLabelBoxIds.has(box.id)
                 const label = labels[box.id]
                 return (
@@ -597,6 +714,27 @@ function RequestDetailBody() {
                         <div className="list-row-meta">
                           {box.lines.length} line{box.lines.length === 1 ? '' : 's'} · {box.state.toLowerCase()}
                           {box.arrivedAt ? ` · arrived ${new Date(box.arrivedAt).toLocaleDateString()}` : ''}
+                          {(() => {
+                            // Other requests this box also fulfils — surfaced
+                            // so a shared physical box reads as such instead
+                            // of looking like a duplicate.
+                            const otherIds = new Set<string>()
+                            for (const l of box.lines) {
+                              if (l.requestId && l.requestId !== params.id) otherIds.add(l.requestId)
+                            }
+                            if (box.requestId && box.requestId !== params.id) otherIds.add(box.requestId)
+                            if (otherIds.size === 0) return null
+                            return (
+                              <>
+                                {' · also '}
+                                {[...otherIds].map((id) => (
+                                  <span key={id} style={{ color: 'var(--text-dim)' }}>
+                                    #{id.slice(0, 6)}
+                                  </span>
+                                ))}
+                              </>
+                            )
+                          })()}
                         </div>
                       </div>
                       <button
@@ -648,6 +786,37 @@ function RequestDetailBody() {
           inTransit && user.role === 'MARKET_MANAGER' && user.locationId === request.locationId
 
         if (canReceive) {
+          // Grouped-shipment guard: if any of this request's boxes also
+          // carries lines for a sibling request, receiving happens at the
+          // shipment level (one scan closes every grouped request). Hide
+          // the per-request scan/not-received controls and point the MM at
+          // the shipment view instead — otherwise the same physical box
+          // would show two "Scan to receive" buttons in two places.
+          const groupedRequestIds = new Set<string>()
+          groupedRequestIds.add(request.id)
+          for (const box of boxes) {
+            if (box.requestId && box.requestId !== request.id) groupedRequestIds.add(box.requestId)
+            for (const line of box.lines) {
+              if (line.requestId && line.requestId !== request.id) groupedRequestIds.add(line.requestId)
+            }
+          }
+          if (groupedRequestIds.size > 1) {
+            const shipmentHref = `/requests/shipment?ids=${[...groupedRequestIds]
+              .map((id) => encodeURIComponent(id))
+              .join(',')}`
+            return (
+              <div className="stack">
+                <p className="eyebrow" style={{ margin: 0, color: 'var(--text-dim)' }}>
+                  Part of a shared shipment with {groupedRequestIds.size - 1} other request
+                  {groupedRequestIds.size - 1 === 1 ? '' : 's'} — receive them together.
+                </p>
+                <Link href={shipmentHref} className="btn btn-primary">
+                  → Open shipment to receive
+                </Link>
+              </div>
+            )
+          }
+
           const boxesReceived = boxes.filter((b) => b.state === 'ARRIVED').length
           const boxesTotal = boxes.length
           return (

@@ -7,6 +7,8 @@ import type {
   CatalogItemDetail,
   CatalogItemGroupPage,
   CatalogItemRow,
+  CatalogSearchHit,
+  CatalogSearchResponse,
   CategoryDto,
   ColourFamilyDto,
   CreateWarehouseVariantInput,
@@ -60,14 +62,33 @@ export class CatalogReadService {
   }
 
   async listVariations(): Promise<VariationSummary[]> {
-    const rows = await this.prisma.variation.findMany({
-      include: { itemGroup: { include: { category: true } }, colourFamily: true, sizeOption: true },
-      orderBy: [{ itemGroup: { name: 'asc' } }],
-    })
+    const [rows, allCategories] = await Promise.all([
+      this.prisma.variation.findMany({
+        include: { itemGroup: { include: { category: true } }, colourFamily: true, sizeOption: true },
+        orderBy: [{ itemGroup: { name: 'asc' } }],
+      }),
+      this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
+    ])
+    const catById = new Map(allCategories.map((c) => [c.id, c]))
+    /// Root-first ancestor chain including the leaf. Walked in-memory
+    /// off `catById` so we make one Category fetch total, not one per
+    /// variation.
+    const pathFor = (leafCategoryId: string): string[] => {
+      const chain: string[] = []
+      let cursor: string | null = leafCategoryId
+      while (cursor) {
+        const cat = catById.get(cursor)
+        if (!cat) break
+        chain.unshift(cat.name)
+        cursor = cat.parentId
+      }
+      return chain
+    }
     return rows.map((r) => ({
       id: r.id,
       itemGroupName: r.itemGroup.name,
       categoryName: r.itemGroup.category.name,
+      categoryPath: pathFor(r.itemGroup.categoryId),
       colourFamilyName: r.colourFamily.name,
       sizeOptionName: r.sizeOption.name,
     }))
@@ -1154,6 +1175,215 @@ export class CatalogReadService {
       breadcrumb,
       subfolders: keepAtScope(subCategoryChildren.map(toFolderRow)),
       itemGroups: keepAtScope(itemGroupChildren.map(toItemGroupRow)),
+      location: scopedLocation
+        ? { id: scopedLocation.id, name: scopedLocation.name, kind: scopedLocation.kind }
+        : null,
+    }
+  }
+
+  /// Deep, tree-wide search. Case-insensitive `includes` match against:
+  ///   - Category.name → surfaces as a folder hit
+  ///   - ItemGroup.name → surfaces as a product hit
+  ///   - WarehouseVariant.warehouseSku → surfaces the parent product
+  ///   - ColourVariant.name (e.g. "Dark Gray") → surfaces the parent product
+  ///   - SizeOption.name (e.g. "XL") → surfaces the parent product
+  /// Each hit carries its ancestor chain (root-first) so the client can
+  /// render "in BärHaus › Apparel › Headwear" next to the tile. Empty
+  /// query returns zero hits — the client falls back to the browse view.
+  ///
+  /// Location scoping mirrors browseFolder: MARKET locations only see
+  /// folders and item-groups that have actually received SKUs there, so
+  /// searching from an Atlanta market page never surfaces phantom
+  /// warehouse-only folders.
+  async searchCatalog(
+    rawQuery: string,
+    actor: CurrentUserPayload,
+    requestedLocationId: string | null = null,
+  ): Promise<CatalogSearchResponse> {
+    const scopedLocation = await this.resolveBrowseLocation(actor, requestedLocationId)
+    const query = rawQuery.trim()
+    if (query.length === 0) {
+      return {
+        query,
+        hits: [],
+        location: scopedLocation
+          ? { id: scopedLocation.id, name: scopedLocation.name, kind: scopedLocation.kind }
+          : null,
+      }
+    }
+    const needle = query.toLowerCase()
+
+    const allCategories = await this.prisma.category.findMany({ orderBy: { name: 'asc' } })
+    const catById = new Map(allCategories.map((c) => [c.id, c]))
+
+    const isMarketScope = scopedLocation?.kind === 'MARKET'
+    const [allVariants, onHandMap, allItemGroups, seenVariantIds] = await Promise.all([
+      this.prisma.warehouseVariant.findMany({
+        include: {
+          itemGroup: { select: { id: true, categoryId: true, name: true } },
+          /// `colourVariant.name` and `variation.sizeOption.name` are
+          /// pulled here (in addition to the aggregation-photo select)
+          /// so the search filter can match on the operator-visible
+          /// colour ("Dark Gray") and size ("XL") without a second query.
+          colourVariant: { select: { photoUrl: true, name: true } },
+          variation: { select: { sizeOption: { select: { name: true } } } },
+        },
+        orderBy: { warehouseSku: 'asc' },
+      }),
+      scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
+      this.prisma.itemGroup.findMany({ orderBy: { name: 'asc' } }),
+      isMarketScope ? this.variantsSeenAtLocation(scopedLocation!.id) : Promise.resolve(null as Set<string> | null),
+    ])
+
+    interface Bucket {
+      itemCount: number
+      totalQty: number
+      totalValueCents: number
+      previewPhotoUrl: string | null
+    }
+    const emptyBucket = (): Bucket => ({ itemCount: 0, totalQty: 0, totalValueCents: 0, previewPhotoUrl: null })
+    const categoryTotals = new Map<string, Bucket>()
+    const itemGroupTotals = new Map<string, Bucket>()
+    for (const c of allCategories) categoryTotals.set(c.id, emptyBucket())
+    for (const ig of allItemGroups) itemGroupTotals.set(ig.id, emptyBucket())
+
+    const creditAncestors = (leafCatId: string, qty: number, valueCents: number, photo: string | null) => {
+      let cursor: string | null = leafCatId
+      while (cursor) {
+        const bucket = categoryTotals.get(cursor)
+        if (!bucket) break
+        bucket.itemCount += 1
+        bucket.totalQty += qty
+        bucket.totalValueCents += valueCents
+        if (bucket.previewPhotoUrl === null && photo) bucket.previewPhotoUrl = photo
+        cursor = catById.get(cursor)?.parentId ?? null
+      }
+    }
+
+    /// Item-groups whose leaves match the query on SKU, colour-variant
+    /// name, or size name. Built in the same pass that aggregates totals
+    /// so we don't iterate variants twice.
+    const variantMatchedItemGroupIds = new Set<string>()
+
+    for (const wv of allVariants) {
+      if (seenVariantIds && !seenVariantIds.has(wv.id)) continue
+      const onHand = onHandMap.get(wv.id) ?? 0
+      const valueCents = onHand * (wv.unitCostCents ?? 0)
+      const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
+      const igBucket = itemGroupTotals.get(wv.itemGroup.id)
+      if (igBucket) {
+        igBucket.itemCount += 1
+        igBucket.totalQty += onHand
+        igBucket.totalValueCents += valueCents
+        if (igBucket.previewPhotoUrl === null && photo) igBucket.previewPhotoUrl = photo
+      }
+      creditAncestors(wv.itemGroup.categoryId, onHand, valueCents, photo)
+
+      if (
+        wv.warehouseSku.toLowerCase().includes(needle) ||
+        wv.colourVariant.name.toLowerCase().includes(needle) ||
+        wv.variation.sizeOption.name.toLowerCase().includes(needle)
+      ) {
+        variantMatchedItemGroupIds.add(wv.itemGroup.id)
+      }
+    }
+
+    /// Walk ancestors of `categoryId` (root-first, EXCLUDING the category
+    /// itself). If `includeSelf` is set, appends the category at the end
+    /// — used for item-group hits so the path shows the container folder.
+    const buildPath = (categoryId: string | null | undefined, includeSelf: boolean): Array<{ id: string; name: string }> => {
+      const chain: Array<{ id: string; name: string }> = []
+      let cursor = categoryId ? catById.get(categoryId) ?? null : null
+      const seed = cursor
+      cursor = cursor?.parentId ? catById.get(cursor.parentId) ?? null : null
+      while (cursor) {
+        chain.unshift({ id: cursor.id, name: cursor.name })
+        cursor = cursor.parentId ? catById.get(cursor.parentId) ?? null : null
+      }
+      if (includeSelf && seed) chain.push({ id: seed.id, name: seed.name })
+      return chain
+    }
+
+    const folderHits: CatalogSearchHit[] = []
+    for (const cat of allCategories) {
+      if (!cat.name.toLowerCase().includes(needle)) continue
+      const b = categoryTotals.get(cat.id) ?? emptyBucket()
+      if (isMarketScope && b.itemCount === 0) continue
+      const row: CatalogFolderRow = {
+        id: cat.id,
+        name: cat.name,
+        subfolderCount:
+          (allCategories.filter((c) => c.parentId === cat.id).length +
+            allItemGroups.filter((ig) => ig.categoryId === cat.id).length),
+        itemCount: b.itemCount,
+        totalQty: b.totalQty,
+        totalValueCents: b.totalValueCents,
+        previewPhotoUrl: b.previewPhotoUrl,
+      }
+      folderHits.push({ kind: 'folder', row, path: buildPath(cat.id, false) })
+    }
+
+    const itemGroupHits: CatalogSearchHit[] = []
+    for (const ig of allItemGroups) {
+      const nameMatches = ig.name.toLowerCase().includes(needle)
+      const variantMatches = variantMatchedItemGroupIds.has(ig.id)
+      if (!nameMatches && !variantMatches) continue
+      const b = itemGroupTotals.get(ig.id) ?? emptyBucket()
+      if (isMarketScope && b.itemCount === 0) continue
+      const row: CatalogFolderRow = {
+        id: ig.id,
+        name: ig.name,
+        subfolderCount: 0,
+        itemCount: b.itemCount,
+        totalQty: b.totalQty,
+        totalValueCents: b.totalValueCents,
+        previewPhotoUrl: b.previewPhotoUrl,
+      }
+      itemGroupHits.push({ kind: 'item-group', row, path: buildPath(ig.categoryId, true) })
+    }
+
+    /// Leaf-level (SKU) hits: each matching WarehouseVariant emitted as
+    /// its own row so operators searching a specific colour ("Melon &
+    /// Plum") jump straight to that SKU's detail page instead of drilling
+    /// through the parent product. Row shape collapses to a single item:
+    /// itemCount=1, totalQty=onHand, totalValueCents=onHand×unitCost.
+    const itemHits: CatalogSearchHit[] = []
+    for (const wv of allVariants) {
+      if (seenVariantIds && !seenVariantIds.has(wv.id)) continue
+      const skuMatches = wv.warehouseSku.toLowerCase().includes(needle)
+      const colourMatches = wv.colourVariant.name.toLowerCase().includes(needle)
+      const sizeMatches = wv.variation.sizeOption.name.toLowerCase().includes(needle)
+      if (!skuMatches && !colourMatches && !sizeMatches) continue
+
+      const onHand = onHandMap.get(wv.id) ?? 0
+      const valueCents = onHand * (wv.unitCostCents ?? 0)
+      const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
+      /// Item hit label: "Colour · Size" so two SKUs from the same
+      /// product are distinguishable in the list. The parent product
+      /// name goes into the breadcrumb path (buildPath + push item-group)
+      /// so the operator sees "in BärHaus › ... › Standard Scarves …".
+      const label = `${wv.colourVariant.name} · ${wv.variation.sizeOption.name}`
+      const parentIg = allItemGroups.find((ig) => ig.id === wv.itemGroup.id)
+      const path = buildPath(wv.itemGroup.categoryId, true)
+      if (parentIg) path.push({ id: parentIg.id, name: parentIg.name })
+      itemHits.push({
+        kind: 'item',
+        row: {
+          id: wv.id,
+          name: label,
+          subfolderCount: 0,
+          itemCount: 1,
+          totalQty: onHand,
+          totalValueCents: valueCents,
+          previewPhotoUrl: photo,
+        },
+        path,
+      })
+    }
+
+    return {
+      query,
+      hits: [...folderHits, ...itemGroupHits, ...itemHits],
       location: scopedLocation
         ? { id: scopedLocation.id, name: scopedLocation.name, kind: scopedLocation.kind }
         : null,

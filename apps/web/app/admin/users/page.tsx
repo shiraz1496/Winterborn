@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { AdminUserDto, CurrentUserDto, LocationDto } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
+import { SearchableSelect } from '../../../components/SearchableSelect'
 import {
   ApiError,
   createAdminUser,
@@ -353,13 +354,13 @@ function UserModal({
 
           <div className="field">
             <label>Role</label>
-            <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
-              {(Object.keys(ROLE_LABEL) as Role[]).map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_LABEL[r]}
-                </option>
-              ))}
-            </select>
+            <SearchableSelect
+              value={form.role}
+              options={(Object.keys(ROLE_LABEL) as Role[]).map((r) => ({ id: r, label: ROLE_LABEL[r] }))}
+              onChange={(id) => id && setForm({ ...form, role: id as Role })}
+              showId={false}
+              allowClear={false}
+            />
             <span className="eyebrow" style={{ color: 'var(--text-dim)', textTransform: 'none', letterSpacing: 0, fontSize: '0.8rem' }}>
               {ROLE_DESC[form.role]}
             </span>
@@ -368,14 +369,13 @@ function UserModal({
           {needsMarket && (
             <div className="field">
               <label>Market</label>
-              <select value={form.locationId} onChange={(e) => setForm({ ...form, locationId: e.target.value })}>
-                <option value="">(none — user will see nothing)</option>
-                {markets.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={form.locationId || null}
+                options={markets.map((m) => ({ id: m.id, label: m.name }))}
+                placeholder="(none — user will see nothing)"
+                onChange={(id) => setForm({ ...form, locationId: id ?? '' })}
+                showId={false}
+              />
             </div>
           )}
 

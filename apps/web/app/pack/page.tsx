@@ -2,126 +2,389 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import type { LocationDto, RestockRequestDto } from '@winterborn/shared'
+import { useRouter } from 'next/navigation'
+import type { BoxDto, LocationDto, RestockRequestDto } from '@winterborn/shared'
 import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
-import { ApiError, listLocations, listRequests } from '../../lib/api'
+import { SearchableSelect } from '../../components/SearchableSelect'
+import { ApiError, listBoxes, listLocations, listRequests } from '../../lib/api'
 
 function PackIndexBody() {
+  const router = useRouter()
   const [requests, setRequests] = useState<RestockRequestDto[]>([])
   const [locations, setLocations] = useState<LocationDto[]>([])
+  const [boxes, setBoxes] = useState<BoxDto[]>([])
+  const [marketFilter, setMarketFilter] = useState<string>('ALL')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    Promise.all([listRequests(), listLocations()])
-      .then(([r, l]) => {
+    // Boxes are pulled unfiltered so we can compute "already fully packed"
+    // for every request without one call per request. A request whose
+    // total requested qty is already covered by boxes (own + siblings'
+    // shared multi-request boxes) is hidden from the pack index — the
+    // Pack CTA on it would be a dead end.
+    Promise.all([listRequests(), listLocations(), listBoxes()])
+      .then(([r, l, b]) => {
         setRequests(r)
         setLocations(l)
+        setBoxes(b)
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load requests.'))
       .finally(() => setLoading(false))
   }, [])
 
-  const locationName = useMemo(() => {
-    const map = new Map(locations.map((l) => [l.id, l.name]))
-    return (id: string) => map.get(id) ?? id
-  }, [locations])
+  const nameById = useMemo(() => new Map(locations.map((l) => [l.id, l.name])), [locations])
 
-  const packable = requests.filter((r) => r.state === 'OPEN' || r.state === 'PACKING')
-
-  // Doc 3 §3.5: bundle nearby restock needs into one dispatch run. A
-  // destination with more than one packable request is a consolidation
-  // candidate -- pack them together and save the second shipment.
-  const consolidation = useMemo(() => {
-    const groups = new Map<string, RestockRequestDto[]>()
-    for (const r of packable) {
-      const list = groups.get(r.locationId) ?? []
-      list.push(r)
-      groups.set(r.locationId, list)
+  /// Two counters: units already dispatched (out the door, can't undo)
+  /// vs units in still-PACKING boxes (mutable — re-pack replaces them).
+  /// A request stays "packable" as long as either not everything is
+  /// packed OR the existing packing is still on the warehouse floor.
+  const packedByRequest = useMemo(() => {
+    const m = new Map<string, { dispatched: number; packing: number }>()
+    for (const b of boxes) {
+      const state = b.state
+      for (const line of b.lines) {
+        const rid = line.requestId ?? b.requestId ?? null
+        if (!rid) continue
+        const entry = m.get(rid) ?? { dispatched: 0, packing: 0 }
+        if (state === 'PACKING') entry.packing += line.quantity
+        else if (state === 'DISPATCHED' || state === 'ARRIVED') entry.dispatched += line.quantity
+        m.set(rid, entry)
+      }
     }
-    return [...groups.entries()]
-      .filter(([, reqs]) => reqs.length > 1)
-      .map(([locationId, reqs]) => ({
-        locationId,
-        requests: reqs,
-        totalLines: reqs.reduce((n, r) => n + r.lines.length, 0),
-      }))
-      .sort((a, b) => b.requests.length - a.requests.length)
-  }, [packable])
+    return m
+  }, [boxes])
+
+  const packable = useMemo(
+    () =>
+      requests
+        .filter((r) => r.state === 'OPEN' || r.state === 'PACKING')
+        .filter((r) => {
+          const requested = r.lines.reduce((sum, l) => sum + l.qtyRequested, 0)
+          const { dispatched, packing } = packedByRequest.get(r.id) ?? { dispatched: 0, packing: 0 }
+          // Hide only when everything is already OUT — dispatched >=
+          // requested and nothing left mutable. If there's a PACKING
+          // box, the request is still workable (re-pack replaces it).
+          if (dispatched >= requested && packing === 0) return false
+          return true
+        })
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
+    [requests, packedByRequest],
+  )
+
+  /// Every active MARKET location — same shape as the market dropdown
+  /// on the Requests page so the operator sees a consistent list across
+  /// the app. Markets with zero packable requests still appear (the row
+  /// grid below just renders the empty state when picked).
+  const marketOptions = useMemo(
+    () =>
+      locations
+        .filter((l) => l.kind === 'MARKET' && l.isActive)
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((l) => ({ id: l.id, label: l.name })),
+    [locations],
+  )
+
+  const filtered = useMemo(() => {
+    if (marketFilter === 'ALL') return packable
+    return packable.filter((r) => r.locationId === marketFilter)
+  }, [packable, marketFilter])
+
+  /// Once the operator has ticked at least one request, only same-market
+  /// checkboxes stay live — cross-market packing isn't allowed. The
+  /// "anchor" market is whichever the first selected request lives in.
+  const anchorMarketId = useMemo(() => {
+    if (selected.size === 0) return null
+    for (const r of packable) if (selected.has(r.id)) return r.locationId
+    return null
+  }, [selected, packable])
+
+  const selectedList = useMemo(() => filtered.filter((r) => selected.has(r.id)), [filtered, selected])
+  const selectedMarketName = anchorMarketId ? nameById.get(anchorMarketId) ?? anchorMarketId : null
+
+  function toggle(id: string, marketId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        // Enforce single-market batches: if the operator ticks a request
+        // in a different market than the current anchor, drop the old
+        // selection instead of silently ignoring.
+        if (anchorMarketId && marketId !== anchorMarketId) {
+          next.clear()
+        }
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  function packSelected() {
+    if (!anchorMarketId || selected.size === 0) return
+    const ids = selectedList.map((r) => r.id)
+    const qs = new URLSearchParams({ requests: ids.join(',') }).toString()
+    router.push(`/pack/dest/${encodeURIComponent(anchorMarketId)}?${qs}`)
+  }
+
+  /// "Select all" for the current market filter. Only enabled when the
+  /// filter is a specific market (not ALL), because cross-market batches
+  /// aren't allowed. Ticks every visible row.
+  function selectAllVisible() {
+    if (marketFilter === 'ALL') return
+    setSelected(new Set(filtered.map((r) => r.id)))
+  }
 
   return (
     <div>
       <PageHeader
         eyebrow="Warehouse floor"
         title="Pack"
-        description="Every request that's ready to be turned into physical boxes. If multiple requests are going to the same market, the Consolidate section at the top flags them so you can combine into one dispatch."
+        description="Every request that's ready to be packed. Tick two or more going to the same market to combine them into a single packing session, or open one on its own."
+        actions={
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: '0.85rem' }}>
+            <div style={{ minWidth: 220 }}>
+              <SearchableSelect
+                value={marketFilter}
+                options={[{ id: 'ALL', label: 'All markets' }, ...marketOptions]}
+                onChange={(id) => setMarketFilter(id ?? 'ALL')}
+                size="sm"
+                showId={false}
+                allowClear={false}
+              />
+            </div>
+          </label>
+        }
       />
 
       {error && <p className="error-banner">{error}</p>}
 
-      {consolidation.length > 0 && (
-        <>
-          <div className="section-heading">
-            <h2>Consolidate</h2>
-            <span className="eyebrow">{consolidation.length} destination{consolidation.length === 1 ? '' : 's'}</span>
-          </div>
-          <div className="list" style={{ marginBottom: 24 }}>
-            {consolidation.map((c) => (
-              <div key={c.locationId} className="list-row" style={{ flexWrap: 'wrap', gap: 8 }}>
-                <div className="list-row-body">
-                  <div className="list-row-title">{locationName(c.locationId)}</div>
-                  <div className="list-row-meta">
-                    {c.requests.length} open requests · {c.totalLines} line{c.totalLines === 1 ? '' : 's'} total ·
-                    combine into one dispatch
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {c.requests.map((r) => (
-                    <Link key={r.id} href={`/pack/${r.id}`} className="chip chip-pine" style={{ cursor: 'pointer' }}>
-                      {r.state.toLowerCase()} · {r.lines.length}
-                    </Link>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      <div className="section-heading">
-        <h2>Requests ready to pack</h2>
-        <span className="eyebrow">{packable.length}</span>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          gap: 12,
+          marginBottom: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        {marketFilter !== 'ALL' && filtered.length > 1 && filtered.length !== selected.size && (
+          <button
+            type="button"
+            onClick={selectAllVisible}
+            style={{
+              all: 'unset',
+              fontSize: '0.78rem',
+              color: 'var(--signal, #b58a2c)',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            Select all {filtered.length}
+          </button>
+        )}
+        <span className="eyebrow">
+          {filtered.length} request{filtered.length === 1 ? '' : 's'}
+          {marketFilter === 'ALL' ? '' : ` at ${nameById.get(marketFilter) ?? marketFilter}`}
+        </span>
       </div>
+
       {loading ? (
         <div className="screen-loading">
           <div className="spinner" aria-hidden="true" />
         </div>
-      ) : packable.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="empty-state">
           <p className="empty-state-title">Nothing to pack</p>
           <p className="empty-state-body">
-            A request needs to be in the Open state before it shows up here. Open one from the Requests tab.
+            {marketFilter === 'ALL'
+              ? 'A request has to be Open or Packing to show up here. Open one from the Requests tab.'
+              : 'No open or packing requests for this market. Try a different market or All markets.'}
           </p>
           <Link href="/requests" className="empty-state-cta">
             → Requests
           </Link>
         </div>
       ) : (
-        <div className="list">
-          {packable.map((r) => (
-            <Link key={r.id} href={`/pack/${r.id}`} className="list-row">
-              <div className="list-row-body">
-                <div className="list-row-title">{locationName(r.locationId)}</div>
-                <div className="list-row-meta">
-                  {r.lines.length} line{r.lines.length === 1 ? '' : 's'}
-                </div>
-              </div>
-              <span className={`chip ${r.state === 'PACKING' ? 'chip-signal' : ''}`}>{r.state.toLowerCase()}</span>
-            </Link>
-          ))}
+        <div className="stack">
+          {filtered.map((r) => {
+            const disabled = anchorMarketId !== null && anchorMarketId !== r.locationId
+            const isSelected = selected.has(r.id)
+            return (
+              <RequestRow
+                key={r.id}
+                request={r}
+                locationName={nameById.get(r.locationId) ?? r.locationId}
+                selected={isSelected}
+                disabled={disabled}
+                onToggle={() => toggle(r.id, r.locationId)}
+              />
+            )
+          })}
         </div>
       )}
+
+      {selected.size > 0 && (
+        <div
+          style={{
+            position: 'sticky',
+            bottom: 76,
+            marginTop: 16,
+            padding: '10px 14px',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--signal, #b58a2c)',
+            background: 'var(--surface)',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+          }}
+        >
+          <div style={{ minWidth: 0, fontSize: '0.85rem' }}>
+            <strong>{selected.size} selected</strong>
+            {selectedMarketName ? ` · ${selectedMarketName}` : ''}
+            <span style={{ color: 'var(--text-dim)', marginLeft: 8 }}>
+              {selectedList.reduce((sum, r) => sum + r.lines.length, 0)} lines ·{' '}
+              {selectedList
+                .reduce((sum, r) => sum + r.lines.reduce((s, l) => s + l.qtyRequested, 0), 0)
+                .toLocaleString()}{' '}
+              units
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              style={{
+                all: 'unset',
+                fontSize: '0.8rem',
+                padding: '6px 10px',
+                borderRadius: 'var(--radius-sm)',
+                color: 'var(--text-dim)',
+                cursor: 'pointer',
+              }}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={packSelected}
+              style={{
+                all: 'unset',
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '8px 14px',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--signal, #b58a2c)',
+                color: 'var(--signal-ink, #fff)',
+                fontSize: '0.85rem',
+                fontWeight: 700,
+                letterSpacing: '0.02em',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Pack {selected.size} together →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RequestRow({
+  request,
+  locationName,
+  selected,
+  disabled,
+  onToggle,
+}: {
+  request: RestockRequestDto
+  locationName: string
+  selected: boolean
+  disabled: boolean
+  onToggle: () => void
+}) {
+  const totalUnits = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+  return (
+    <div
+      className="card"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: 12,
+        opacity: disabled ? 0.5 : 1,
+        borderColor: selected ? 'var(--signal, #b58a2c)' : undefined,
+        background: selected ? 'var(--surface-sunken)' : undefined,
+        transition: 'border-color 0.12s, background 0.12s',
+      }}
+    >
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          flexShrink: 0,
+          paddingRight: 4,
+        }}
+        title={disabled ? 'Different market — clear the current selection to pick this one.' : 'Select this request'}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={disabled}
+          onChange={onToggle}
+          style={{ width: 18, height: 18, cursor: disabled ? 'not-allowed' : 'pointer' }}
+        />
+      </label>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div className="list-row-title" style={{ fontSize: '0.95rem' }}>
+            {locationName}
+          </div>
+          <span className={`chip ${request.state === 'PACKING' ? 'chip-signal' : ''}`}>
+            {request.state.toLowerCase()}
+          </span>
+        </div>
+        <div className="list-row-meta" style={{ marginTop: 2 }}>
+          <span className="mono">#{request.id.slice(0, 6)}</span> · {request.lines.length} line
+          {request.lines.length === 1 ? '' : 's'} · {totalUnits.toLocaleString()} unit
+          {totalUnits === 1 ? '' : 's'} ·{' '}
+          {new Date(request.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+        </div>
+      </div>
+
+      <Link
+        href={`/pack/${request.id}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          flex: '0 0 auto',
+          width: 'auto',
+          padding: '8px 14px',
+          borderRadius: 'var(--radius-md)',
+          background: 'var(--signal, #b58a2c)',
+          color: 'var(--signal-ink, #fff)',
+          fontSize: '0.82rem',
+          fontWeight: 700,
+          letterSpacing: '0.02em',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+          border: '1px solid var(--signal, #b58a2c)',
+        }}
+        title="Pack this single request on its own"
+      >
+        Pack →
+      </Link>
     </div>
   )
 }

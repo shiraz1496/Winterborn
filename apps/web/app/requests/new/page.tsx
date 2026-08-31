@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type { LocationDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
+import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { RequireAuth } from '../../../components/RequireAuth'
-import { Swatch } from '../../../components/Swatch'
+import { SearchableSelect } from '../../../components/SearchableSelect'
 import { useAuth } from '../../../lib/auth-context'
 import {
   ApiError,
@@ -25,6 +26,9 @@ interface DraftFamily {
   itemGroupName: string
   familyName: string
   sizeName: string
+  /// Root-first ancestor chain incl. the leaf folder — displayed on the
+  /// row so the requested-items list matches the picker's breadcrumb.
+  categoryPath: string[]
   variants: WarehouseVariantSummary[]
   // Keyed by warehouseVariantId
   qtyByVariant: Record<string, number>
@@ -77,11 +81,28 @@ function NewRequestBody() {
     const q = query.trim().toLowerCase()
     if (q.length === 0) return []
     const takenIds = new Set(families.map((f) => f.variationId))
+    // See intake — SKU and specific colour-variant names ("Dark Gray")
+    // live on the variant, not the variation, so pre-index and OR in.
+    const variantSideMatchIds = new Set(
+      allVariants
+        .filter(
+          (wv) =>
+            wv.warehouseSku.toLowerCase().includes(q) ||
+            wv.colourVariantName.toLowerCase().includes(q),
+        )
+        .map((wv) => wv.variationId),
+    )
     return variations
-      .filter((v) => `${v.itemGroupName} ${v.colourFamilyName} ${v.sizeOptionName}`.toLowerCase().includes(q))
+      .filter((v) => {
+        if (variantSideMatchIds.has(v.id)) return true
+        return [...v.categoryPath, v.itemGroupName, v.colourFamilyName, v.sizeOptionName]
+          .join(' ')
+          .toLowerCase()
+          .includes(q)
+      })
       .filter((v) => !takenIds.has(v.id))
       .slice(0, 8)
-  }, [query, variations, families])
+  }, [query, variations, allVariants, families])
 
   function addFamily(v: VariationSummary) {
     const variants = variantsByVariation.get(v.id) ?? []
@@ -96,6 +117,7 @@ function NewRequestBody() {
       itemGroupName: v.itemGroupName,
       familyName: v.colourFamilyName,
       sizeName: v.sizeOptionName,
+      categoryPath: v.categoryPath,
       variants,
       qtyByVariant: initialQty,
     }
@@ -179,13 +201,13 @@ function NewRequestBody() {
       {!isMarketManager && (
         <div className="field">
           <label htmlFor="location">Market</label>
-          <select id="location" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-            {markets.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
+          <SearchableSelect
+            value={locationId || null}
+            options={markets.map((m) => ({ id: m.id, label: m.name }))}
+            onChange={(id) => id && setLocationId(id)}
+            showId={false}
+            allowClear={false}
+          />
         </div>
       )}
 
@@ -211,10 +233,17 @@ function NewRequestBody() {
                 className="list-row"
                 style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%' }}
               >
-                <Swatch familyName={v.colourFamilyName} />
+                <ProductThumb
+                  photoUrl={firstPhoto(variantsByVariation.get(v.id) ?? [])}
+                  familyName={v.colourFamilyName}
+                  alt={v.itemGroupName}
+                />
                 <div className="list-row-body">
                   <div className="list-row-title">{v.itemGroupName}</div>
                   <div className="list-row-meta">
+                    <span style={{ color: 'var(--text-faint)' }}>
+                      {(v.categoryPath.length > 1 ? v.categoryPath.slice(1) : v.categoryPath).join(' › ')} ·{' '}
+                    </span>
                     {v.colourFamilyName} · {v.sizeOptionName}
                   </div>
                 </div>
@@ -235,8 +264,11 @@ function NewRequestBody() {
       </div>
 
       {families.length === 0 ? (
-        <div className="card">
-          <p style={{ margin: 0, color: 'var(--text-dim)' }}>Search above to add what this market needs.</p>
+        <div className="empty-state">
+          <p className="empty-state-title">Nothing requested yet</p>
+          <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+            Use the search above to add what this market needs.
+          </p>
         </div>
       ) : (
         <div className="stack" style={{ marginBottom: 24 }}>
@@ -259,10 +291,17 @@ function NewRequestBody() {
                       cursor: 'pointer',
                     }}
                   >
-                    <Swatch familyName={f.familyName} />
+                    <ProductThumb
+                      photoUrl={firstPhoto(f.variants)}
+                      familyName={f.familyName}
+                      alt={f.itemGroupName}
+                    />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="list-row-title">{f.itemGroupName}</div>
                       <div className="list-row-meta">
+                        <span style={{ color: 'var(--text-faint)' }}>
+                          {(f.categoryPath.length > 1 ? f.categoryPath.slice(1) : f.categoryPath).join(' › ')} ·{' '}
+                        </span>
                         {f.familyName} · {f.sizeName}
                       </div>
                     </div>
@@ -300,7 +339,11 @@ function NewRequestBody() {
                             className="list-row"
                             style={{ border: '1px solid var(--line)' }}
                           >
-                            <Swatch familyName={v.colourVariantName} />
+                            <ProductThumb
+                              photoUrl={v.photoUrl}
+                              familyName={v.colourVariantName}
+                              alt={v.colourVariantName}
+                            />
                             <div className="list-row-body">
                               <div className="list-row-title">{v.colourVariantName}</div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>

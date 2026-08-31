@@ -8,8 +8,8 @@ import type {
 } from '@winterborn/shared'
 import { FolderChainPicker } from '../../components/FolderChainPicker'
 import { PageHeader } from '../../components/PageHeader'
+import { ProductThumb, firstPhoto } from '../../components/ProductThumb'
 import { RequireAuth } from '../../components/RequireAuth'
-import { Swatch } from '../../components/Swatch'
 import { useAuth } from '../../lib/auth-context'
 import {
   ApiError,
@@ -75,6 +75,10 @@ interface DraftFamily {
   itemGroupName: string
   familyName: string
   sizeName: string
+  /// Root-first ancestor chain incl. the leaf folder. Carried through
+  /// from the search result so the "items being received" row matches
+  /// the picker row (same "Miscellaneous › Buiji (fake) Silk" trail).
+  categoryPath: string[]
   variants: WarehouseVariantSummary[]
   qtyByVariant: Record<string, number>
   tokenByVariant: Record<string, string>
@@ -130,13 +134,40 @@ function IntakeBody() {
     const q = query.trim().toLowerCase()
     if (q.length === 0) return []
     const takenIds = new Set(families.map((f) => f.variationId))
+    // Variations whose SKU or specific colour-variant name matches —
+    // both live on WarehouseVariantSummary, not VariationSummary, so we
+    // pre-index them once and OR into the main filter. `colourVariantName`
+    // is the operator-visible colour ("Dark Gray"), distinct from the
+    // family bucket ("Gray") on the variation itself.
+    const variantSideMatchIds = new Set(
+      variants
+        .filter(
+          (wv) =>
+            wv.warehouseSku.toLowerCase().includes(q) ||
+            wv.colourVariantName.toLowerCase().includes(q),
+        )
+        .map((wv) => wv.variationId),
+    )
     return variations
-      .filter((v) =>
-        `${v.itemGroupName} ${v.colourFamilyName} ${v.sizeOptionName}`.toLowerCase().includes(q),
-      )
+      .filter((v) => {
+        if (variantSideMatchIds.has(v.id)) return true
+        // Searching against the full folder path (not just the leaf) so a
+        // parent-folder query like "Scarves" surfaces every product under
+        // "Scarves > Scarves (Peru)" and "Scarves > Scarves (Ecuador)"
+        // — consistent with the catalog deep-search behaviour.
+        const haystack = [
+          ...v.categoryPath,
+          v.itemGroupName,
+          v.colourFamilyName,
+          v.sizeOptionName,
+        ]
+          .join(' ')
+          .toLowerCase()
+        return haystack.includes(q)
+      })
       .filter((v) => !takenIds.has(v.id))
       .slice(0, 10)
-  }, [query, variations, families])
+  }, [query, variations, variants, families])
 
   function addFamily(v: VariationSummary) {
     const familyVariants = variantsByVariation.get(v.id) ?? []
@@ -153,6 +184,7 @@ function IntakeBody() {
         itemGroupName: v.itemGroupName,
         familyName: v.colourFamilyName,
         sizeName: v.sizeOptionName,
+        categoryPath: v.categoryPath,
         variants: familyVariants,
         qtyByVariant: initialQty,
         tokenByVariant: tokens,
@@ -317,7 +349,7 @@ function IntakeBody() {
         <label htmlFor="intake-search">Add a product</label>
         <input
           id="intake-search"
-          placeholder="Search item, colour family, size, or SKU…"
+          placeholder="Search folder, item, colour, colour family, size, or SKU…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           autoComplete="off"
@@ -335,10 +367,17 @@ function IntakeBody() {
                 className="list-row"
                 style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%' }}
               >
-                <Swatch familyName={v.colourFamilyName} />
+                <ProductThumb
+                  photoUrl={firstPhoto(variantsByVariation.get(v.id) ?? [])}
+                  familyName={v.colourFamilyName}
+                  alt={v.itemGroupName}
+                />
                 <div className="list-row-body">
                   <div className="list-row-title">{v.itemGroupName}</div>
                   <div className="list-row-meta">
+                    <span style={{ color: 'var(--text-faint)' }}>
+                      {(v.categoryPath.length > 1 ? v.categoryPath.slice(1) : v.categoryPath).join(' › ')} ·{' '}
+                    </span>
                     {v.colourFamilyName} · {v.sizeOptionName}
                   </div>
                 </div>
@@ -373,8 +412,11 @@ function IntakeBody() {
       </div>
 
       {families.length === 0 ? (
-        <div className="card">
-          <p style={{ margin: 0, color: 'var(--text-dim)' }}>Search above to add what just arrived.</p>
+        <div className="empty-state">
+          <p className="empty-state-title">Nothing added yet</p>
+          <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+            Use the search above to add products that just arrived.
+          </p>
         </div>
       ) : (
         <div className="stack" style={{ marginBottom: 24 }}>
@@ -397,10 +439,17 @@ function IntakeBody() {
                       cursor: 'pointer',
                     }}
                   >
-                    <Swatch familyName={f.familyName} />
+                    <ProductThumb
+                      photoUrl={firstPhoto(f.variants)}
+                      familyName={f.familyName}
+                      alt={f.itemGroupName}
+                    />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="list-row-title">{f.itemGroupName}</div>
                       <div className="list-row-meta">
+                        <span style={{ color: 'var(--text-faint)' }}>
+                          {(f.categoryPath.length > 1 ? f.categoryPath.slice(1) : f.categoryPath).join(' › ')} ·{' '}
+                        </span>
                         {f.familyName} · {f.sizeName}
                       </div>
                     </div>
@@ -434,7 +483,11 @@ function IntakeBody() {
                         const qty = f.qtyByVariant[v.id] ?? 0
                         return (
                           <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)' }}>
-                            <Swatch familyName={v.colourVariantName} />
+                            <ProductThumb
+                              photoUrl={v.photoUrl}
+                              familyName={v.colourVariantName}
+                              alt={v.colourVariantName}
+                            />
                             <div className="list-row-body">
                               <div className="list-row-title">{v.colourVariantName}</div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
