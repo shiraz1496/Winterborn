@@ -6,12 +6,13 @@ import { useParams } from 'next/navigation'
 import type { BoxDto, BoxLabelDto, LocationDto, RestockRequestDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
-import { Swatch } from '../../../components/Swatch'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { printLabelElement } from '../../../lib/print-label'
 import { useToast } from '../../../lib/toast'
 import {
   ApiError,
+  discardBox,
   dispatchBox,
   getBoxLabel,
   getRequest,
@@ -138,30 +139,6 @@ function PackBody() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.requestId])
 
-  const packedByVariation = useMemo(() => {
-    const totals = new Map<string, number>()
-    for (const box of boxes) {
-      for (const line of box.lines) {
-        const meta = variantMeta.get(line.warehouseVariantId)
-        if (!meta) continue
-        totals.set(meta.variationId, (totals.get(meta.variationId) ?? 0) + line.quantity)
-      }
-    }
-    return totals
-  }, [boxes, variantMeta])
-
-  const draftByVariation = useMemo(() => {
-    const totals = new Map<string, number>()
-    for (const entry of draft.values()) {
-      totals.set(entry.variationId, (totals.get(entry.variationId) ?? 0) + entry.quantity)
-    }
-    return totals
-  }, [draft])
-
-  function remainingFor(variationId: string, requested: number): number {
-    return requested - (packedByVariation.get(variationId) ?? 0) - (draftByVariation.get(variationId) ?? 0)
-  }
-
   function adjustDraft(variant: WarehouseVariantSummary, delta: number) {
     setDraft((prev) => {
       const next = new Map(prev)
@@ -211,9 +188,24 @@ function PackBody() {
     const allVariantsLoaded = request.lines.every((l) => variantsByLine[l.id])
     if (!allVariantsLoaded) return
 
-    // Sum already-packed per warehouseVariantId across existing boxes.
+    // Sum already-packed per warehouseVariantId across existing boxes,
+    // but SKIP PACKING boxes belonging solely to this request — those
+    // get discarded on re-pack, so treating them as "already packed"
+    // would show the operator an empty draft (0 remaining) on reload.
+    // Only DISPATCHED / ARRIVED (immutable, out the door) count.
     const packedPerVariant = new Map<string, number>()
     for (const box of boxes) {
+      if (box.state === 'PACKING') {
+        // Solo-for-this-request PACKING boxes are re-writable — leave
+        // them out. Shared PACKING boxes we can't rewrite from this
+        // page still count.
+        const ids = new Set<string>()
+        if (box.requestId) ids.add(box.requestId)
+        for (const line of box.lines) if (line.requestId) ids.add(line.requestId)
+        const isSoloForThis =
+          ids.has(request.id) && [...ids].every((id) => id === request.id)
+        if (isSoloForThis) continue
+      }
       for (const line of box.lines) {
         packedPerVariant.set(
           line.warehouseVariantId,
@@ -258,6 +250,22 @@ function PackBody() {
     setBusy(true)
     setError(null)
     try {
+      // Re-pack: if there are existing PACKING boxes solely for this
+      // request, discard them first so the new packBox replaces them
+      // (matches the "don't create an extra box, rewrite the old one"
+      // intent). Shared-with-siblings boxes were filtered out by the
+      // caller (route to shipment view in that case).
+      const solosToDiscard = boxes.filter((box) => {
+        if (box.state !== 'PACKING') return false
+        const ids = new Set<string>()
+        if (box.requestId) ids.add(box.requestId)
+        for (const line of box.lines) if (line.requestId) ids.add(line.requestId)
+        if (!ids.has(request.id)) return false
+        for (const id of ids) if (id !== request.id) return false
+        return true
+      })
+      for (const box of solosToDiscard) await discardBox(box.id)
+
       await packBox({
         destinationLocationId: request.locationId,
         requestId: request.id,
@@ -281,7 +289,7 @@ function PackBody() {
           // Non-fatal.
         }
       }
-      toast.success('Box packed')
+      toast.success(solosToDiscard.length > 0 ? 'Box re-packed' : 'Box packed')
     } catch (err) {
       // InsufficientStock from the backend arrives as ApiError with a
       // details array under body.details. Render a per-SKU message so the
@@ -375,6 +383,66 @@ function PackBody() {
   )
   const variationById = new Map(variations.map((v) => [v.id, v]))
 
+  /// Re-pack detection. We split the request's boxes into what's still
+  /// mutable (PACKING, warehouse floor) vs already-shipped
+  /// (DISPATCHED / ARRIVED). Only mutable solo boxes can be replaced —
+  /// shared boxes route the operator to the shipment view instead.
+  const totalRequested = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+  const soloPackingBoxesForThisRequest = boxes.filter((box) => {
+    if (box.state !== 'PACKING') return false
+    const ids = new Set<string>()
+    if (box.requestId) ids.add(box.requestId)
+    for (const line of box.lines) if (line.requestId) ids.add(line.requestId)
+    if (!ids.has(request.id)) return false
+    // Solo = every id involved is this request. Shared boxes bail out
+    // to the shipment view via the "Also headed to" card at the top.
+    for (const id of ids) if (id !== request.id) return false
+    return true
+  })
+  const dispatchedForThisRequest = boxes.reduce((sum, box) => {
+    if (box.state !== 'DISPATCHED' && box.state !== 'ARRIVED') return sum
+    let n = 0
+    for (const line of box.lines) {
+      const rid = line.requestId ?? box.requestId ?? null
+      if (rid === request.id) n += line.quantity
+    }
+    return sum + n
+  }, 0)
+  const packingForThisRequest = soloPackingBoxesForThisRequest.reduce((sum, box) => {
+    let n = 0
+    for (const line of box.lines) {
+      const rid = line.requestId ?? box.requestId ?? null
+      if (rid === request.id) n += line.quantity
+    }
+    return sum + n
+  }, 0)
+  const isRepack = soloPackingBoxesForThisRequest.length > 0
+
+  // Everything already dispatched → no re-pack path exists (out the door).
+  const fullyDispatched = totalRequested > 0 && dispatchedForThisRequest >= totalRequested
+
+  if (fullyDispatched) {
+    return (
+      <div>
+        <PageHeader
+          eyebrow={locationName ? `Packed for ${locationName}` : 'Packed'}
+          title="This request is fully packed and dispatched"
+          description="Every requested unit has already left the warehouse. Dispatched boxes cannot be re-packed."
+        />
+        {error && <p className="error-banner">{error}</p>}
+        <div className="empty-state">
+          <p className="empty-state-title">Nothing left to pack</p>
+          <p className="empty-state-body">
+            Requested: {totalRequested} · Packed & dispatched: {dispatchedForThisRequest}.
+          </p>
+          <Link href={`/requests/${request.id}`} className="empty-state-cta">
+            → Open request detail
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
       <PageHeader
@@ -385,24 +453,126 @@ function PackBody() {
 
       {error && <p className="error-banner">{error}</p>}
 
+      {isRepack && (
+        <div
+          className="card"
+          style={{
+            marginBottom: 20,
+            borderColor: 'var(--signal, #b58a2c)',
+            background: 'var(--surface-sunken)',
+          }}
+        >
+          <strong>Re-packing this request</strong>
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginTop: 4 }}>
+            {soloPackingBoxesForThisRequest.length} existing PACKING box
+            {soloPackingBoxesForThisRequest.length === 1 ? '' : 'es'} ({packingForThisRequest} unit
+            {packingForThisRequest === 1 ? '' : 's'}) will be replaced when you click Pack this box.
+            {dispatchedForThisRequest > 0 &&
+              ` ${dispatchedForThisRequest} unit${dispatchedForThisRequest === 1 ? '' : 's'} already dispatched stays put.`}
+          </div>
+        </div>
+      )}
+
       {siblings.length > 0 && (
         <div className="card" style={{ marginBottom: 20, borderColor: 'var(--pine)' }}>
-          <div className="row-between" style={{ marginBottom: 8 }}>
-            <strong>Also headed to {locationName ?? 'this destination'}</strong>
+          <div className="row-between" style={{ marginBottom: 10 }}>
+            <div>
+              <strong>Also headed to {locationName ?? 'this destination'}</strong>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: 2 }}>
+                Add another open request to <em>this</em> box — one physical box, one QR label, mixed contents.
+              </div>
+            </div>
             <span className="chip chip-pine">
               {siblings.length} other{siblings.length === 1 ? '' : 's'} open
             </span>
           </div>
-          <p style={{ margin: '0 0 10px', color: 'var(--text-dim)' }}>
-            Combine into one dispatch run rather than sending two boxes to the same market.
-          </p>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {siblings.map((s) => (
-              <Link key={s.id} href={`/pack/${s.id}`} className="chip" style={{ cursor: 'pointer' }}>
-                {s.state.toLowerCase()} · {s.lines.length} line{s.lines.length === 1 ? '' : 's'}
-              </Link>
-            ))}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {siblings.map((s) => {
+              const units = s.lines.reduce((sum, l) => sum + l.qtyRequested, 0)
+              const merged = [request.id, s.id].join(',')
+              const mergedHref = `/pack/dest/${encodeURIComponent(request.locationId)}?requests=${encodeURIComponent(merged)}`
+              // Distinct product names on the sibling — the ids alone
+              // ("#cmthd4") say nothing about what's inside. Dedupe by
+              // variation because a request can carry multiple lines
+              // per family (variant-level + family-level).
+              const productNames: string[] = []
+              const seenVariations = new Set<string>()
+              for (const line of s.lines) {
+                if (seenVariations.has(line.variationId)) continue
+                seenVariations.add(line.variationId)
+                const name = variationById.get(line.variationId)?.itemGroupName
+                if (name) productNames.push(name)
+              }
+              const productSummary =
+                productNames.length === 0
+                  ? null
+                  : productNames.length <= 2
+                    ? productNames.join(', ')
+                    : `${productNames.slice(0, 2).join(', ')} + ${productNames.length - 2} more`
+              return (
+                <div
+                  key={s.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '8px 10px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--line)',
+                    background: 'var(--surface-sunken)',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0, fontSize: '0.85rem' }}>
+                    <div style={{ fontWeight: 600 }}>
+                      {productSummary ?? `#${s.id.slice(0, 6)}`}
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 2 }}>
+                      <span className="mono">#{s.id.slice(0, 6)}</span> · {s.lines.length} line
+                      {s.lines.length === 1 ? '' : 's'} · {units} unit{units === 1 ? '' : 's'} ·{' '}
+                      {s.state.toLowerCase()} ·{' '}
+                      {new Date(s.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </div>
+                  </div>
+                  <Link
+                    href={mergedHref}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '6px 10px',
+                      fontSize: '0.78rem',
+                      fontWeight: 700,
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--signal, #b58a2c)',
+                      color: 'var(--signal-ink, #fff)',
+                      textDecoration: 'none',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={`Merge #${s.id.slice(0, 6)} into this box`}
+                  >
+                    + Add to this box
+                  </Link>
+                </div>
+              )
+            })}
           </div>
+
+          {siblings.length > 1 && (
+            <div style={{ marginTop: 10, textAlign: 'right' }}>
+              <Link
+                href={`/pack/dest/${encodeURIComponent(request.locationId)}`}
+                style={{
+                  fontSize: '0.78rem',
+                  color: 'var(--text-dim)',
+                  textDecoration: 'underline',
+                }}
+                title="Merge every open request for this market into a single packing session"
+              >
+                Add all {siblings.length} at once →
+              </Link>
+            </div>
+          )}
         </div>
       )}
 
@@ -498,7 +668,11 @@ function PackBody() {
                     onClick={() => setOpenLineId(open ? null : g.variationId)}
                     style={{ all: 'unset', display: 'flex', alignItems: 'center', gap: 12, width: '100%', cursor: 'pointer' }}
                   >
-                    <Swatch familyName={familyMeta?.colourFamilyName} />
+                    <ProductThumb
+                      photoUrl={firstPhoto(familyVariants)}
+                      familyName={familyMeta?.colourFamilyName ?? ''}
+                      alt={familyMeta?.itemGroupName ?? ''}
+                    />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="list-row-title">{familyMeta?.itemGroupName ?? g.variationId}</div>
                       <div className="list-row-meta">
@@ -538,7 +712,11 @@ function PackBody() {
                               background: overAllocated ? 'var(--danger-soft, #fdecea)' : undefined,
                             }}
                           >
-                            <Swatch familyName={v.colourVariantName} />
+                            <ProductThumb
+                              photoUrl={v.photoUrl}
+                              familyName={v.colourVariantName}
+                              alt={v.colourVariantName}
+                            />
                             <div className="list-row-body">
                               <div className="list-row-title">
                                 {v.colourVariantName}
@@ -612,7 +790,7 @@ function PackBody() {
         )
       })()}
 
-      <div className="card" style={{ marginBottom: 24, position: 'sticky', bottom: 76 }}>
+      <div className="card" style={{ marginBottom: 24 }}>
         <div className="row-between" style={{ marginBottom: draftCount > 0 ? 12 : 0 }}>
           <span className="eyebrow">Current box</span>
           <span className="mono" style={{ fontWeight: 700 }}>

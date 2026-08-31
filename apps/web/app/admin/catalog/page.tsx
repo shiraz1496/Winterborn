@@ -2,13 +2,13 @@
 
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
-import type { CatalogBrowseResponse, LocationDto } from '@winterborn/shared'
+import type { CatalogBrowseResponse, CatalogSearchHit, LocationDto } from '@winterborn/shared'
 import { LocationPicker } from '../../../components/LocationPicker'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { useAuth } from '../../../lib/auth-context'
-import { ApiError, browseFolder, listLocations } from '../../../lib/api'
-import { CatalogStats, TileGrid, catalogSearchClass, formatMoney } from './_shared'
+import { ApiError, browseFolder, listLocations, searchCatalog } from '../../../lib/api'
+import { CatalogStats, SearchResults, TileGrid, catalogSearchClass, formatMoney } from './_shared'
 
 function CatalogRoot() {
   const { user } = useAuth()
@@ -23,6 +23,8 @@ function CatalogRoot() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [searchHits, setSearchHits] = useState<CatalogSearchHit[] | null>(null)
+  const [searching, setSearching] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -39,15 +41,29 @@ function CatalogRoot() {
       .finally(() => setLoading(false))
   }, [requestedLoc])
 
-  const filtered = useMemo(() => {
-    if (!data) return { subfolders: [], itemGroups: [] }
-    const q = query.trim().toLowerCase()
-    if (q.length === 0) return { subfolders: data.subfolders, itemGroups: data.itemGroups }
-    return {
-      subfolders: data.subfolders.filter((f) => f.name.toLowerCase().includes(q)),
-      itemGroups: data.itemGroups.filter((f) => f.name.toLowerCase().includes(q)),
+  /// Deep search: server call, debounced 700ms so the endpoint isn't hit
+  /// on every keystroke while the operator is still typing. Empty query
+  /// clears results and reverts to the browse grid. Guarded against race
+  /// conditions by checking the query still matches when the response
+  /// comes back.
+  useEffect(() => {
+    const q = query.trim()
+    if (q.length === 0) {
+      setSearchHits(null)
+      setSearching(false)
+      return
     }
-  }, [data, query])
+    setSearching(true)
+    const handle = setTimeout(() => {
+      searchCatalog(q, requestedLoc ?? undefined)
+        .then((res) => {
+          if (res.query === q) setSearchHits(res.hits)
+        })
+        .catch((err) => setError(err instanceof ApiError ? err.message : 'Search failed.'))
+        .finally(() => setSearching(false))
+    }, 700)
+    return () => clearTimeout(handle)
+  }, [query, requestedLoc])
 
   const totals = useMemo(() => {
     if (!data) return { folderCount: 0, itemCount: 0, totalQty: 0, totalValueCents: 0 }
@@ -109,18 +125,22 @@ function CatalogRoot() {
       <div style={{ marginTop: 18, marginBottom: 14 }}>
         <input
           type="search"
-          placeholder="Search folders…"
+          placeholder="Search folder, item, colour, size, or SKU"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className={catalogSearchClass}
         />
       </div>
 
-      <TileGrid
-        subfolders={filtered.subfolders}
-        itemGroups={filtered.itemGroups}
-        locationId={currentLocationId}
-      />
+      {searchHits !== null ? (
+        <SearchResults hits={searchHits} loading={searching} locationId={currentLocationId} />
+      ) : (
+        <TileGrid
+          subfolders={data?.subfolders ?? []}
+          itemGroups={data?.itemGroups ?? []}
+          locationId={currentLocationId}
+        />
+      )}
     </div>
   )
 }

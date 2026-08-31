@@ -6,6 +6,11 @@ export type BoxState = z.infer<typeof boxStateSchema>
 export const packBoxLineInputSchema = z.object({
   warehouseVariantId: z.string().min(1),
   quantity: z.number().int().positive(),
+  /// Which RestockRequest this line fulfils. Optional at the line level:
+  /// when omitted the server falls back to the top-level `requestId` so
+  /// existing single-request calls keep working unchanged. Multi-request
+  /// boxes populate per-line and omit the top-level id.
+  requestId: z.string().min(1).optional(),
 })
 export type PackBoxLineInput = z.infer<typeof packBoxLineInputSchema>
 
@@ -20,6 +25,10 @@ export const boxLineSchema = z.object({
   id: z.string(),
   boxId: z.string(),
   warehouseVariantId: z.string(),
+  /// Populated when the server knows which request this line belongs to
+  /// (multi-request box). Null on legacy rows whose ownership was still
+  /// only recorded at the Box level.
+  requestId: z.string().nullable(),
   quantity: z.number().int(),
 })
 export type BoxLineDto = z.infer<typeof boxLineSchema>
@@ -110,6 +119,21 @@ export const receiveBoxResultSchema = z.object({
     boxesTotal: z.number().int(),
     closed: z.boolean(),
   }).nullable(),
+  /// Every request this scan touched. For a single-request box that's
+  /// just `[request]` (or empty for loose boxes). For a shared box that
+  /// fulfils N requests, this lists progress for all N so the UI can
+  /// tell the operator "Box received — request A closed, request B is
+  /// now 2 of 3 in". Populated from every distinct requestId on the
+  /// box's lines plus Box.requestId when set.
+  ///
+  /// Defaulted to `[]` so an older-shape API still parses cleanly.
+  requests: z.array(z.object({
+    id: z.string(),
+    state: z.string(),
+    boxesReceived: z.number().int(),
+    boxesTotal: z.number().int(),
+    closed: z.boolean(),
+  })).default([]),
 })
 export type ReceiveBoxResult = z.infer<typeof receiveBoxResultSchema>
 

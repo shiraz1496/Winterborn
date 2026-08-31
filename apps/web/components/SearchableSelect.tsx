@@ -45,6 +45,8 @@ interface SearchableSelectProps {
   highlight?: boolean
   /** Show the option's raw id alongside the label. Off for internal cuid-style ids that carry no operator value. */
   showId?: boolean
+  /** Show the "— clear selection —" row at the top of the popover. Turn off for required fields. Defaults to true. */
+  allowClear?: boolean
 }
 
 const CHEVRON = (
@@ -64,6 +66,7 @@ export function SearchableSelect({
   hint,
   highlight = false,
   showId = true,
+  allowClear = true,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -224,25 +227,27 @@ export function SearchableSelect({
             />
           </div>
           <div ref={listRef} style={{ overflowY: 'auto', flex: 1 }}>
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => select(null)}
-              style={{
-                all: 'unset',
-                display: 'block',
-                width: '100%',
-                boxSizing: 'border-box',
-                padding: '6px 10px',
-                borderBottom: '1px solid var(--line-soft)',
-                fontSize: '0.78rem',
-                color: 'var(--text-dim)',
-                cursor: 'pointer',
-                background: value === null ? 'var(--surface-sunken)' : 'transparent',
-              }}
-            >
-              — clear selection —
-            </button>
+            {allowClear && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => select(null)}
+                style={{
+                  all: 'unset',
+                  display: 'block',
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '6px 10px',
+                  borderBottom: '1px solid var(--line-soft)',
+                  fontSize: '0.78rem',
+                  color: 'var(--text-dim)',
+                  cursor: 'pointer',
+                  background: value === null ? 'var(--surface-sunken)' : 'transparent',
+                }}
+              >
+                — clear selection —
+              </button>
+            )}
             {filtered.length === 0 ? (
               <div style={{ padding: 12, textAlign: 'center', color: 'var(--text-dim)', fontSize: '0.8rem' }}>{emptyMessage}</div>
             ) : (

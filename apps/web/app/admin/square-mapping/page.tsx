@@ -108,14 +108,18 @@ function ProductList({ onSelect, refreshKey }: { onSelect: (itemGroupId: string)
           onChange={(e) => setFilter(e.target.value)}
           style={{ flex: 1, padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--line)', fontSize: '0.9rem' }}
         />
-        <select
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as 'needsAttention' | 'name')}
-          style={{ padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--line)', fontSize: '0.9rem', background: 'var(--surface)' }}
-        >
-          <option value="needsAttention">Needs attention first</option>
-          <option value="name">Alphabetical</option>
-        </select>
+        <div style={{ minWidth: 220 }}>
+          <SearchableSelect
+            value={sortBy}
+            options={[
+              { id: 'needsAttention', label: 'Needs attention first' },
+              { id: 'name', label: 'Alphabetical' },
+            ]}
+            onChange={(id) => id && setSortBy(id as 'needsAttention' | 'name')}
+            showId={false}
+            allowClear={false}
+          />
+        </div>
       </div>
       {filtered.length === 0 ? (
         <div className="empty-state"><p className="empty-state-title">No products match</p></div>

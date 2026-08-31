@@ -1,5 +1,29 @@
 import { z } from 'zod'
 
+/// Normalise an operator-typed name to Title Case: first letter of the
+/// string and first letter after each whitespace run are uppercased,
+/// everything else is lowercased. Used at the create-input boundary so
+/// "black", "BLACK", and "Black" all land in the DB as "Black". Empty /
+/// whitespace-only input round-trips as empty (schema `.trim().min(1)`
+/// already rejects those before this runs).
+///
+/// Exception: short all-uppercase words (≤ 4 letters, letters only) are
+/// preserved verbatim so size codes like S / M / L / XL / XXL / XXXL /
+/// XXLL stay as-is instead of collapsing to "Xl" / "Xxl". Longer all-caps
+/// input like "SMALL" still normalises to "Small" — the assumption is that
+/// operators typed those in anger, not intent.
+export function titleCase(input: string): string {
+  return input
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .map((w) => (isShortAcronym(w) ? w : w[0]!.toUpperCase() + w.slice(1).toLowerCase()))
+    .join(' ')
+}
+
+function isShortAcronym(word: string): boolean {
+  return word.length <= 4 && /^[A-Z]+$/.test(word)
+}
+
 export const locationKindSchema = z.enum(['MARKET', 'WAREHOUSE'])
 export type LocationKind = z.infer<typeof locationKindSchema>
 
@@ -50,11 +74,16 @@ export const syncSquareLocationsResultSchema = z.object({
 export type SyncSquareLocationsResult = z.infer<typeof syncSquareLocationsResultSchema>
 
 /// Family-level ("what the cashier taps") sellable unit. StockLevel.variationId
-/// points at rows of this shape.
+/// points at rows of this shape. `categoryPath` is the ancestor chain of the
+/// item-group's category, root-first, INCLUDING the leaf itself — used by
+/// intake to render the full folder trail so a search matching an ancestor
+/// name ("Scarves") makes it obvious which parent folder the row belongs to.
+/// `categoryName` remains the leaf name for callers that only need that.
 export const variationSummarySchema = z.object({
   id: z.string(),
   itemGroupName: z.string(),
   categoryName: z.string(),
+  categoryPath: z.array(z.string()),
   colourFamilyName: z.string(),
   sizeOptionName: z.string(),
 })
@@ -115,9 +144,9 @@ export type SizeOptionDto = z.infer<typeof sizeOptionSchema>
 /// invents a colliding one by hand.
 export const createWarehouseVariantInputSchema = z.object({
   categoryId: z.string().min(1),
-  itemGroupName: z.string().trim().min(1).max(120),
+  itemGroupName: z.string().trim().min(1).max(120).transform(titleCase),
   colourFamilyId: z.string().min(1),
-  colourVariantName: z.string().trim().min(1).max(120),
+  colourVariantName: z.string().trim().min(1).max(120).transform(titleCase),
   sizeOptionId: z.string().min(1),
 })
 export type CreateWarehouseVariantInput = z.infer<typeof createWarehouseVariantInputSchema>
@@ -267,7 +296,7 @@ export type ItemGroupDetail = z.infer<typeof itemGroupDetailSchema>
 /// ItemGroup ("Color", "Size", "Style", or an operator-typed custom name).
 /// P2002 collision surfaces as a Conflict (axis already exists on this product).
 export const createProductAttributeInputSchema = z.object({
-  name: z.string().trim().min(1).max(50),
+  name: z.string().trim().min(1).max(50).transform(titleCase),
   displayOrder: z.number().int().optional(),
 })
 export type CreateProductAttributeInput = z.infer<typeof createProductAttributeInputSchema>
@@ -275,7 +304,7 @@ export type CreateProductAttributeInput = z.infer<typeof createProductAttributeI
 /// POST /catalog/item-groups/:id/attributes/:attrId/values — add a new
 /// allowed value on an existing axis (e.g. "XL" on the Size axis).
 export const createProductAttributeValueInputSchema = z.object({
-  value: z.string().trim().min(1).max(100),
+  value: z.string().trim().min(1).max(100).transform(titleCase),
   displayOrder: z.number().int().optional(),
 })
 export type CreateProductAttributeValueInput = z.infer<typeof createProductAttributeValueInputSchema>
@@ -399,6 +428,40 @@ export const catalogBrowseResponseSchema = z.object({
 })
 export type CatalogBrowseResponse = z.infer<typeof catalogBrowseResponseSchema>
 
+/// One hit from GET /catalog/search?q=…. `kind` decides where the client
+/// navigates on click:
+///   - 'folder'     → /admin/catalog?folderId=…
+///   - 'item-group' → /admin/catalog/g/[id]
+///   - 'item'       → /admin/catalog/i/[warehouseVariantId] (leaf SKU)
+/// `row` reuses the existing folder-tile shape so results render with the
+/// same tile; for an 'item' hit the counts collapse to that single SKU
+/// (itemCount=1, totalQty=onHand). `path` is the ancestor chain root-first
+/// including the container folder(s) but EXCLUDING the hit itself — so a
+/// matched ItemGroup shows the categories it lives under, and an Item hit
+/// shows those plus the parent product name.
+export const catalogSearchHitSchema = z.object({
+  kind: z.enum(['folder', 'item-group', 'item']),
+  row: catalogFolderRowSchema,
+  path: z.array(catalogCrumbSchema),
+})
+export type CatalogSearchHit = z.infer<typeof catalogSearchHitSchema>
+
+/// Deep-search response. `query` echoes the trimmed query the server
+/// actually ran (so the client can guard against out-of-order results).
+/// `hits` is the flat merged list, folders first then item-groups, each
+/// group ordered by name. Location echo mirrors browseFolder for the
+/// location-picker's current-selection UI.
+export const catalogSearchResponseSchema = z.object({
+  query: z.string(),
+  hits: z.array(catalogSearchHitSchema),
+  location: z.object({
+    id: z.string(),
+    name: z.string(),
+    kind: z.enum(['WAREHOUSE', 'MARKET']),
+  }).nullable(),
+})
+export type CatalogSearchResponse = z.infer<typeof catalogSearchResponseSchema>
+
 /// Leaf-level row: one WarehouseVariant, with warehouse-wide on-hand and
 /// unit cost. Value = onHand × unitCostCents (client renders as dollars).
 export const catalogItemRowSchema = z.object({
@@ -502,7 +565,7 @@ export type StockCorrectionResult = z.infer<typeof stockCorrectionResultSchema>
 /// folder end up pointing at the same row instead of creating siblings.
 export const createCategoryInputSchema = z.object({
   parentId: z.string().nullable().optional(),
-  name: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1).max(120).transform(titleCase),
 })
 export type CreateCategoryInput = z.infer<typeof createCategoryInputSchema>
 
@@ -527,34 +590,66 @@ export type CategoryTreeNode = z.infer<typeof categoryTreeNodeSchema>
 ///   2. Colours only (no primary): one row × colours → up to M SKUs
 ///   3. Single SKU (no axes at all): `colors: []` and `primaryAxis: null`
 ///      → exactly one SKU
-export const createProductInputSchema = z.object({
-  categoryId: z.string().min(1),
-  itemGroupName: z.string().trim().min(1).max(120),
-  /// The row axis. Named freely so operators can label it "Yarn count",
-  /// "Fit", etc. Canonical names (`Size`, `Style`) are treated no
-  /// differently from custom on the server side; the UI groups them.
-  primaryAxis: z
-    .object({
-      name: z.string().trim().min(1).max(50),
-      values: z.array(z.string().trim().min(1).max(100)).min(1),
-    })
-    .nullable(),
-  /// Colour axis values. Empty array = product has no colour axis (e.g.
-  /// Dryer Balls). Otherwise every colour becomes a ProductAttributeValue
-  /// under a `Color` axis and the matrix uses colours as columns.
-  colors: z.array(z.string().trim().min(1).max(100)).default([]),
-  /// Quantity per matrix cell. Keys are `${primaryValue ?? '__none__'}::${color ?? '__none__'}`.
-  /// Only non-zero cells produce SKUs; cells omitted or set to zero are
-  /// treated as "not carrying that combination yet" — a later intake
-  /// flow can still create them.
-  quantities: z.record(z.string(), z.number().int().min(0)),
-  /// Required. Applies to every created SKU.
-  unitCostCents: z.number().int().min(0),
-  /// Photos per matrix cell, keyed identically to `quantities`. Already
-  /// uploaded (to Cloudinary) by the time this arrives -- these are
-  /// URLs, not file bytes. A cell absent here just gets photoUrls: [].
-  photoUrls: z.record(z.string(), z.array(z.string().url())).default({}),
-})
+export const createProductInputSchema = z
+  .object({
+    categoryId: z.string().min(1),
+    itemGroupName: z.string().trim().min(1).max(120),
+    /// The row axis. Named freely so operators can label it "Yarn count",
+    /// "Fit", etc. Canonical names (`Size`, `Style`) are treated no
+    /// differently from custom on the server side; the UI groups them.
+    primaryAxis: z
+      .object({
+        name: z.string().trim().min(1).max(50),
+        values: z.array(z.string().trim().min(1).max(100)).min(1),
+      })
+      .nullable(),
+    /// Colour axis values. Empty array = product has no colour axis (e.g.
+    /// Dryer Balls). Otherwise every colour becomes a ProductAttributeValue
+    /// under a `Color` axis and the matrix uses colours as columns.
+    colors: z.array(z.string().trim().min(1).max(100)).default([]),
+    /// Quantity per matrix cell. Keys are `${primaryValue ?? '__none__'}::${color ?? '__none__'}`.
+    /// Only non-zero cells produce SKUs; cells omitted or set to zero are
+    /// treated as "not carrying that combination yet" — a later intake
+    /// flow can still create them.
+    quantities: z.record(z.string(), z.number().int().min(0)),
+    /// Required. Applies to every created SKU.
+    unitCostCents: z.number().int().min(0),
+    /// Photos per matrix cell, keyed identically to `quantities`. Already
+    /// uploaded (to Cloudinary) by the time this arrives -- these are
+    /// URLs, not file bytes. A cell absent here just gets photoUrls: [].
+    photoUrls: z.record(z.string(), z.array(z.string().url())).default({}),
+  })
+  /// Normalise every operator-typed name to Title Case at the input
+  /// boundary so DB rows are consistent regardless of how the operator
+  /// typed them. The matrix keys (`${primary}::${colour}`) must be
+  /// re-mapped alongside the axis values so `input.quantities` still
+  /// aligns with the (now-normalised) `primaryAxis.values` / `colors`.
+  /// The `__none__` sentinel is preserved verbatim (it's a marker, not a
+  /// user-visible name).
+  .transform((raw) => {
+    const NONE = '__none__'
+    const t = (s: string) => (s === NONE ? NONE : titleCase(s))
+    const remapKey = (k: string) => {
+      const [p, c] = k.split('::')
+      if (p === undefined || c === undefined) return k
+      return `${t(p)}::${t(c)}`
+    }
+    const remap = <V,>(rec: Record<string, V>): Record<string, V> => {
+      const out: Record<string, V> = {}
+      for (const [k, v] of Object.entries(rec)) out[remapKey(k)] = v
+      return out
+    }
+    return {
+      ...raw,
+      itemGroupName: titleCase(raw.itemGroupName),
+      primaryAxis: raw.primaryAxis
+        ? { name: titleCase(raw.primaryAxis.name), values: raw.primaryAxis.values.map(t) }
+        : null,
+      colors: raw.colors.map(t),
+      quantities: remap(raw.quantities),
+      photoUrls: remap(raw.photoUrls),
+    }
+  })
 export type CreateProductInput = z.input<typeof createProductInputSchema>
 
 /// One row per SKU that actually got created (non-zero cells only).

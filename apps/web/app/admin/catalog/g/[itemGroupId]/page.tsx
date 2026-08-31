@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
 import type { CatalogItemGroupPage as ItemGroupPageDto, CatalogItemRow, LocationDto } from '@winterborn/shared'
+import { CopyButton } from '../../../../../components/CopyButton'
 import { LocationPicker } from '../../../../../components/LocationPicker'
 import { PageHeader } from '../../../../../components/PageHeader'
 import { RequireAuth } from '../../../../../components/RequireAuth'
@@ -99,6 +100,11 @@ function ItemGroupView() {
         eyebrow="Item group"
         title={data?.itemGroup.name ?? 'Item group'}
         description="Every SKU in this group with its on-hand at the selected location. Click a card to see photos, per-warehouse counts, and edit."
+        titleAdornment={
+          data?.itemGroup.name ? (
+            <CopyButton text={data.itemGroup.name} label="Copy product name" size="sm" />
+          ) : undefined
+        }
       />
 
       {error && <p className="error-banner">{error}</p>}
@@ -222,9 +228,15 @@ function ItemTile({ item }: { item: CatalogItemRow }) {
         </div>
         <div
           className="list-row-meta"
-          style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}
         >
-          {item.sizeOptionName} · {item.warehouseSku}
+          <span
+            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+            title={`${item.sizeOptionName} · ${item.warehouseSku}`}
+          >
+            {item.sizeOptionName} · {item.warehouseSku}
+          </span>
+          <CopyButton text={item.warehouseSku} label="Copy SKU" size="sm" />
         </div>
       </div>
     </div>

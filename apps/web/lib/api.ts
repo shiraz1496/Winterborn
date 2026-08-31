@@ -14,6 +14,7 @@ import {
   catalogItemDetailSchema,
   catalogItemGroupPageSchema,
   catalogItemRowSchema,
+  catalogSearchResponseSchema,
   categorySchema,
   categoryTreeNodeSchema,
   colourFamilySchema,
@@ -252,6 +253,16 @@ export function browseFolder(folderId?: string, locationId?: string) {
   )
 }
 
+/// Deep tree-wide search over folder and product names. Empty `q` returns
+/// zero hits — callers should short-circuit and skip this call in that case.
+export function searchCatalog(q: string, locationId?: string) {
+  return request(
+    'GET',
+    `/catalog/search${qs({ q, locationId })}`,
+    catalogSearchResponseSchema,
+  )
+}
+
 export function browseCatalogItems(itemGroupId: string, locationId?: string) {
   return request(
     'GET',
@@ -476,6 +487,13 @@ export function addBoxLine(boxId: string, input: { warehouseVariantId: string; q
 
 export function dispatchBox(id: string) {
   return request('POST', `/boxes/${id}/dispatch`, dispatchResultSchema)
+}
+
+/// Delete a still-PACKING box. Used by the re-pack flow before writing
+/// a fresh box for the same request. Dispatched boxes cannot be deleted
+/// (server enforces).
+export function discardBox(id: string) {
+  return request('DELETE', `/boxes/${id}`, z.object({ id: z.string(), discarded: z.boolean() }))
 }
 
 export function getBoxLabel(id: string) {

@@ -408,9 +408,15 @@ model RestockRequest {
   createdAt   DateTime      @default(now())
   closedAt    DateTime?
 
-  location Location             @relation(fields: [locationId], references: [id])
-  lines    RestockRequestLine[]
-  boxes    Box[]
+  location  Location             @relation(fields: [locationId], references: [id])
+  lines     RestockRequestLine[]
+  boxes     Box[]
+  /// Per-line back-reference so a single Box can fulfil multiple
+  /// requests. When a physical box carries lines from more than one
+  /// request, Box.requestId is NULL and each BoxLine.requestId points
+  /// back here individually. Box.requestId stays populated for the
+  /// common single-request case to keep display code simple.
+  boxLines  BoxLine[]
 
   @@index([locationId, state])
 }
@@ -465,15 +471,24 @@ model Box {
 }
 
 model BoxLine {
-  id                 String @id @default(cuid())
+  id                 String  @id @default(cuid())
   boxId              String
   warehouseVariantId String
+  /// Which RestockRequest this line fulfils. Nullable for "loose" boxes
+  /// packed without a request. Multi-request boxes carry a mix of
+  /// requestIds across their lines; single-request boxes typically all
+  /// share one, mirroring Box.requestId. RESTRICT matches the pattern
+  /// on RestockRequestLine — a Request with box history must not be
+  /// silently deletable.
+  requestId          String?
   quantity           Int
 
   box              Box              @relation(fields: [boxId], references: [id], onDelete: Cascade)
   warehouseVariant WarehouseVariant @relation(fields: [warehouseVariantId], references: [id])
+  request          RestockRequest?  @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([boxId])
+  @@index([requestId])
 }
 
 model Load {

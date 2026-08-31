@@ -27,6 +27,11 @@ export class InsufficientStockException extends BadRequestException {
 export interface PackBoxLineInput {
   warehouseVariantId: string
   quantity: number
+  /// Optional per-line request ownership — set when a single physical
+  /// box fulfils lines from more than one RestockRequest (the merged
+  /// destination pack view). When omitted, the line inherits the
+  /// top-level `requestId` on the pack input.
+  requestId?: string
 }
 
 export interface PackBoxInput {
@@ -147,14 +152,34 @@ export class BoxesService {
     // before dispatch never orphans the printed label.
     const qrToken = randomBytes(16).toString('base64url')
 
+    // Resolve per-line requestId: prefer line-level (set by the merged
+    // destination pack view where auto-allocation decides per line), fall
+    // back to the top-level (backwards compat with the single-request
+    // pack view). Box.requestId is only populated when every line agrees
+    // on the same request — otherwise it stays NULL and the mapping is
+    // per-line only.
+    const linesWithRequest = input.lines.map((l) => ({
+      warehouseVariantId: l.warehouseVariantId,
+      quantity: l.quantity,
+      requestId: l.requestId ?? input.requestId ?? null,
+    }))
+    const distinctRequestIds = new Set(
+      linesWithRequest.map((l) => l.requestId).filter((id): id is string => id != null),
+    )
+    const uniformRequestId = distinctRequestIds.size === 1 ? [...distinctRequestIds][0]! : null
+    const boxRequestId = uniformRequestId ?? input.requestId ?? null
+    // If lines carry a mix of requestIds, we can't legitimately record any
+    // single request on the Box row — the mapping lives on the lines.
+    const finalBoxRequestId = distinctRequestIds.size > 1 ? null : boxRequestId
+
     return this.prisma.box.create({
       data: {
-        requestId: input.requestId ?? null,
+        requestId: finalBoxRequestId,
         destinationLocationId: input.destinationLocationId,
         qrToken,
         packedById: actor.id,
         packedAt: new Date(),
-        lines: { create: input.lines.map((l) => ({ warehouseVariantId: l.warehouseVariantId, quantity: l.quantity })) },
+        lines: { create: linesWithRequest },
       },
       include: { lines: true },
     })
@@ -175,7 +200,17 @@ export class BoxesService {
       actor?.role === 'MARKET_MANAGER' ? actor.locationId ?? undefined : undefined
     return this.prisma.box.findMany({
       where: {
-        ...(filter.requestId ? { requestId: filter.requestId } : {}),
+        // A box counts as "for request X" if either the box itself is
+        // pinned to that request (single-request path) or any of its
+        // lines is (multi-request path).
+        ...(filter.requestId
+          ? {
+              OR: [
+                { requestId: filter.requestId },
+                { lines: { some: { requestId: filter.requestId } } },
+              ],
+            }
+          : {}),
         ...(filter.destinationLocationId ? { destinationLocationId: filter.destinationLocationId } : {}),
         ...(scopedLocationId ? { destinationLocationId: scopedLocationId } : {}),
       },
@@ -193,6 +228,28 @@ export class BoxesService {
   /// human to confirm before /scan calls dispatch.
   async getByToken(qrToken: string) {
     return this.prisma.box.findUniqueOrThrow({ where: { qrToken }, include: { lines: true } })
+  }
+
+  /// Delete a PACKING box outright. Only allowed while the box is
+  /// still on the warehouse floor — a DISPATCHED / ARRIVED box is
+  /// already recorded in the ledger and cannot be silently removed.
+  /// Used by the re-pack flow: before writing a fresh packing box for
+  /// a request, the client asks the server to drop the stale one.
+  async discard(boxId: string) {
+    const box = await this.prisma.box.findUniqueOrThrow({
+      where: { id: boxId },
+      select: { state: true },
+    })
+    if (box.state !== 'PACKING') {
+      throw new BadRequestException(
+        `box cannot be discarded — state=${box.state} (only PACKING boxes can be removed)`,
+      )
+    }
+    // Cascade on BoxLine handles line deletion; LoadBox links are
+    // gone-when-box-is-gone by design (packing boxes shouldn't be on
+    // a Load yet, but the join row would orphan cleanly if so).
+    await this.prisma.box.delete({ where: { id: boxId } })
+    return { id: boxId, discarded: true }
   }
 
   async addLine(boxId: string, input: PackBoxLineInput) {
@@ -285,19 +342,26 @@ export class BoxesService {
       await this.prisma.box.update({ where: { id: boxId }, data: { state: 'DISPATCHED', dispatchedAt: now } })
     }
 
-    // Auto-advance the parent request to DISPATCHED on first box send.
-    if (box.requestId) {
-      const request = await this.prisma.restockRequest.findUnique({ where: { id: box.requestId } })
+    // Auto-advance every parent request this box helps fulfil to
+    // DISPATCHED on first box send. For a single-request box the set
+    // is just `{box.requestId}`; for a multi-request box the set comes
+    // from the line-level requestIds instead. Only PACKING requests
+    // move — later states (DISPATCHED, CLOSED) stay put.
+    const involvedRequestIds = new Set<string>()
+    if (box.requestId) involvedRequestIds.add(box.requestId)
+    for (const line of box.lines) if (line.requestId) involvedRequestIds.add(line.requestId)
+    for (const requestId of involvedRequestIds) {
+      const request = await this.prisma.restockRequest.findUnique({ where: { id: requestId } })
       if (request && request.state === 'PACKING') {
         await this.prisma.$transaction([
           this.prisma.restockRequest.update({
-            where: { id: box.requestId },
+            where: { id: requestId },
             data: { state: 'DISPATCHED' },
           }),
           this.prisma.auditLog.create({
             data: {
               entity: 'RestockRequest',
-              entityId: box.requestId,
+              entityId: requestId,
               field: 'state',
               oldValue: 'PACKING',
               newValue: 'DISPATCHED',
@@ -326,8 +390,16 @@ export class BoxesService {
    * as already received -- no double-add.
    */
   async receiveForRequest(requestId: string, actor?: CurrentUserPayload): Promise<{ boxesReceived: number; linesPosted: number }> {
+    // Include multi-request boxes whose ownership is only recorded at the
+    // line level, alongside the classic single-request boxes.
     const boxes = await this.prisma.box.findMany({
-      where: { requestId, state: { in: ['DISPATCHED', 'ARRIVED'] } },
+      where: {
+        state: { in: ['DISPATCHED', 'ARRIVED'] },
+        OR: [
+          { requestId },
+          { lines: { some: { requestId } } },
+        ],
+      },
       include: { lines: true },
     })
 
@@ -389,18 +461,51 @@ export class BoxesService {
         },
       },
     })
+    /// Multi-request boxes can carry two BoxLine rows for the same SKU
+    /// (one per request that asked for it). The printed label / QR
+    /// contents are for a physical picker who only cares about the
+    /// per-SKU total in this box — the request-level split lives in the
+    /// database and is surfaced elsewhere. Merge by warehouseVariantId
+    /// so the label reads "Capes 4-Shade Browns ×2" once, not two ×1
+    /// rows. First occurrence wins on ordering.
+    interface MergedLabelLine {
+      warehouseVariantId: string
+      itemGroupName: string
+      colourVariantName: string
+      sizeOptionName: string
+      warehouseSku: string
+      quantity: number
+    }
+    const mergedByVariant = new Map<string, MergedLabelLine>()
+    for (const l of box.lines) {
+      const existing = mergedByVariant.get(l.warehouseVariantId)
+      if (existing) {
+        existing.quantity += l.quantity
+      } else {
+        mergedByVariant.set(l.warehouseVariantId, {
+          warehouseVariantId: l.warehouseVariantId,
+          itemGroupName: l.warehouseVariant.itemGroup.name,
+          colourVariantName: l.warehouseVariant.colourVariant.name,
+          sizeOptionName: l.warehouseVariant.sizeOption.name,
+          warehouseSku: l.warehouseVariant.warehouseSku,
+          quantity: l.quantity,
+        })
+      }
+    }
+    const mergedLines = [...mergedByVariant.values()]
+
     return {
       qrToken: box.qrToken,
       destinationLocationId: box.destinationLocationId,
       destinationLocationName: box.destinationLocation.name,
-      lineCount: box.lines.length,
+      lineCount: mergedLines.length,
       packedAt: box.packedAt,
-      lines: box.lines.map((l) => ({
+      lines: mergedLines.map((l) => ({
         warehouseVariantId: l.warehouseVariantId,
-        itemGroupName: l.warehouseVariant.itemGroup.name,
-        colourVariantName: l.warehouseVariant.colourVariant.name,
-        sizeOptionName: l.warehouseVariant.sizeOption.name,
-        warehouseSku: l.warehouseVariant.warehouseSku,
+        itemGroupName: l.itemGroupName,
+        colourVariantName: l.colourVariantName,
+        sizeOptionName: l.sizeOptionName,
+        warehouseSku: l.warehouseSku,
         quantity: l.quantity,
       })),
     }
@@ -449,16 +554,21 @@ export class BoxesService {
 
     // Wrong-request check runs BEFORE any write. When the market
     // manager scans from a specific request's detail page, we get an
-    // expectedRequestId — if it doesn't match, refuse loudly and
-    // append nothing. This is what stops a mis-scan from silently
-    // adding stock to the market because the client caught the
-    // mismatch only after the fact.
-    if (expectedRequestId && box.requestId !== expectedRequestId) {
-      throw new BadRequestException({
-        message: `This box belongs to a different request. Nothing was recorded.`,
-        code: 'WRONG_REQUEST',
-        details: { boxRequestId: box.requestId },
-      })
+    // expectedRequestId — if the box has no line fulfilling that
+    // request (and isn't Box.requestId-pinned to it either), refuse
+    // loudly and append nothing. This is what stops a mis-scan from
+    // silently adding stock to the market because the client caught
+    // the mismatch only after the fact.
+    if (expectedRequestId) {
+      const linePinned = box.lines.some((l) => l.requestId === expectedRequestId)
+      const boxPinned = box.requestId === expectedRequestId
+      if (!linePinned && !boxPinned) {
+        throw new BadRequestException({
+          message: `This box belongs to a different request. Nothing was recorded.`,
+          code: 'WRONG_REQUEST',
+          details: { boxRequestId: box.requestId, boxLineRequestIds: [...new Set(box.lines.map((l) => l.requestId).filter(Boolean))] },
+        })
+      }
     }
 
     if (box.state !== 'DISPATCHED' && box.state !== 'ARRIVED') {
@@ -500,27 +610,49 @@ export class BoxesService {
       })
     }
 
-    // Parent-request progress + auto-close. Only meaningful if the box
-    // was packed against a request in the first place (loose boxes with
-    // requestId=null skip this).
-    let requestInfo: ReceiveBoxResult['request'] = null
-    if (box.requestId) {
+    // Parent-request progress + auto-close. For a multi-request box we
+    // process every request this box helps fulfil (each may auto-close
+    // independently once all of its sibling boxes have arrived). The
+    // response only reports one — the caller's expectedRequestId when
+    // provided, otherwise the box's primary requestId, otherwise the
+    // first request found on the lines — because the receive response
+    // schema is 1:1 with a single request today.
+    const affectedRequestIds = new Set<string>()
+    if (box.requestId) affectedRequestIds.add(box.requestId)
+    for (const line of box.lines) if (line.requestId) affectedRequestIds.add(line.requestId)
+
+    /// For a request X: count "boxes fulfilling X" and how many of those
+    /// are ARRIVED. A box fulfils X if Box.requestId=X or any BoxLine.requestId=X.
+    const progressFor = async (requestId: string) => {
       const siblingBoxes = await this.prisma.box.findMany({
-        where: { requestId: box.requestId },
+        where: {
+          OR: [
+            { requestId },
+            { lines: { some: { requestId } } },
+          ],
+        },
         select: { state: true },
       })
       const boxesTotal = siblingBoxes.length
       const boxesReceived = siblingBoxes.filter((b) => b.state === 'ARRIVED').length
+      return { boxesTotal, boxesReceived }
+    }
+
+    let requestInfo: ReceiveBoxResult['request'] = null
+    const requestsInfo: ReceiveBoxResult['requests'] = []
+    const primaryRequestId =
+      expectedRequestId && affectedRequestIds.has(expectedRequestId)
+        ? expectedRequestId
+        : (box.requestId ?? box.lines.find((l) => l.requestId)?.requestId ?? null)
+
+    for (const requestId of affectedRequestIds) {
+      const { boxesTotal, boxesReceived } = await progressFor(requestId)
       const allReceived = boxesTotal > 0 && boxesReceived === boxesTotal
-      const request = await this.prisma.restockRequest.findUnique({ where: { id: box.requestId } })
+      const request = await this.prisma.restockRequest.findUnique({ where: { id: requestId } })
       let currentState = request?.state ?? 'CLOSED'
       let closed = currentState === 'CLOSED'
 
       if (allReceived && request && request.state !== 'CLOSED') {
-        // Close directly here rather than going through RequestsService.
-        // The role gate has already been passed by this endpoint's own
-        // guards, and we've already posted every INTAKE row —
-        // receiveForRequest would just re-idempotency-check them.
         const updated = await this.prisma.restockRequest.update({
           where: { id: request.id },
           data: { state: 'CLOSED', closedAt: new Date() },
@@ -529,12 +661,21 @@ export class BoxesService {
         closed = true
       }
 
-      requestInfo = {
-        id: box.requestId,
+      const progress = {
+        id: requestId,
         state: currentState,
         boxesReceived,
         boxesTotal,
         closed,
+      }
+      // Primary goes first in the array so callers that just want "the
+      // main one" can grab `requests[0]`. `request` stays for backwards
+      // compat with older UI code.
+      if (requestId === primaryRequestId) {
+        requestInfo = progress
+        requestsInfo.unshift(progress)
+      } else {
+        requestsInfo.push(progress)
       }
     }
 
@@ -556,6 +697,7 @@ export class BoxesService {
         })),
       },
       request: requestInfo,
+      requests: requestsInfo,
     }
   }
 }

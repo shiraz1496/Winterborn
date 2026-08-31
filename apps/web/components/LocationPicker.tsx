@@ -2,11 +2,13 @@
 
 import { useMemo } from 'react'
 import type { LocationDto } from '@winterborn/shared'
+import { SearchableSelect, type SearchableOption } from './SearchableSelect'
 
-/// Location dropdown for the catalog browser. Splits options into
-/// "Warehouses" and "Markets" groups (via <optgroup>) so the two kinds
-/// stay visually separated. Value is the current location id — parent
-/// state, usually driven by a URL query param.
+/// Location dropdown for the catalog browser. Uses the app-wide
+/// SearchableSelect so behaviour matches every other dropdown (search,
+/// keyboard nav, hover highlight). Warehouses come first, then markets;
+/// each option is prefixed with its kind so the two groups stay
+/// distinguishable in the flat list SearchableSelect renders.
 ///
 /// Hidden entirely for market managers: they're pinned server-side to
 /// their own market and have nothing to switch to. Callers still render
@@ -24,17 +26,20 @@ export function LocationPicker({
   locations: LocationDto[]
   canSwitch: boolean
 }) {
-  const { warehouses, markets } = useMemo(() => {
-    const w: LocationDto[] = []
-    const m: LocationDto[] = []
+  const options = useMemo<SearchableOption[]>(() => {
+    const w: SearchableOption[] = []
+    const m: SearchableOption[] = []
     for (const loc of locations) {
       if (!loc.isActive) continue
-      if (loc.kind === 'WAREHOUSE') w.push(loc)
-      else m.push(loc)
+      if (loc.kind === 'WAREHOUSE') {
+        w.push({ id: loc.id, label: `Warehouse · ${loc.name}` })
+      } else {
+        m.push({ id: loc.id, label: `Market · ${loc.name}` })
+      }
     }
-    w.sort((a, b) => a.name.localeCompare(b.name))
-    m.sort((a, b) => a.name.localeCompare(b.name))
-    return { warehouses: w, markets: m }
+    w.sort((a, b) => a.label.localeCompare(b.label))
+    m.sort((a, b) => a.label.localeCompare(b.label))
+    return [...w, ...m]
   }, [locations])
 
   if (!canSwitch) return null
@@ -47,40 +52,21 @@ export function LocationPicker({
         gap: 8,
         fontSize: '0.82rem',
         color: 'var(--text-dim)',
+        minWidth: 260,
       }}
     >
-      <span style={{ fontWeight: 600 }}>Location:</span>
-      <select
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: '6px 10px',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--line)',
-          background: 'var(--surface)',
-          fontSize: '0.85rem',
-          minWidth: 200,
-        }}
-      >
-        {warehouses.length > 0 && (
-          <optgroup label="Warehouses">
-            {warehouses.map((loc) => (
-              <option key={loc.id} value={loc.id}>
-                {loc.name}
-              </option>
-            ))}
-          </optgroup>
-        )}
-        {markets.length > 0 && (
-          <optgroup label="Markets">
-            {markets.map((loc) => (
-              <option key={loc.id} value={loc.id}>
-                {loc.name}
-              </option>
-            ))}
-          </optgroup>
-        )}
-      </select>
+      <span style={{ fontWeight: 600, flexShrink: 0 }}>Location:</span>
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <SearchableSelect
+          value={value}
+          options={options}
+          placeholder="— pick a location —"
+          onChange={(id) => id && onChange(id)}
+          size="sm"
+          showId={false}
+          allowClear={false}
+        />
+      </div>
     </label>
   )
 }
