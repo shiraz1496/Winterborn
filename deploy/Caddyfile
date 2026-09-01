@@ -1,0 +1,13 @@
+# Caddy config for the production deploy (mounted by
+# docker-compose.prod.yml). WEB_DOMAIN and API_DOMAIN come from .env.
+#
+# Caddy automatically obtains and renews HTTPS certificates for both
+# hostnames -- no manual certificate work, ever.
+
+{$WEB_DOMAIN} {
+	reverse_proxy web:3000
+}
+
+{$API_DOMAIN} {
+	reverse_proxy api:3001
+}

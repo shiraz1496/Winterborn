@@ -1,0 +1,106 @@
+# Production compose file for a single-server deploy (e.g. Hetzner).
+# See HETZNER-DEPLOY.md for the full step-by-step checklist.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Reads configuration from a `.env` file sitting next to this file
+# (copy deploy/production.env.example to .env and fill it in).
+#
+# NOT the same as docker-compose.yml, which is local-dev-only
+# (Postgres + Redis exposed on localhost for `pnpm dev`).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: winterborn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: winterborn
+    # No `ports:` on purpose -- the database is reachable only by the
+    # other containers on this internal network, never from the internet.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U winterborn']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Where the Next.js server forwards the browser's same-origin
+      # /backend/* calls (next.config.mjs rewrites). `api` is the API
+      # container's name on the internal Docker network. Runtime-only --
+      # changing it needs a restart, not a rebuild.
+      BACKEND_INTERNAL_URL: http://api:3001
+    depends_on:
+      - api
+
+  # Caddy is the only container exposed to the internet. It terminates
+  # HTTPS (certificates are fetched and renewed automatically) and
+  # forwards traffic to web/api based on the hostname.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # ------------------------------------------------------------------
+  # OPTIONAL Square background processes (spec §4.3/§4.4, mirrors
+  # render.yaml). Leave commented out until the Square credentials in
+  # .env are real -- they crash-loop without them. Uncomment both blocks
+  # and run `docker compose -f docker-compose.prod.yml up -d` again.
+  # ------------------------------------------------------------------
+  #
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: apps/api/Dockerfile
+  #   command: node apps/api/dist/cli/drain-inbox.js
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #
+  # poller:
+  #   build:
+  #     context: .
+  #     dockerfile: apps/api/Dockerfile
+  #   # Every 20 minutes, per spec §7.2 -- the self-heal window for a
+  #   # dropped webhook (same cadence as render.yaml's cron).
+  #   command: sh -c "while true; do node apps/api/dist/cli/poll-orders.js; sleep 1200; done"
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -17,6 +17,9 @@ const backendInternalUrl = process.env.BACKEND_INTERNAL_URL ?? 'http://localhost
 export default {
   reactStrictMode: true,
   outputFileTracingRoot: repoRoot,
+  // Emit a self-contained server (apps/web/Dockerfile copies it) -- has
+  // no effect on `next dev` or on Vercel deploys.
+  output: 'standalone',
   async rewrites() {
     return [
       { source: '/backend/:path*', destination: `${backendInternalUrl}/:path*` },
