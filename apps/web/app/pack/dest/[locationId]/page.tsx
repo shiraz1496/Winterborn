@@ -13,6 +13,7 @@ import type {
 } from '@winterborn/shared'
 import { BoxLabel } from '../../../../components/BoxLabel'
 import { PageHeader } from '../../../../components/PageHeader'
+import { SectionHeading } from '../../../../components/SectionHeading'
 import { ProductThumb, firstPhoto } from '../../../../components/ProductThumb'
 import { RequireAuth } from '../../../../components/RequireAuth'
 import { Swatch } from '../../../../components/Swatch'
@@ -29,7 +30,7 @@ import {
   listVariations,
   listWarehouseVariants,
   packBox,
-  stockByVariant,
+  availableAtWarehouse,
   transitionRequest,
 } from '../../../../lib/api'
 
@@ -208,13 +209,18 @@ function DestinationPackBody() {
       setVariantMeta(metaMap)
       setVariations(await listVariations())
 
-      // Warehouse on-hand for the "N available" chip.
-      const warehouseLoc = allLocations.find((l: LocationDto) => l.kind === 'WAREHOUSE')
-      if (warehouseLoc) {
+      // Net available at the warehouse (on-hand minus units already
+      // committed to open PACKING boxes) powers the "N available" chip
+      // and the over-allocation banner. Reading raw on-hand instead
+      // used to let this dest view show "3 available" while the pack
+      // service would then reject 3 because 2 were already reserved by
+      // another box in progress.
+      const variantIds = [...metaMap.keys()]
+      if (variantIds.length > 0) {
         try {
-          const rows = await stockByVariant(warehouseLoc.id)
+          const { available } = await availableAtWarehouse(variantIds)
           const map = new Map<string, number>()
-          for (const r of rows) if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
+          for (const k of Object.keys(available)) map.set(k, available[k] ?? 0)
           setWarehouseStock(map)
         } catch {
           // Non-fatal — the pack UI still works without the warning.
@@ -515,18 +521,16 @@ function DestinationPackBody() {
       /// they deliberately set to 0 because it's unavailable would come
       /// back at 1). Pre-fill runs once per page load, no more.
       setDraft(new Map())
-      // Refresh boxes + warehouse stock in parallel.
-      const [fresh, allLocations] = await Promise.all([
-        listBoxes({ destinationLocationId: locationId }),
-        listLocations(),
-      ])
+      const fresh = await listBoxes({ destinationLocationId: locationId })
       setBoxes(fresh)
-      const warehouseLoc = allLocations.find((l) => l.kind === 'WAREHOUSE')
-      if (warehouseLoc) {
+      // Refresh net-available so the remaining unpacked lines show
+      // updated counters after this box's stock was reserved.
+      const variantIds = [...variantMeta.keys()]
+      if (variantIds.length > 0) {
         try {
-          const rows = await stockByVariant(warehouseLoc.id)
+          const { available } = await availableAtWarehouse(variantIds)
           const map = new Map<string, number>()
-          for (const r of rows) if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
+          for (const k of Object.keys(available)) map.set(k, available[k] ?? 0)
           setWarehouseStock(map)
         } catch {
           // Non-fatal.
@@ -854,12 +858,16 @@ function DestinationPackBody() {
         </div>
       )}
 
-      <div className="section-heading">
-        <h2>Resolve to variants</h2>
-      </div>
-      <p className="section-desc">
-        One card per product family across every request. The <em>requested</em> total is the sum of what every open request to this market wants; the <em>packed</em> total is what's already in boxes for this destination.
-      </p>
+      <SectionHeading
+        title="Resolve to variants"
+        description={
+          <>
+            One card per product family across every request. The <em>requested</em> total is the sum of what every
+            open request to this market wants; the <em>packed</em> total is what&apos;s already in boxes for this
+            destination.
+          </>
+        }
+      />
 
       {(() => {
         // Group EVERY line from EVERY request by variation, preserving

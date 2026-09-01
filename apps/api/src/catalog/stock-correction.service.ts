@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
+import { AuditService } from '../audit/audit.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 
 /// Manual reconciliation of a physical count to system. The user supplies a
@@ -25,6 +26,7 @@ export class StockCorrectionService {
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
     private readonly ledgerRead: LedgerReadService,
+    private readonly audit: AuditService,
   ) {}
 
   async correct(raw: StockCorrectionInput, user: CurrentUserPayload): Promise<StockCorrectionResult> {
@@ -67,6 +69,23 @@ export class StockCorrectionService {
     })
 
     const onHand = await this.currentOnHand(input.warehouseVariantId, input.locationId)
+
+    // Also record the reconciliation intent in AuditLog. LedgerEvent stores
+    // the movement itself; AuditLog captures who intervened and why in a
+    // form the 6W viewer can group with other admin actions.
+    await this.audit.record(null, {
+      entity: 'WarehouseVariant',
+      entityId: wv.id,
+      field: 'onHandCorrection',
+      oldValue: String(current),
+      newValue: String(onHand),
+      actorId: user.id,
+      actorRole: user.role,
+      locationId: input.locationId,
+      reason: input.note ?? null,
+      source: 'UI',
+    })
+
     return { eventId: event.id, created: event.created, onHand, delta }
   }
 

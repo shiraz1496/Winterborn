@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type {
-  IntakeResult,
   VariationSummary,
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { FolderChainPicker } from '../../components/FolderChainPicker'
+import { CopyButton } from '../../components/CopyButton'
+import { InfoTooltip } from '../../components/InfoTooltip'
 import { PageHeader } from '../../components/PageHeader'
 import { ProductThumb, firstPhoto } from '../../components/ProductThumb'
 import { RequireAuth } from '../../components/RequireAuth'
@@ -17,6 +18,7 @@ import {
   listVariations,
   listWarehouseVariants,
   receiveIntake,
+  stockByVariant,
 } from '../../lib/api'
 import { useToast } from '../../lib/toast'
 
@@ -102,6 +104,7 @@ function IntakeBody() {
 
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [variants, setVariants] = useState<WarehouseVariantSummary[]>([])
+  const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
   const [query, setQuery] = useState('')
   const [families, setFamilies] = useState<DraftFamily[]>([])
   const [openId, setOpenId] = useState<string | null>(null)
@@ -111,10 +114,13 @@ function IntakeBody() {
   const [lastResults, setLastResults] = useState<FamilyResult[]>([])
 
   useEffect(() => {
-    Promise.all([listVariations(), listWarehouseVariants()])
-      .then(([v, wv]) => {
+    Promise.all([listVariations(), listWarehouseVariants(), stockByVariant()])
+      .then(([v, wv, stock]) => {
         setVariations(v)
         setVariants(wv)
+        const m = new Map<string, number>()
+        for (const s of stock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
+        setOnHandByVariantId(m)
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the warehouse catalog.'))
   }, [])
@@ -129,6 +135,14 @@ function IntakeBody() {
     for (const [, list] of m) list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
     return m
   }, [variants])
+
+  const familyOnHand = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const [variationId, list] of variantsByVariation) {
+      m.set(variationId, list.reduce((sum, wv) => sum + (onHandByVariantId.get(wv.id) ?? 0), 0))
+    }
+    return m
+  }, [variantsByVariation, onHandByVariantId])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -245,6 +259,7 @@ function IntakeBody() {
     setBusy(true)
     setError(null)
     const results: FamilyResult[] = []
+    const freshOnHand: Array<[string, number]> = []
     try {
       for (const f of families) {
         const entries = Object.entries(f.qtyByVariant).filter(([, q]) => q > 0)
@@ -260,6 +275,7 @@ function IntakeBody() {
             note: f.note.trim() || undefined,
           })
           lines.push({ colourVariantName: v.colourVariantName, quantity: qty, onHand: res.onHand, created: res.created })
+          freshOnHand.push([variantId, res.onHand])
         }
         results.push({
           variationId: f.variationId,
@@ -270,6 +286,13 @@ function IntakeBody() {
         })
       }
       setLastResults(results)
+      if (freshOnHand.length > 0) {
+        setOnHandByVariantId((prev) => {
+          const next = new Map(prev)
+          for (const [id, oh] of freshOnHand) next.set(id, oh)
+          return next
+        })
+      }
       toast.success(`Recorded intake — ${totalUnits} unit${totalUnits === 1 ? '' : 's'} across ${lineCount} variant${lineCount === 1 ? '' : 's'}`)
       setFamilies([])
       setOpenId(null)
@@ -290,9 +313,16 @@ function IntakeBody() {
   /// queue — that would double-count any qty the operator entered.
   async function onProductCreated(summary: { skusCreated: number; totalUnitsRecorded: number; itemGroupName: string }) {
     setCreating(false)
-    const [freshVariations, freshVariants] = await Promise.all([listVariations(), listWarehouseVariants()])
+    const [freshVariations, freshVariants, freshStock] = await Promise.all([
+      listVariations(),
+      listWarehouseVariants(),
+      stockByVariant(),
+    ])
     setVariations(freshVariations)
     setVariants(freshVariants)
+    const m = new Map<string, number>()
+    for (const s of freshStock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
+    setOnHandByVariantId(m)
     toast.success(
       `Created ${summary.itemGroupName} — ${summary.skusCreated} SKU${summary.skusCreated === 1 ? '' : 's'}` +
       (summary.totalUnitsRecorded > 0
@@ -322,7 +352,10 @@ function IntakeBody() {
           <div className="stack" style={{ gap: 10 }}>
             {lastResults.map((r) => (
               <div key={r.variationId} style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-                <div className="list-row-title">{r.itemGroupName}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <span className="list-row-title">{r.itemGroupName}</span>
+                  <CopyButton text={r.itemGroupName} label="Copy product name" size="sm" />
+                </div>
                 <div className="list-row-meta" style={{ marginBottom: 6 }}>
                   {r.familyName} · {r.sizeName}
                 </div>
@@ -360,12 +393,24 @@ function IntakeBody() {
         <div className="list" style={{ marginBottom: 20 }}>
           {matches.map((v) => {
             const variantCount = variantsByVariation.get(v.id)?.length ?? 0
+            const onHand = familyOnHand.get(v.id) ?? 0
             return (
-              <button
+              // Search-result row: div+role=button so the CopyButton
+              // (a real <button>) can nest without invalid button-in-
+              // button HTML. Keyboard: Enter/Space adds the family.
+              <div
                 key={v.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => addFamily(v)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    addFamily(v)
+                  }
+                }}
                 className="list-row"
-                style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%' }}
+                style={{ border: '1px solid var(--line-strong)', textAlign: 'left', width: '100%', cursor: 'pointer' }}
               >
                 <ProductThumb
                   photoUrl={firstPhoto(variantsByVariation.get(v.id) ?? [])}
@@ -373,7 +418,12 @@ function IntakeBody() {
                   alt={v.itemGroupName}
                 />
                 <div className="list-row-body">
-                  <div className="list-row-title">{v.itemGroupName}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span className="list-row-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {v.itemGroupName}
+                    </span>
+                    <CopyButton text={v.itemGroupName} label="Copy product name" size="sm" />
+                  </div>
                   <div className="list-row-meta">
                     <span style={{ color: 'var(--text-faint)' }}>
                       {(v.categoryPath.length > 1 ? v.categoryPath.slice(1) : v.categoryPath).join(' › ')} ·{' '}
@@ -381,10 +431,19 @@ function IntakeBody() {
                     {v.colourFamilyName} · {v.sizeOptionName}
                   </div>
                 </div>
-                <span className="chip">
-                  {variantCount} variant{variantCount === 1 ? '' : 's'}
-                </span>
-              </button>
+                <div style={{ textAlign: 'right' }}>
+                  <div
+                    className="mono"
+                    style={{ fontWeight: 700, fontSize: '1.1rem', color: onHand === 0 ? 'var(--text-faint)' : 'var(--text)' }}
+                    aria-label={`${onHand} on hand`}
+                  >
+                    {onHand}
+                  </div>
+                  <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
+                    on hand · {variantCount} variant{variantCount === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </div>
             )
           })}
         </div>
@@ -426,11 +485,18 @@ function IntakeBody() {
             return (
               <div key={f.variationId} className="card">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setOpenId(open ? null : f.variationId)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setOpenId(open ? null : f.variationId)
+                      }
+                    }}
+                    aria-expanded={open}
                     style={{
-                      all: 'unset',
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
@@ -445,7 +511,12 @@ function IntakeBody() {
                       alt={f.itemGroupName}
                     />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="list-row-title">{f.itemGroupName}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span className="list-row-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {f.itemGroupName}
+                        </span>
+                        <CopyButton text={f.itemGroupName} label="Copy product name" size="sm" />
+                      </div>
                       <div className="list-row-meta">
                         <span style={{ color: 'var(--text-faint)' }}>
                           {(f.categoryPath.length > 1 ? f.categoryPath.slice(1) : f.categoryPath).join(' › ')} ·{' '}
@@ -453,15 +524,40 @@ function IntakeBody() {
                         {f.familyName} · {f.sizeName}
                       </div>
                     </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
-                        {familyTotal}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <div style={{ textAlign: 'right' }}>
+                        <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
+                          {familyTotal}
+                        </div>
+                        <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
+                          {f.variants.length} variant{f.variants.length === 1 ? '' : 's'}
+                        </span>
                       </div>
-                      <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
-                        {f.variants.length} variant{f.variants.length === 1 ? '' : 's'}
-                      </span>
+                      {/* Visible chevron so the row obviously reads as
+                          "expandable". Rotates 180° when open. */}
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 14 14"
+                        aria-hidden="true"
+                        style={{
+                          color: 'var(--text-dim)',
+                          transition: 'transform 0.15s',
+                          transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <path
+                          d="M3 5l4 4 4-4"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
                     </div>
-                  </button>
+                  </div>
                   <button
                     className="btn btn-ghost"
                     onClick={() => removeFamily(f.variationId)}
@@ -481,6 +577,7 @@ function IntakeBody() {
                     ) : (
                       f.variants.map((v) => {
                         const qty = f.qtyByVariant[v.id] ?? 0
+                        const onHand = onHandByVariantId.get(v.id) ?? 0
                         return (
                           <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)' }}>
                             <ProductThumb
@@ -491,6 +588,12 @@ function IntakeBody() {
                             <div className="list-row-body">
                               <div className="list-row-title">{v.colourVariantName}</div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
+                              <div
+                                className="list-row-meta"
+                                style={{ color: onHand === 0 ? 'var(--text-faint)' : 'var(--text-dim)' }}
+                              >
+                                {onHand} on hand
+                              </div>
                             </div>
                             <div className="stepper">
                               <button
@@ -595,7 +698,6 @@ function NewProductModal({
   const [error, setError] = useState<string | null>(null)
   const [photosByCell, setPhotosByCell] = useState<Record<string, File[]>>({})
   const [photoErrors, setPhotoErrors] = useState<Record<string, string>>({})
-  const canAttachPhotos = useIsMobileOrTablet()
 
   const leafCategoryId = chain[chain.length - 1] ?? null
 
@@ -784,19 +886,20 @@ function NewProductModal({
         style={{ maxWidth: 720 }}
       >
         <div className="modal-head">
-          <h2>New product</h2>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <h2 style={{ margin: 0 }}>New product</h2>
+            <InfoTooltip label="About new product">
+              Pick where this product lives, name it, define its variants (an optional Size / Style / custom axis, plus
+              colours), and enter the quantity you have of each combination. Every non-zero cell becomes a SKU with an
+              intake recorded at the primary warehouse.
+            </InfoTooltip>
+          </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
             ×
           </button>
         </div>
 
         {error && <p className="error-banner">{error}</p>}
-
-        <p className="section-desc" style={{ marginTop: 0 }}>
-          Pick where this product lives, name it, define its variants (an optional Size / Style / custom axis, plus
-          colours), and enter the quantity you have of each combination. Every non-zero cell becomes a SKU with an
-          intake recorded at the primary warehouse.
-        </p>
 
         <div className="field">
           <label>Folder</label>

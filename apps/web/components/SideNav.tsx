@@ -97,6 +97,7 @@ const TABS: Tab[] = [
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
+  { href: '/warehouse', label: 'Warehouse', icon: 'pack', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER'] },
   // Temporarily hidden from the nav — the underlying routes still work
   // if visited directly, so this is nav-only. Uncomment to restore.
@@ -106,6 +107,7 @@ const TABS: Tab[] = [
   // { href: '/admin/square-sync', label: 'Square sync', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   // { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
+  { href: '/admin/audit', label: 'Audits', icon: 'admin', roles: ['OWNER'] },
 ]
 
 export function SideNav({ user, onSignOut }: { user: CurrentUserDto; onSignOut: () => void }) {

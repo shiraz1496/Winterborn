@@ -385,6 +385,11 @@ export const catalogFolderRowSchema = z.object({
   totalQty: z.number().int(),
   totalValueCents: z.number().int(),
   previewPhotoUrl: z.string().nullable(),
+  /// Units currently in-transit to this location (packed into DISPATCHED
+  /// boxes but not yet scanned/received). Zero at warehouses and at
+  /// markets with nothing incoming; positive when the operator viewing
+  /// this folder is at a market with pending arrivals.
+  inTransitQty: z.number().int().default(0),
 })
 export type CatalogFolderRow = z.infer<typeof catalogFolderRowSchema>
 
@@ -474,6 +479,10 @@ export const catalogItemRowSchema = z.object({
   warehouseSku: z.string(),
   photoUrl: z.string().nullable(),
   onHand: z.number().int(),
+  /// Units currently in-transit to this location. Only non-zero at
+  /// markets with a DISPATCHED box carrying this SKU; the warehouse and
+  /// any market with nothing incoming report 0.
+  inTransitQty: z.number().int().default(0),
   unitCostCents: z.number().int().nullable(),
 })
 export type CatalogItemRow = z.infer<typeof catalogItemRowSchema>
@@ -499,6 +508,42 @@ export const catalogItemGroupPageSchema = z.object({
   }).nullable(),
 })
 export type CatalogItemGroupPage = z.infer<typeof catalogItemGroupPageSchema>
+
+/// One row in the paginated warehouse inventory view. Combines variation
+/// metadata with per-variant on-hand so the /warehouse screen can render
+/// the expandable list without another round trip per variation.
+export const warehouseInventoryVariantSchema = z.object({
+  warehouseVariantId: z.string(),
+  colourVariantName: z.string(),
+  warehouseSku: z.string(),
+  onHand: z.number().int(),
+  photoUrl: z.string().nullable(),
+})
+export type WarehouseInventoryVariant = z.infer<typeof warehouseInventoryVariantSchema>
+
+export const warehouseInventoryRowSchema = z.object({
+  variationId: z.string(),
+  itemGroupName: z.string(),
+  colourFamilyName: z.string(),
+  sizeOptionName: z.string(),
+  previewPhotoUrl: z.string().nullable(),
+  onHand: z.number().int(),
+  variants: z.array(warehouseInventoryVariantSchema),
+})
+export type WarehouseInventoryRow = z.infer<typeof warehouseInventoryRowSchema>
+
+/// Response for GET /warehouse/inventory. `total` and `distinctItems` are
+/// grand totals across the full warehouse (unaffected by the `q` filter);
+/// `filteredCount` is how many rows matched the search. `nextOffset` is
+/// null when there are no more pages.
+export const warehouseInventoryResponseSchema = z.object({
+  rows: z.array(warehouseInventoryRowSchema),
+  total: z.number().int(),
+  distinctItems: z.number().int(),
+  filteredCount: z.number().int(),
+  nextOffset: z.number().int().nullable(),
+})
+export type WarehouseInventoryResponse = z.infer<typeof warehouseInventoryResponseSchema>
 
 /// Per-warehouse on-hand slice, so the detail screen can show the count at
 /// each warehouse if there are several. `locationName` is denormalised in
@@ -680,6 +725,35 @@ export interface UploadSignatureResult {
   cloudName: string
   folder: string
 }
+
+/// PATCH /catalog/item-groups/:id — rename and/or move the product to a
+/// different folder. Rename fails with Conflict if (targetCategoryId, name)
+/// is already taken. Move upserts the variant's ColourFamily and SizeOption
+/// in the target folder and rebinds the Variation; ledger history stays on
+/// the original Variation row (append-only DB trigger — see schema.prisma).
+export const updateItemGroupInputSchema = z.object({
+  name: z.string().trim().min(1).max(120).transform(titleCase).optional(),
+  categoryId: z.string().min(1).optional(),
+})
+export type UpdateItemGroupInput = z.infer<typeof updateItemGroupInputSchema>
+
+/// PATCH /catalog/warehouse-variants/:id — edit fields on a single SKU.
+/// All fields optional; only the ones provided are updated. Rename fields
+/// (colourVariantName, sizeOptionName) rename the shared row in place —
+/// sibling variants in the same category using the same colour/size will
+/// pick up the new name automatically (schema is reference-by-ID).
+/// `warehouseSku` is intentionally NOT editable: it's a stable identifier
+/// baked into physical labels and external references, and it's generated
+/// at product-creation time from a deterministic hash so it doesn't need
+/// to track display renames.
+export const updateWarehouseVariantInputSchema = z.object({
+  unitCostCents: z.number().int().min(0).nullable().optional(),
+  colourVariantName: z.string().trim().min(1).max(120).transform(titleCase).optional(),
+  sizeOptionName: z.string().trim().min(1).max(60).transform(titleCase).optional(),
+  colourFamilyId: z.string().min(1).optional(),
+  photoUrls: z.array(z.string().url()).max(8).optional(),
+})
+export type UpdateWarehouseVariantInput = z.infer<typeof updateWarehouseVariantInputSchema>
 
 /// PATCH /catalog/item-groups/:id/square-id +
 /// PATCH /catalog/variations/:id/square-id. `null` clears the linkage;

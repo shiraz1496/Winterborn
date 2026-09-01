@@ -10,6 +10,7 @@ import {
   type UpdateAdminUserInput,
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
+import { AuditService } from '../audit/audit.service.js'
 
 /// Roles whose "home" is the warehouse. In a single-warehouse deployment
 /// the API auto-attaches them to that warehouse -- the admin UI never
@@ -34,7 +35,10 @@ const WAREHOUSE_ROLES = new Set<string>(['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUS
 /// which is the fail-safe default.
 @Injectable()
 export class AdminUsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   async list(): Promise<AdminUserDto[]> {
     const rows = await this.prisma.user.findMany({ orderBy: [{ isActive: 'desc' }, { role: 'asc' }, { name: 'asc' }] })
@@ -57,6 +61,13 @@ export class AdminUsersService {
           passwordHash,
         },
       })
+      await this.audit.recordCreation(
+        null,
+        'User',
+        created.id,
+        `${created.name} (${created.email}) as ${created.role}`,
+        { locationId: created.locationId, source: 'UI' },
+      )
       return { ...toDto(created), password: input.password ?? null }
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -110,6 +121,29 @@ export class AdminUsersService {
         passwordHash,
       },
     })
+
+    // Audit every field that actually changed. Password changes are logged
+    // as "password: null → <redacted>" so the trail records the fact of a
+    // reset without leaking the plaintext.
+    const changes: Array<{ field: string; oldValue: string | null; newValue: string | null }> = []
+    if (input.name && input.name !== existing.name) changes.push({ field: 'name', oldValue: existing.name, newValue: input.name })
+    if (input.role && input.role !== existing.role) changes.push({ field: 'role', oldValue: existing.role, newValue: input.role })
+    if (input.isActive !== undefined && input.isActive !== existing.isActive) {
+      changes.push({ field: 'isActive', oldValue: String(existing.isActive), newValue: String(input.isActive) })
+    }
+    if (nextLocationId !== existing.locationId) {
+      changes.push({ field: 'locationId', oldValue: existing.locationId, newValue: nextLocationId })
+    }
+    if (passwordHash !== undefined) {
+      changes.push({ field: 'password', oldValue: null, newValue: '<redacted>' })
+    }
+    if (changes.length > 0) {
+      await this.audit.recordMany(
+        null,
+        changes.map((c) => ({ entity: 'User', entityId: id, ...c, actorId, source: 'UI' as const })),
+      )
+    }
+
     return { ...toDto(updated), password: input.password ?? null }
   }
 

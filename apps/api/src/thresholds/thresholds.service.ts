@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import type { DecisionQueueRow, EvaluateAllResult, EvaluateThresholdResult } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
-import { AuditService } from '../requests/audit.service.js'
+import { AuditService } from '../audit/audit.service.js'
 
 /**
  * The threshold engine (spec §9.7). `evaluate` is the whole thing: derive

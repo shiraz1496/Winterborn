@@ -5,7 +5,6 @@ import Link from 'next/link'
 import type {
   DecisionQueueRow,
   LocationDto,
-  LowStockRow,
   RestockRequestDto,
   SalesRow,
   StockLevel,
@@ -15,6 +14,7 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { classifyStock } from '@winterborn/shared'
+import { CopyButton } from '../components/CopyButton'
 import { InfoTooltip } from '../components/InfoTooltip'
 import { PageHeader } from '../components/PageHeader'
 import { ProductThumb, firstPhoto } from '../components/ProductThumb'
@@ -43,16 +43,12 @@ function DashboardBody() {
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [requests, setRequests] = useState<RestockRequestDto[]>([])
   const [stock, setStock] = useState<StockLevel[]>([])
-  const [low, setLow] = useState<LowStockRow[]>([])
   const [thresholds, setThresholds] = useState<ThresholdDto[]>([])
   const [sales, setSales] = useState<SalesRow[]>([])
   const [queue, setQueue] = useState<DecisionQueueRow[]>([])
   const [locationId, setLocationId] = useState<string | null>(null)
-  const [warehouseStock, setWarehouseStock] = useState<StockLevel[]>([])
-  const [warehouseVariantStock, setWarehouseVariantStock] = useState<StockLevel[]>([])
   const [warehouseVariantCatalog, setWarehouseVariantCatalog] = useState<WarehouseVariantSummary[]>([])
-  const [warehouseDrawerOpen, setWarehouseDrawerOpen] = useState(false)
-  const [warehouseOpenVariationId, setWarehouseOpenVariationId] = useState<string | null>(null)
+  // Warehouse drawer state was here — moved to /warehouse (own page).
   const [marketDrawerOpen, setMarketDrawerOpen] = useState(false)
   const [marketOpenVariationId, setMarketOpenVariationId] = useState<string | null>(null)
   const [marketVariantStock, setMarketVariantStock] = useState<StockLevel[]>([])
@@ -108,10 +104,9 @@ function DashboardBody() {
       salesSince(locationId, 7),
       listThresholds(locationId),
     ])
-      .then(([s, l, sold, thr]) => {
+      .then(([s, , sold, thr]) => {
         if (cancelled) return
         setStock(s)
-        setLow(l)
         setSales(sold)
         setThresholds(thr)
       })
@@ -256,22 +251,17 @@ function DashboardBody() {
   useEffect(() => {
     if (!canSeeWarehouseTotal || !warehouse) return
     let cancelled = false
-    // Three fetches so the drawer can show:
-    //   1. Family totals (stockByFamily) — the summary number.
-    //   2. Per-variant stock (stockByVariant) — the expanded breakdown.
-    //   3. The full warehouse-variant catalog (listWarehouseVariants) —
-    //      so variants with zero movement still appear as "0", instead
-    //      of being invisible until they've had a ledger event.
-    Promise.all([stockByFamily(warehouse.id), stockByVariant(warehouse.id), listWarehouseVariants()])
-      .then(([byFamily, byVariant, variantsCatalog]) => {
+    // The full warehouse-variant catalog is still needed so
+    // `photoForVariation` can find a preview for every product referenced
+    // by the decision queue and other on-hand widgets. Per-variant stock
+    // numbers themselves moved to the dedicated /warehouse page.
+    listWarehouseVariants()
+      .then((variantsCatalog) => {
         if (cancelled) return
-        setWarehouseStock(byFamily)
-        setWarehouseVariantStock(byVariant)
         setWarehouseVariantCatalog(variantsCatalog)
       })
       .catch(() => {
-        // Non-fatal — the rest of the dashboard shouldn't break because
-        // the warehouse tile can't load. Leaves the card at 0/loading.
+        // Non-fatal.
       })
     return () => {
       cancelled = true
@@ -281,53 +271,7 @@ function DashboardBody() {
   // On-hand per (variation, warehouse) — includes 0-stock items via
   // the catalog, not just those with ledger movement. And per-family
   // rows carry their variant breakdown so the drawer can expand each.
-  const warehouseRows = useMemo(() => {
-    const onHandByVariation = new Map(warehouseStock.map((s) => [s.variationId, s.onHand]))
-    const onHandByVariant = new Map(
-      warehouseVariantStock
-        .filter((s) => s.warehouseVariantId)
-        .map((s) => [s.warehouseVariantId as string, s.onHand]),
-    )
-    const variantsByVariation = new Map<string, WarehouseVariantSummary[]>()
-    for (const wv of warehouseVariantCatalog) {
-      const list = variantsByVariation.get(wv.variationId) ?? []
-      list.push(wv)
-      variantsByVariation.set(wv.variationId, list)
-    }
-    for (const [, list] of variantsByVariation) {
-      list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
-    }
-    /// Products that don't actually have colour/style axes (e.g. Bags,
-    /// Dryer Balls) live as a single WarehouseVariant whose colour name
-    /// is the em-dash placeholder ("—" from NO_COLOUR_LABEL in the
-    /// product creation service). Expanding a family to reveal one
-    /// "— · SKU" row adds nothing — hide the expander for those.
-    const hasMeaningfulSubVariants = (list: WarehouseVariantSummary[]) => {
-      if (list.length === 0) return false
-      if (list.length > 1) return true
-      return list[0]!.colourVariantName !== '—'
-    }
-    return variations
-      .map((meta) => {
-        const raw = variantsByVariation.get(meta.id) ?? []
-        const variants = hasMeaningfulSubVariants(raw)
-          ? raw.map((wv) => ({ ...wv, onHand: onHandByVariant.get(wv.id) ?? 0 }))
-          : []
-        return {
-          variationId: meta.id,
-          meta,
-          onHand: onHandByVariation.get(meta.id) ?? 0,
-          variants,
-        }
-      })
-      // Highest stock first, then alphabetical for the long 0 tail.
-      .sort((a, b) => {
-        if (b.onHand !== a.onHand) return b.onHand - a.onHand
-        return a.meta.itemGroupName.localeCompare(b.meta.itemGroupName)
-      })
-  }, [variations, warehouseStock, warehouseVariantStock, warehouseVariantCatalog])
-  const warehouseTotal = useMemo(() => warehouseRows.reduce((s, r) => s + r.onHand, 0), [warehouseRows])
-  const warehouseDistinctItems = warehouseRows.length
+  // (warehouseRows/warehouseTotal/warehouseDistinctItems moved to /warehouse.)
 
   // Market drawer rows: only products that have EVER had ledger activity at
   // this market (dispatched, sold, returned, or corrected here). We base off
@@ -451,45 +395,18 @@ function DashboardBody() {
             </Link>
           </>
         )}
-        {canSeeWarehouseTotal && (
-          <button
-            type="button"
-            onClick={() => setWarehouseDrawerOpen(true)}
-            className="quick-action"
-            style={{
-              textAlign: 'left',
-              cursor: 'pointer',
-              border: '1px solid var(--signal)',
-              background: 'var(--surface-sunken)',
-            }}
-          >
-            <svg className="quick-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 21V9l9-6 9 6v12" strokeLinejoin="round" />
-              <path d="M9 21v-8h6v8" />
-              <path d="M3 21h18" strokeLinecap="round" />
-            </svg>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-              <div className="quick-action-label" style={{ fontSize: '1.4rem' }}>
-                {warehouseTotal.toLocaleString()}
-              </div>
-              <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
-                units in warehouse
-              </div>
-            </div>
-            <div className="quick-action-desc">
-              {warehouseDistinctItems} product{warehouseDistinctItems === 1 ? '' : 's'} in catalog · tap to see the
-              per-variant breakdown
-            </div>
-          </button>
-        )}
+        {/* Warehouse-totals tile lived here — moved into a full page at
+            /warehouse (linked from the sidebar) so drilling into per-variant
+            stock doesn't require popping a modal. */}
         {isMarketManager && currentMarket && (
           <button
             type="button"
             onClick={() => setMarketDrawerOpen(true)}
+            disabled={loading}
             className="quick-action"
             style={{
               textAlign: 'left',
-              cursor: 'pointer',
+              cursor: loading ? 'wait' : 'pointer',
               border: '1px solid var(--signal)',
               background: 'var(--surface-sunken)',
             }}
@@ -499,17 +416,61 @@ function DashboardBody() {
               <path d="M4 7l2-4h12l2 4" strokeLinejoin="round" />
               <path d="M9 11a3 3 0 0 0 6 0" />
             </svg>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-              <div className="quick-action-label" style={{ fontSize: '1.4rem' }}>
-                {marketTotal.toLocaleString()}
-              </div>
-              <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
-                units at your market
-              </div>
-            </div>
-            <div className="quick-action-desc">
-              {marketDistinctItems} product{marketDistinctItems === 1 ? '' : 's'} on hand · tap to see the breakdown
-            </div>
+            {loading ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      width: 90,
+                      height: 24,
+                      borderRadius: 6,
+                      // Amber-tinted shimmer, matching the app's active-nav
+                      // signal colour so all "attention" surfaces share
+                      // the same palette.
+                      background:
+                        'linear-gradient(90deg, rgba(210, 137, 42, 0.08), rgba(210, 137, 42, 0.28), rgba(210, 137, 42, 0.08))',
+                      backgroundSize: '200% 100%',
+                      animation: 'catalogSkeleton 1.2s ease-in-out infinite',
+                    }}
+                  />
+                  <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                    units at your market
+                  </div>
+                </div>
+                <div
+                  className="quick-action-desc"
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-dim)' }}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      border: '2px solid var(--line-strong)',
+                      borderTopColor: 'var(--signal)',
+                      animation: 'catalogSpinner 0.8s linear infinite',
+                    }}
+                  />
+                  Loading market totals…
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <div className="quick-action-label" style={{ fontSize: '1.4rem' }}>
+                    {marketTotal.toLocaleString()}
+                  </div>
+                  <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
+                    units at your market
+                  </div>
+                </div>
+                <div className="quick-action-desc">
+                  {marketDistinctItems} product{marketDistinctItems === 1 ? '' : 's'} on hand · tap to see the breakdown
+                </div>
+              </>
+            )}
           </button>
         )}
       </div>
@@ -683,187 +644,6 @@ function DashboardBody() {
         </div>
       </div>
 
-      {warehouseDrawerOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Warehouse stock breakdown"
-          onClick={() => setWarehouseDrawerOpen(false)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.35)',
-            display: 'flex',
-            justifyContent: 'flex-end',
-            zIndex: 1000,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 'min(480px, 100%)',
-              height: '100%',
-              background: 'var(--surface)',
-              borderLeft: '1px solid var(--line-strong)',
-              display: 'flex',
-              flexDirection: 'column',
-              boxShadow: '-4px 0 16px rgba(0,0,0,0.15)',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                justifyContent: 'space-between',
-                padding: '18px 20px',
-                borderBottom: '1px solid var(--line)',
-                gap: 12,
-              }}
-            >
-              <div>
-                <div className="eyebrow" style={{ color: 'var(--text-dim)' }}>
-                  {warehouse?.name ?? 'Warehouse'}
-                </div>
-                <h2 style={{ margin: '4px 0 0', fontSize: '1.15rem' }}>
-                  {warehouseTotal.toLocaleString()} units · {warehouseDistinctItems} product
-                  {warehouseDistinctItems === 1 ? '' : 's'}
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setWarehouseDrawerOpen(false)}
-                aria-label="Close"
-                className="btn btn-ghost"
-                style={{ minHeight: 32, padding: '4px 10px' }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ overflowY: 'auto', padding: '12px 20px 24px', flex: 1 }}>
-              {warehouseRows.length === 0 ? (
-                <p style={{ color: 'var(--text-dim)', margin: 0 }}>
-                  Catalog is empty. Import Sortly, then stock will appear here.
-                </p>
-              ) : (
-                <div className="stack" style={{ gap: 6 }}>
-                  {warehouseRows.map((row) => {
-                    const open = warehouseOpenVariationId === row.variationId
-                    const hasVariants = row.variants.length > 0
-                    return (
-                      <div
-                        key={row.variationId}
-                        style={{
-                          border: '1px solid var(--line)',
-                          borderRadius: 'var(--radius-md)',
-                          background: 'var(--surface)',
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() =>
-                            hasVariants
-                              ? setWarehouseOpenVariationId(open ? null : row.variationId)
-                              : undefined
-                          }
-                          style={{
-                            all: 'unset',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            width: '100%',
-                            padding: '10px 12px',
-                            cursor: hasVariants ? 'pointer' : 'default',
-                            boxSizing: 'border-box',
-                          }}
-                          aria-expanded={hasVariants ? open : undefined}
-                        >
-                          <ProductThumb
-                            photoUrl={photoForVariation(row.meta.id)}
-                            familyName={row.meta.colourFamilyName}
-                            alt={row.meta.itemGroupName}
-                          />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="list-row-title">{row.meta.itemGroupName}</div>
-                            <div className="list-row-meta">
-                              {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
-                              {hasVariants && ` · ${row.variants.length} variant${row.variants.length === 1 ? '' : 's'}`}
-                            </div>
-                          </div>
-                          <div
-                            className="mono"
-                            style={{
-                              fontWeight: 700,
-                              fontSize: '1.05rem',
-                              color: row.onHand === 0 ? 'var(--danger)' : 'var(--text)',
-                            }}
-                          >
-                            {row.onHand.toLocaleString()}
-                          </div>
-                          {hasVariants && (
-                            <span
-                              aria-hidden="true"
-                              style={{ color: 'var(--text-faint)', fontSize: '0.8rem', minWidth: 12, textAlign: 'right' }}
-                            >
-                              {open ? '▴' : '▾'}
-                            </span>
-                          )}
-                        </button>
-
-                        {open && hasVariants && (
-                          <div
-                            style={{
-                              borderTop: '1px solid var(--line)',
-                              padding: '6px 12px 10px 42px',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 4,
-                            }}
-                          >
-                            {row.variants.map((v) => (
-                              <div
-                                key={v.id}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  padding: '4px 0',
-                                }}
-                              >
-                                <ProductThumb
-                                  photoUrl={v.photoUrl}
-                                  familyName={v.colourVariantName}
-                                  alt={v.colourVariantName}
-                                />
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ fontSize: '0.85rem' }}>{v.colourVariantName}</div>
-                                  <div className="mono" style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
-                                    {v.warehouseSku}
-                                  </div>
-                                </div>
-                                <div
-                                  className="mono"
-                                  style={{
-                                    fontWeight: 600,
-                                    fontSize: '0.9rem',
-                                    color: v.onHand === 0 ? 'var(--danger)' : 'var(--text)',
-                                  }}
-                                >
-                                  {v.onHand.toLocaleString()}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {marketDrawerOpen && currentMarket && (
         <div
@@ -941,15 +721,22 @@ function DashboardBody() {
                           background: 'var(--surface)',
                         }}
                       >
-                        <button
-                          type="button"
+                        <div
+                          role={hasVariants ? 'button' : undefined}
+                          tabIndex={hasVariants ? 0 : undefined}
                           onClick={() =>
                             hasVariants
                               ? setMarketOpenVariationId(open ? null : row.variationId)
                               : undefined
                           }
+                          onKeyDown={(e) => {
+                            if (!hasVariants) return
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              setMarketOpenVariationId(open ? null : row.variationId)
+                            }
+                          }}
                           style={{
-                            all: 'unset',
                             display: 'flex',
                             alignItems: 'center',
                             gap: 10,
@@ -966,7 +753,12 @@ function DashboardBody() {
                             alt={row.meta.itemGroupName}
                           />
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="list-row-title">{row.meta.itemGroupName}</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                              <span className="list-row-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {row.meta.itemGroupName}
+                              </span>
+                              <CopyButton text={row.meta.itemGroupName} label="Copy product name" size="sm" />
+                            </div>
                             <div className="list-row-meta">
                               {row.meta.colourFamilyName} · {row.meta.sizeOptionName}
                               {hasVariants && ` · ${row.variants.length} variant${row.variants.length === 1 ? '' : 's'}`}
@@ -983,14 +775,22 @@ function DashboardBody() {
                             {row.onHand.toLocaleString()}
                           </div>
                           {hasVariants && (
-                            <span
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 14 14"
                               aria-hidden="true"
-                              style={{ color: 'var(--text-faint)', fontSize: '0.8rem', minWidth: 12, textAlign: 'right' }}
+                              style={{
+                                color: 'var(--text-dim)',
+                                transition: 'transform 0.15s',
+                                transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                                flexShrink: 0,
+                              }}
                             >
-                              {open ? '▴' : '▾'}
-                            </span>
+                              <path d="M3 5l4 4 4-4" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
                           )}
-                        </button>
+                        </div>
 
                         {open && hasVariants && (
                           <div

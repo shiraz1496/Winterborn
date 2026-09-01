@@ -4,6 +4,7 @@ import { transferKeyPrefix, type ReceiveBoxResult } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
+import { AuditService } from '../audit/audit.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 
 /// Thrown when a pack or dispatch would drive warehouse stock below zero.
@@ -72,6 +73,7 @@ export class BoxesService {
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
     private readonly ledgerRead: LedgerReadService,
+    private readonly audit: AuditService,
   ) {}
 
   /// Compute how many units of each warehouse variant can still be committed
@@ -172,7 +174,7 @@ export class BoxesService {
     // single request on the Box row — the mapping lives on the lines.
     const finalBoxRequestId = distinctRequestIds.size > 1 ? null : boxRequestId
 
-    return this.prisma.box.create({
+    const box = await this.prisma.box.create({
       data: {
         requestId: finalBoxRequestId,
         destinationLocationId: input.destinationLocationId,
@@ -183,6 +185,16 @@ export class BoxesService {
       },
       include: { lines: true },
     })
+
+    await this.audit.recordCreation(
+      null,
+      'Box',
+      box.id,
+      `packed ${box.lines.length} line${box.lines.length === 1 ? '' : 's'} for ${input.destinationLocationId}`,
+      { actorId: actor.id, actorRole: actor.role, source: 'UI' },
+    )
+
+    return box
   }
 
   /// Filters are AND'd together; both are optional so /pack/[requestId] can
@@ -249,6 +261,14 @@ export class BoxesService {
     // gone-when-box-is-gone by design (packing boxes shouldn't be on
     // a Load yet, but the join row would orphan cleanly if so).
     await this.prisma.box.delete({ where: { id: boxId } })
+    await this.audit.record(null, {
+      entity: 'Box',
+      entityId: boxId,
+      field: 'discarded',
+      oldValue: 'PACKING',
+      newValue: 'DELETED',
+      source: 'UI',
+    })
     return { id: boxId, discarded: true }
   }
 
@@ -340,6 +360,12 @@ export class BoxesService {
 
     if (box.state !== 'DISPATCHED') {
       await this.prisma.box.update({ where: { id: boxId }, data: { state: 'DISPATCHED', dispatchedAt: now } })
+      await this.audit.recordTransition(null, 'Box', boxId, 'state', box.state, 'DISPATCHED', {
+        actorId: actor?.id ?? null,
+        actorRole: actor?.role ?? null,
+        locationId: box.destinationLocationId,
+        source: 'UI',
+      })
     }
 
     // Auto-advance every parent request this box helps fulfil to
@@ -353,22 +379,15 @@ export class BoxesService {
     for (const requestId of involvedRequestIds) {
       const request = await this.prisma.restockRequest.findUnique({ where: { id: requestId } })
       if (request && request.state === 'PACKING') {
-        await this.prisma.$transaction([
-          this.prisma.restockRequest.update({
-            where: { id: requestId },
-            data: { state: 'DISPATCHED' },
-          }),
-          this.prisma.auditLog.create({
-            data: {
-              entity: 'RestockRequest',
-              entityId: requestId,
-              field: 'state',
-              oldValue: 'PACKING',
-              newValue: 'DISPATCHED',
-              actorId: actor?.id ?? null,
-            },
-          }),
-        ])
+        await this.prisma.restockRequest.update({
+          where: { id: requestId },
+          data: { state: 'DISPATCHED' },
+        })
+        await this.audit.recordTransition(null, 'RestockRequest', requestId, 'state', 'PACKING', 'DISPATCHED', {
+          actorId: actor?.id ?? null,
+          actorRole: actor?.role ?? null,
+          source: 'UI',
+        })
       }
     }
 
@@ -436,6 +455,13 @@ export class BoxesService {
 
       if (box.state !== 'ARRIVED') {
         await this.prisma.box.update({ where: { id: box.id }, data: { state: 'ARRIVED', arrivedAt: now } })
+        await this.audit.recordTransition(null, 'Box', box.id, 'state', box.state, 'ARRIVED', {
+          actorId: actor?.id ?? null,
+          actorRole: actor?.role ?? null,
+          locationId: box.destinationLocationId,
+          reason: `received under request ${requestId}`,
+          source: 'UI',
+        })
       }
       boxesReceived++
     }
@@ -607,6 +633,13 @@ export class BoxesService {
       await this.prisma.box.update({
         where: { id: box.id },
         data: { state: 'ARRIVED', arrivedAt },
+      })
+      await this.audit.recordTransition(null, 'Box', box.id, 'state', 'DISPATCHED', 'ARRIVED', {
+        actorId: actor.id,
+        actorRole: actor.role,
+        locationId: box.destinationLocationId,
+        reason: 'received via QR scan',
+        source: 'UI',
       })
     }
 

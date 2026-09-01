@@ -14,8 +14,10 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { CopyButton } from '../../../components/CopyButton'
 import { InfoTooltip } from '../../../components/InfoTooltip'
 import { PageHeader } from '../../../components/PageHeader'
+import { SectionHeading } from '../../../components/SectionHeading'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { Scanner } from '../../../components/Scanner'
 import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
@@ -321,19 +323,23 @@ function RequestDetailBody() {
 
       {error && <p className="error-banner">{error}</p>}
 
-      <div className="section-heading">
-        <h2>Items requested</h2>
-        <span className="eyebrow">
-          {(() => {
-            const familyCount = new Set(request.lines.map((l) => l.variationId)).size
-            return `${familyCount} item${familyCount === 1 ? '' : 's'} · ${request.lines.length} line${request.lines.length === 1 ? '' : 's'}`
-          })()}
-        </span>
-      </div>
-      <p className="section-desc">
-        One card per product family. Tap a card to see the specific variants and quantities that were requested.
-        {editable && ' Steppers to adjust quantities appear inside each variant row.'}
-      </p>
+      <SectionHeading
+        title="Items requested"
+        description={
+          <>
+            One card per product family. Tap a card to see the specific variants and quantities that were requested.
+            {editable && ' Steppers to adjust quantities appear inside each variant row.'}
+          </>
+        }
+        right={
+          <span className="eyebrow">
+            {(() => {
+              const familyCount = new Set(request.lines.map((l) => l.variationId)).size
+              return `${familyCount} item${familyCount === 1 ? '' : 's'} · ${request.lines.length} line${request.lines.length === 1 ? '' : 's'}`
+            })()}
+          </span>
+        }
+      />
       {(() => {
         // Group request lines by variationId. If the same variant appears
         // more than once we still render it once with a summed qty.
@@ -351,11 +357,23 @@ function RequestDetailBody() {
               const open = openFamilyId === variationId
               return (
                 <div key={variationId} className="card">
-                  <button
-                    type="button"
+                  {/* Row as a clickable div (role="button") rather than a
+                      real `<button>` so we can safely nest the CopyButton
+                      inside for the product name — button-in-button is
+                      invalid HTML. Keyboard accessibility preserved via
+                      tabIndex + Enter/Space handlers. */}
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setOpenFamilyId(open ? null : variationId)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setOpenFamilyId(open ? null : variationId)
+                      }
+                    }}
+                    aria-expanded={open}
                     style={{
-                      all: 'unset',
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
@@ -369,18 +387,55 @@ function RequestDetailBody() {
                       alt={familyMeta?.itemGroupName ?? ''}
                     />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="list-row-title">{familyMeta?.itemGroupName ?? variationId}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span
+                          className="list-row-title"
+                          style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        >
+                          {familyMeta?.itemGroupName ?? variationId}
+                        </span>
+                        {familyMeta?.itemGroupName && (
+                          <CopyButton
+                            text={familyMeta.itemGroupName}
+                            label="Copy product name"
+                            size="sm"
+                          />
+                        )}
+                      </div>
                       <div className="list-row-meta">
                         {familyMeta?.colourFamilyName} · {familyMeta?.sizeOptionName}
                         {' · '}
                         {lines.length} variant{lines.length === 1 ? '' : 's'}
                       </div>
                     </div>
-                    <div style={{ textAlign: 'right', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ textAlign: 'right', display: 'flex', alignItems: 'center', gap: 10 }}>
                       <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>{total}</div>
-                      <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>{open ? '▴' : '▾'}</span>
+                      {/* Larger chevron — the previous ▴/▾ characters
+                          were tiny in the dim `eyebrow` styling and
+                          invisible on some displays. */}
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 14 14"
+                        aria-hidden="true"
+                        style={{
+                          color: 'var(--text-dim)',
+                          transition: 'transform 0.15s',
+                          transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <path
+                          d="M3 5l4 4 4-4"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
                     </div>
-                  </button>
+                  </div>
 
                   {open && (
                     <div className="stack" style={{ marginTop: 14, gap: 8 }}>
@@ -657,15 +712,20 @@ function RequestDetailBody() {
 
         return (
           <div className="section" style={{ marginTop: 24 }}>
-            <div className="section-heading">
-              <h2>Boxes</h2>
-              <span className="eyebrow">
-                {soloBoxes.length} box{soloBoxes.length === 1 ? '' : 'es'}
-                {sharedBoxes.length > 0
-                  ? ` · ${sharedBoxes.length} in shared shipment`
-                  : ''}
-              </span>
-            </div>
+            <SectionHeading
+              title="Boxes"
+              description={
+                soloBoxes.length === 0
+                  ? 'No boxes exclusive to this request — every box is shared with the shipment above.'
+                  : 'Every packed box for this request. Show the QR label to print, reprint, or hand to the market manager to scan on arrival.'
+              }
+              right={
+                <span className="eyebrow">
+                  {soloBoxes.length} box{soloBoxes.length === 1 ? '' : 'es'}
+                  {sharedBoxes.length > 0 ? ` · ${sharedBoxes.length} in shared shipment` : ''}
+                </span>
+              }
+            />
             {sharedBoxes.length > 0 && (
               <div
                 className="card"
@@ -688,16 +748,6 @@ function RequestDetailBody() {
                   </Link>
                 </div>
               </div>
-            )}
-            {soloBoxes.length === 0 ? (
-              <p className="section-desc" style={{ marginTop: 0 }}>
-                No boxes exclusive to this request — every box is shared with the shipment above.
-              </p>
-            ) : (
-              <p className="section-desc" style={{ marginTop: 0 }}>
-                Every packed box for this request. Show the QR label to print, reprint, or hand to
-                the market manager to scan on arrival.
-              </p>
             )}
             <div className="stack" style={{ gap: 10 }}>
               {soloBoxes.map((box) => {

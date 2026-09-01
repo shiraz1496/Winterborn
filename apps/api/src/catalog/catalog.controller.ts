@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common'
-import type { AssignColourFamilyInput, CreateCategoryInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateProductInput, CreateWarehouseVariantInput, SetSquareIdInput, StockCorrectionInput, UpdateItemGroupMappingInput } from '@winterborn/shared'
-import { createCategoryInputSchema, createProductAttributeInputSchema, createProductAttributeValueInputSchema, createProductInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, stockCorrectionInputSchema, updateItemGroupMappingSchema } from '@winterborn/shared'
+import type { AssignColourFamilyInput, CreateCategoryInput, CreateProductAttributeInput, CreateProductAttributeValueInput, CreateProductInput, CreateWarehouseVariantInput, SetSquareIdInput, StockCorrectionInput, UpdateItemGroupInput, UpdateItemGroupMappingInput, UpdateWarehouseVariantInput } from '@winterborn/shared'
+import { createCategoryInputSchema, createProductAttributeInputSchema, createProductAttributeValueInputSchema, createProductInputSchema, createWarehouseVariantInputSchema, setSquareIdInputSchema, stockCorrectionInputSchema, updateItemGroupInputSchema, updateItemGroupMappingSchema, updateWarehouseVariantInputSchema } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
 import { Roles } from '../auth/roles.decorator.js'
@@ -10,6 +10,7 @@ import { CatalogReadService } from './catalog-read.service.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
+import { ProductUpdateService } from './product-update.service.js'
 import { CloudinarySignatureService } from './cloudinary-signature.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
@@ -27,6 +28,7 @@ export class CatalogController {
     private readonly squareCatalogSync: SquareCatalogSyncService,
     private readonly stockCorrection: StockCorrectionService,
     private readonly productCreation: ProductCreationService,
+    private readonly productUpdate: ProductUpdateService,
     private readonly cloudinarySignature: CloudinarySignatureService,
   ) {}
 
@@ -75,6 +77,36 @@ export class CatalogController {
   @Roles('OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR')
   createProduct(@Body() body: CreateProductInput, @CurrentUser() user: CurrentUserPayload) {
     return this.productCreation.create(body, user)
+  }
+
+  /// Rename and/or move an item group to a different folder. Rebinds
+  /// ColourFamily / SizeOption / ColourVariant / Variation into the target
+  /// category. Ledger history left untouched (append-only trigger).
+  @Patch('catalog/item-groups/:id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  updateItemGroup(
+    @Param('id') id: string,
+    @Body() body: UpdateItemGroupInput,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    const parsed = updateItemGroupInputSchema.parse(body)
+    return this.productUpdate.updateItemGroup(id, parsed, user)
+  }
+
+  /// Field-level edits on one SKU (colour variant name, size, SKU string,
+  /// unit cost, colour family, photos). Shared identity rows (ColourVariant
+  /// / SizeOption) are renamed in place when this variant is their sole
+  /// user, else forked so sibling products stay put. Every field mutation
+  /// writes an AuditLog row.
+  @Patch('catalog/warehouse-variants/:id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  updateWarehouseVariant(
+    @Param('id') id: string,
+    @Body() body: UpdateWarehouseVariantInput,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    const parsed = updateWarehouseVariantInputSchema.parse(body)
+    return this.productUpdate.updateWarehouseVariant(id, parsed, user)
   }
 
   /// Short-lived Cloudinary upload authorization for the intake modal's
@@ -231,6 +263,34 @@ export class CatalogController {
   @Get('stock/by-variant')
   stockByVariant(@Query('locationId') locationId?: string) {
     return this.ledgerRead.onHandByVariant(locationId)
+  }
+
+  /// Paginated + searchable warehouse inventory for the /warehouse
+  /// screen. Owner + Warehouse Manager only — matches the role gate on
+  /// the frontend page. Falls back to the primary warehouse when the
+  /// caller omits `locationId`.
+  @Get('warehouse/inventory')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  async warehouseInventory(
+    @Query('locationId') locationId?: string,
+    @Query('q') q?: string,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ) {
+    let resolvedLocationId = locationId
+    if (!resolvedLocationId) {
+      const warehouse = await this.catalog.firstWarehouseLocation()
+      if (!warehouse) {
+        return { rows: [], total: 0, distinctItems: 0, filteredCount: 0, nextOffset: null }
+      }
+      resolvedLocationId = warehouse.id
+    }
+    return this.catalog.warehouseInventory({
+      locationId: resolvedLocationId,
+      q,
+      offset: offset ? Number.parseInt(offset, 10) : undefined,
+      limit: limit ? Number.parseInt(limit, 10) : undefined,
+    })
   }
 
   @Get('stock/low')
