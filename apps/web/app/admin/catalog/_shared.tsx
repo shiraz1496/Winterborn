@@ -188,15 +188,19 @@ export function Breadcrumbs({ crumbs }: { crumbs: Array<{ href?: string; label: 
         fontSize: '0.82rem',
         marginBottom: 14,
         padding: '8px 12px',
-        borderRadius: 999,
+        // On narrow screens the pill shape looks awkward when it wraps
+        // to multiple lines, so drop to a normal rounded-rect border
+        // instead of the fully-rounded 999px pill. Still visually
+        // distinct from surrounding chrome but doesn't awkwardly shape
+        // a two-line breadcrumb into a stadium.
+        borderRadius: 'var(--radius-md)',
         background: 'var(--surface-sunken)',
         border: '1px solid var(--line)',
-        rowGap: 4,
+        rowGap: 6,
         columnGap: 2,
-        // Sit as a chip strip: readable but visually distinct from the
-        // page's H1. Keep the whole trail on one line when it fits; wrap
-        // gracefully on narrow screens.
-        maxWidth: 'fit-content',
+        // No fit-content cap — let the pill grow to fill the row width
+        // so long breadcrumbs wrap cleanly instead of being clipped by
+        // an "intrinsic" width the browser guessed too small.
       }}
     >
       {crumbs.map((c, i) => {

@@ -118,8 +118,12 @@ function ItemDetail() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'minmax(260px, 1fr) minmax(300px, 1fr)',
-          gap: 24,
+          // `auto-fit` + a min column width lets the two panels stack on
+          // narrow screens (phones) and sit side by side on desktop
+          // without a media query. Was hard-coded to two columns before,
+          // which clipped the Details card on mobile.
+          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+          gap: 20,
           marginBottom: 24,
         }}
       >

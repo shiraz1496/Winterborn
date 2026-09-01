@@ -70,6 +70,10 @@ body {
   line-height: 1.4;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior-y: none;
+  /* Belt-and-braces: any child that accidentally exceeds the viewport
+     width (long unbreakable token, absolutely-positioned overlay, etc.)
+     clips instead of introducing horizontal scroll on mobile. */
+  overflow-x: hidden;
 }
 
 h1,
@@ -124,6 +128,16 @@ textarea {
   max-width: 720px;
   margin: 0 auto;
   padding: 16px 16px calc(var(--tap-primary) + 40px);
+}
+
+/* Narrow phones: shave horizontal padding so the useful area grows
+   from ~408px (on 440px viewport) to ~424px. Small on paper, big for
+   fitting a row that has a thumb + name + counter + chip. */
+@media (max-width: 480px) {
+  .app-main {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
 }
 
 /* Sidebar hidden on mobile; desktop rules are appended at the bottom of
@@ -187,6 +201,17 @@ textarea {
   white-space: nowrap;
 }
 
+/* Narrow phones: the "Winterborn · Receive inventory" combo runs out of
+   room and the page name is truncated to "Receive inve...". Hide the sep
+   + page name at this width — the visible H1 below the topbar makes the
+   page name redundant on mobile anyway. */
+@media (max-width: 640px) {
+  .app-topbar-sep,
+  .app-topbar-page {
+    display: none;
+  }
+}
+
 .app-topbar-right {
   display: flex;
   align-items: center;
@@ -239,17 +264,34 @@ textarea {
   border-top: 1px solid var(--line);
   background: var(--surface);
   padding-bottom: env(safe-area-inset-bottom);
+  /* Horizontal scroll when there are more items than fit at a
+     tappable width. An owner account has 9 tabs (Home, Requests,
+     Intake, Pack, Scan, Warehouse, Catalog, Users, Audits); a
+     440px viewport can't show them all at a comfortable size.
+     Momentum scroll on iOS via `-webkit-overflow-scrolling`. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bottom-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .bottom-nav-item {
-  flex: 1;
+  /* No `flex: 1` — items keep an intrinsic min-width so scrolling
+     kicks in cleanly. Fewer items still spread to fill the row via
+     `flex-grow: 1` + `min-width` combining. */
+  flex: 1 0 auto;
+  min-width: 68px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 3px;
   min-height: var(--tap-primary);
-  padding: 8px 4px;
+  padding: 8px 6px;
   text-decoration: none;
   color: var(--text-faint);
   font-family: var(--font-mono);
@@ -257,6 +299,7 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border-top: 2px solid transparent;
+  white-space: nowrap;
 }
 
 .bottom-nav-item svg {
@@ -372,10 +415,28 @@ textarea {
   margin-top: 2px;
 }
 
+/* Narrow phones: tighten row padding and gap so the thumb, body, and
+   stepper (or trailing chip / button) all fit without wrapping the row
+   into a two-line mess. */
+@media (max-width: 480px) {
+  .list-row {
+    gap: 8px;
+    padding: 10px;
+  }
+  .list-row-title {
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 .section-heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   margin: 28px 0 10px;
 }
 
@@ -387,6 +448,17 @@ textarea {
   font-size: 1rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/* On narrow phones the trailing eyebrow ("2 healthy · 5 total") often
+   runs past the right edge. Let it stack below the heading instead of
+   clipping. `section-heading` itself already has `flex-wrap: wrap` from
+   the earlier fix; this ensures the eyebrow's own text stays intact. */
+@media (max-width: 480px) {
+  .section-heading .eyebrow {
+    flex-basis: 100%;
+    text-align: left;
+  }
 }
 
 .section-desc {
@@ -411,6 +483,19 @@ textarea {
   border: 1px solid var(--line-strong);
   color: var(--text-dim);
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Narrow phones: tighter chip padding + letter spacing so "CRITICAL"
+   and "OUT OF STOCK" still fit in a right-column status pill. */
+@media (max-width: 480px) {
+  .chip {
+    padding: 2px 6px;
+    font-size: 0.62rem;
+    letter-spacing: 0.02em;
+  }
 }
 
 .chip-pine {
@@ -574,6 +659,31 @@ textarea {
 .stepper-input:focus {
   border-color: var(--signal);
   outline: none;
+}
+
+/* Narrow phones: the row (thumb + name + stepper) runs out of horizontal
+   room and the stepper wraps to its own line or pushes the name off. Bring
+   the buttons down a touch and let the input shrink so 3 controls + a
+   thumbnail + text fit on a ~360-440px viewport. */
+@media (max-width: 480px) {
+  .stepper {
+    gap: 6px;
+  }
+  .stepper-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 1.15rem;
+  }
+  .stepper-value {
+    font-size: 1.1rem;
+    min-width: 36px;
+  }
+  .stepper-input {
+    width: 48px;
+    min-width: 48px;
+    font-size: 1.1rem;
+    height: 40px;
+  }
 }
 
 /* ---- printable label ----------------------------------------------------- */
@@ -793,6 +903,17 @@ textarea {
   font-size: 0.85rem;
 }
 
+/* Narrow phones: reduce the H1 so a page title like "Warehouse inventory"
+   still fits with the tooltip icon and any action buttons on the right. */
+@media (max-width: 480px) {
+  .page-header h1 {
+    font-size: 1.35rem;
+  }
+  .page-header-desc {
+    font-size: 0.85rem;
+  }
+}
+
 /* ---- quick actions grid --------------------------------------------------
    Prominent, icon-forward action tiles at the top of the dashboard so the
    most common jobs (new request, receive intake, jump to pack) are one tap
@@ -931,14 +1052,27 @@ textarea {
   right: 0;
   z-index: 40;
   width: max-content;
-  max-width: 280px;
+  /* Never wider than the viewport (minus small breathing room). Prevents
+     the bubble from bleeding off either edge when the trigger sits at
+     one side of a narrow screen. */
+  max-width: min(280px, calc(100vw - 24px));
   padding: 10px 12px;
   background: var(--surface-raised);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   color: var(--text);
+  /* Explicit typography reset — the trigger often sits inside an
+     `<h2>` (SectionHeading), `<h1>` (PageHeader), or a chip label,
+     any of which inherit uppercase / bold / display-font onto the
+     bubble contents. Set every relevant prop so the tooltip text
+     always reads as normal body copy. */
+  font-family: var(--font-body);
   font-size: 0.82rem;
+  font-weight: 400;
   line-height: 1.4;
+  text-transform: none;
+  letter-spacing: 0;
+  text-align: left;
   box-shadow: 0 10px 30px rgba(20, 24, 26, 0.1);
 }
 
@@ -946,7 +1080,13 @@ textarea {
   content: '';
   position: absolute;
   top: -6px;
-  right: 6px;
+  /* The arrow's horizontal position is driven by the InfoTooltip
+     component: it measures the trigger's centre after positioning the
+     bubble and sets `--tip-arrow-left` to a pixel offset from the
+     bubble's own left edge. Falls back to the old right-anchored
+     position when the component hasn't set the var (e.g. SSR / no JS). */
+  left: var(--tip-arrow-left, auto);
+  right: var(--tip-arrow-right, 6px);
   width: 10px;
   height: 10px;
   background: var(--surface-raised);
@@ -954,6 +1094,20 @@ textarea {
   border-top: 1px solid var(--line-strong);
   transform: rotate(45deg);
 }
+
+/* When --tip-arrow-left is defined, disable the right anchor so the
+   two don't fight for the arrow's horizontal position. Achieved by
+   setting --tip-arrow-right to `auto` inline in the bubble style would
+   also work, but this way we only need to update one var per open. */
+.info-tip-bubble[style*="--tip-arrow-left"]::before {
+  right: auto;
+}
+
+/* Note: on narrow screens the InfoTooltip component measures the bubble
+   after mount and applies an inline `left:` or `right:` offset so it
+   stays inside the viewport regardless of where the trigger sits. The
+   max-width above still caps overall width; positioning is now done in
+   JS to keep the bubble anchored to the trigger. */
 
 /* ---- toast --------------------------------------------------------------
    Non-blocking confirmation of actions (intake recorded, request created,
@@ -1235,7 +1389,12 @@ textarea {
 
 .stock-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  /* `minmax(0, 1fr)` — not just `1fr` — so the grid cell is allowed to
+     shrink below its intrinsic min-content. Without this, the fixed-
+     width right column on `.stock-tile` (number + status chip) forces
+     the cell to grow, and the tile clips at the container's right edge
+     on narrow phones. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -1254,6 +1413,23 @@ textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   min-height: 60px;
+  /* `min-width: 0` inside grid/flex parents unlocks the child's ability
+     to shrink; without it, the tile pushes past the grid cell on
+     narrow screens. */
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Narrow phones: shave padding + gap so the number + status chip stay
+   inside the tile boundary. */
+@media (max-width: 480px) {
+  .stock-tile {
+    padding: 10px;
+    gap: 8px;
+  }
+  .stock-tile-num {
+    font-size: 0.9rem;
+  }
 }
 
 .stock-tile-body {
