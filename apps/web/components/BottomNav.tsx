@@ -13,6 +13,21 @@ const ICONS = {
       <rect x="3" y="14" width="8" height="7" rx="1.5" />
     </svg>
   ),
+  users: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="9" cy="9" r="3.5" />
+      <path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6" strokeLinecap="round" />
+      <circle cx="17" cy="7" r="2.5" />
+      <path d="M15 14c2.6.4 4.5 2.2 4.5 5" strokeLinecap="round" />
+    </svg>
+  ),
+  warehouse: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M3 21V9l9-6 9 6v12" strokeLinejoin="round" />
+      <path d="M9 21v-8h6v8" />
+      <path d="M3 21h18" strokeLinecap="round" />
+    </svg>
+  ),
   requests: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M5 3h11l3 3v15H5z" />
@@ -73,13 +88,20 @@ const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER',
 const REQUEST_VIEW_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER']
 const ALL_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER', 'SALES']
 
+// Same order as SideNav so navigating on mobile matches desktop muscle
+// memory. If we run out of horizontal room the nav scrolls (see the CSS
+// on `.bottom-nav`), so we can safely include every destination the
+// sidebar has instead of curating a subset.
 const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/', label: 'Home', icon: 'dashboard', roles: ALL_ROLES },
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
+  { href: '/warehouse', label: 'Warehouse', icon: 'warehouse', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER'] },
+  { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
+  { href: '/admin/audit', label: 'Audits', icon: 'admin', roles: ['OWNER'] },
   // Temporarily hidden from the nav — the underlying routes still work
   // if visited directly, so this is nav-only. Uncomment to restore.
   // { href: '/notifications', label: 'Alerts', icon: 'bell', roles: REQUEST_VIEW_ROLES },

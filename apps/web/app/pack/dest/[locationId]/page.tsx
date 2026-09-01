@@ -817,6 +817,7 @@ function DestinationPackBody() {
                     borderRadius: 'var(--radius-sm)',
                     border: '1px solid var(--line)',
                     background: 'var(--surface-sunken)',
+                    flexWrap: 'wrap',
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0, fontSize: '0.85rem' }}>
