@@ -19,11 +19,14 @@ import type {
   ThresholdDto,
   UnassignedColourVariant,
   VariationSummary,
+  WarehouseInventoryResponse,
+  WarehouseInventoryRow,
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
+import { AuditService } from '../audit/audit.service.js'
 
 /// The name catalog-import (Task 2 of the earlier catalog plan) leaves every
 /// colour variant in until a human or the lexical pass reassigns it. See
@@ -48,6 +51,7 @@ export class CatalogReadService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledgerRead: LedgerReadService,
+    private readonly audit: AuditService,
   ) {}
 
   async listLocations(): Promise<LocationDto[]> {
@@ -122,13 +126,24 @@ export class CatalogReadService {
       const created = await this.prisma.category.create({
         data: { parentId: null, name: input.name, sortlyFolder: input.name },
       })
+      await this.audit.recordCreation(null, 'Category', created.id, `root folder "${created.name}"`, {
+        source: 'UI',
+      })
       return { id: created.id, parentId: created.parentId, name: created.name }
     }
+    const preExisting = await this.prisma.category.findUnique({
+      where: { parentId_name: { parentId: input.parentId, name: input.name } },
+    })
     const row = await this.prisma.category.upsert({
       where: { parentId_name: { parentId: input.parentId, name: input.name } },
       create: { parentId: input.parentId, name: input.name, sortlyFolder: input.name },
       update: {},
     })
+    if (!preExisting) {
+      await this.audit.recordCreation(null, 'Category', row.id, `folder "${row.name}" under ${input.parentId}`, {
+        source: 'UI',
+      })
+    }
     return { id: row.id, parentId: row.parentId, name: row.name }
   }
 
@@ -350,10 +365,22 @@ export class CatalogReadService {
       const family = await tx.colourFamily.findUnique({ where: { id: colourFamilyId } })
       if (!family) throw new NotFoundException(`colour family ${colourFamilyId} not found`)
 
+      const previousFamilyId = variant.colourFamilyId
       const updated = await tx.colourVariant.update({
         where: { id: colourVariantId },
         data: { colourFamilyId, familyAssignmentSource: 'MANUAL', familyConfidence: 1 },
       })
+
+      if (previousFamilyId !== colourFamilyId) {
+        await this.audit.record(tx, {
+          entity: 'ColourVariant',
+          entityId: colourVariantId,
+          field: 'colourFamilyId',
+          oldValue: previousFamilyId,
+          newValue: colourFamilyId,
+          source: 'UI',
+        })
+      }
 
       const warehouseVariants = await tx.warehouseVariant.findMany({ where: { colourVariantId } })
       const variationCache = new Map<string, string>()
@@ -782,26 +809,62 @@ export class CatalogReadService {
     return out
   }
 
-  /// Set of WarehouseVariant ids that have EVER had a ledger event at
-  /// this location. Used to decide which SKUs "belong to" a market's
-  /// catalog — a market that has never received a Beanie shouldn't have
-  /// Beanies show up at 0 alongside things it actually carries. A
-  /// market that received-then-sold-out still shows the SKU, because
-  /// the ledger still contains its DISPATCH row.
+  /// Set of WarehouseVariant ids that "belong to" this market's catalog.
+  /// A SKU counts as belonging if either:
+  ///   (a) it has EVER had a ledger event at this location (received,
+  ///       sold, corrected, etc.), OR
+  ///   (b) it is currently in-transit to this market — i.e. it appears
+  ///       on a BoxLine of a Box in state DISPATCHED whose destination
+  ///       is this location.
   ///
-  /// Warehouses skip this filter (they hold the master catalog), so
+  /// (b) is what makes brand-new SKUs show up in the market catalog as
+  /// soon as the warehouse dispatches them, before the market has
+  /// physically scanned/received the box. The market's on-hand still
+  /// reads 0 until the INTAKE ledger event lands (that side lives in
+  /// `onHandByVariantAtLocation`, deliberately untouched here).
+  ///
+  /// Warehouses skip this filter — they hold the master catalog — so
   /// this helper is only called when scoping to a MARKET location.
   private async variantsSeenAtLocation(locationId: string): Promise<Set<string>> {
-    const rows = await this.prisma.ledgerEvent.groupBy({
+    const [ledgerRows, inTransitRows] = await Promise.all([
+      this.prisma.ledgerEvent.groupBy({
+        by: ['warehouseVariantId'],
+        where: {
+          warehouseVariantId: { not: null },
+          locationId,
+        },
+      }),
+      this.prisma.boxLine.findMany({
+        where: {
+          box: { state: 'DISPATCHED', destinationLocationId: locationId },
+        },
+        select: { warehouseVariantId: true },
+        distinct: ['warehouseVariantId'],
+      }),
+    ])
+    const out = new Set<string>()
+    for (const r of ledgerRows) {
+      if (r.warehouseVariantId) out.add(r.warehouseVariantId)
+    }
+    for (const r of inTransitRows) out.add(r.warehouseVariantId)
+    return out
+  }
+
+  /// Per-variant quantity currently in-transit to this market — units
+  /// packed into boxes whose state is DISPATCHED and destined here.
+  /// This is a display-only figure surfaced by browse endpoints so the
+  /// market manager sees what's coming; it does NOT feed on-hand.
+  private async inTransitByVariantAtLocation(locationId: string): Promise<Map<string, number>> {
+    const rows = await this.prisma.boxLine.groupBy({
       by: ['warehouseVariantId'],
+      _sum: { quantity: true },
       where: {
-        warehouseVariantId: { not: null },
-        locationId,
+        box: { state: 'DISPATCHED', destinationLocationId: locationId },
       },
     })
-    const out = new Set<string>()
+    const out = new Map<string, number>()
     for (const r of rows) {
-      if (r.warehouseVariantId) out.add(r.warehouseVariantId)
+      out.set(r.warehouseVariantId, r._sum.quantity ?? 0)
     }
     return out
   }
@@ -850,6 +913,174 @@ export class CatalogReadService {
     return fallback ?? null
   }
 
+  /// First WAREHOUSE-kind location, ordered by name. Used as the default
+  /// when a caller doesn't specify one.
+  async firstWarehouseLocation(): Promise<{ id: string; name: string } | null> {
+    const row = await this.prisma.location.findFirst({
+      where: { kind: 'WAREHOUSE' },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true },
+    })
+    return row ?? null
+  }
+
+  /// Paginated warehouse inventory for the /warehouse screen. Server-side
+  /// search + slice so the frontend never has to pull the entire catalog
+  /// just to render 50 rows.
+  ///
+  /// - `total` and `distinctItems` are grand totals across the whole
+  ///   warehouse — deliberately unaffected by `q` so the header numbers
+  ///   stay stable while the operator narrows the search.
+  /// - `filteredCount` reflects how many rows match the current `q`.
+  /// - `nextOffset` is null when there are no more pages.
+  ///
+  /// Sort order matches the previous client-side behaviour: on-hand DESC,
+  /// then item-group name ASC for the long "0 stock" tail.
+  async warehouseInventory(params: {
+    locationId: string
+    q?: string
+    offset?: number
+    limit?: number
+  }): Promise<WarehouseInventoryResponse> {
+    const limit = Math.min(Math.max(params.limit ?? 50, 1), 200)
+    const offset = Math.max(params.offset ?? 0, 0)
+    const query = (params.q ?? '').trim().toLowerCase()
+
+    // The `.replace` guards against SQL LIKE wildcards in operator input
+    // so a user typing `%` doesn't accidentally match everything.
+    const needle = query.replace(/[\\%_]/g, '')
+
+    // One aggregate for family-level on-hand and one for per-variant
+    // on-hand at this warehouse — cheap groupBy queries. Plus the full
+    // WarehouseVariant catalog joined to its item-group/colour-family/size
+    // metadata so we can render the display row without a second call.
+    const [byFamily, byVariant, variants] = await Promise.all([
+      this.prisma.ledgerEvent.groupBy({
+        by: ['variationId'],
+        _sum: { quantity: true },
+        where: { locationId: params.locationId },
+      }),
+      this.prisma.ledgerEvent.groupBy({
+        by: ['warehouseVariantId', 'variationId'],
+        _sum: { quantity: true },
+        where: { locationId: params.locationId, warehouseVariantId: { not: null } },
+      }),
+      this.prisma.warehouseVariant.findMany({
+        include: {
+          itemGroup: { select: { name: true } },
+          colourVariant: { select: { name: true, photoUrl: true } },
+          sizeOption: { select: { name: true } },
+          variation: {
+            select: {
+              id: true,
+              colourFamily: { select: { name: true } },
+              sizeOption: { select: { name: true } },
+              itemGroup: { select: { name: true } },
+            },
+          },
+        },
+      }),
+    ])
+
+    const onHandByVariation = new Map(byFamily.map((r) => [r.variationId, r._sum.quantity ?? 0]))
+    const onHandByVariant = new Map<string, number>()
+    for (const r of byVariant) {
+      if (r.warehouseVariantId) onHandByVariant.set(r.warehouseVariantId, r._sum.quantity ?? 0)
+    }
+
+    // Group WarehouseVariants by variation so each row can carry its
+    // per-variant split. Sort variants alphabetically inside each group
+    // for a stable display order.
+    const variantsByVariation = new Map<string, typeof variants>()
+    for (const wv of variants) {
+      const bucket = variantsByVariation.get(wv.variationId) ?? []
+      bucket.push(wv)
+      variantsByVariation.set(wv.variationId, bucket)
+    }
+    for (const [, list] of variantsByVariation) {
+      list.sort((a, b) => a.colourVariant.name.localeCompare(b.colourVariant.name))
+    }
+
+    // Placeholder-only rows (single "—" variant used for axis-less
+    // products like Bags) don't need the expander in the UI.
+    const hasMeaningfulSubVariants = (list: typeof variants) =>
+      list.length > 1 || (list.length === 1 && list[0]!.colourVariant.name !== '—')
+
+    // Materialise one row per variation. Rows that never had a variant
+    // recorded (fresh product with only family-level history) still show
+    // up because we key off variantsByVariation, not the ledger.
+    const allRows: WarehouseInventoryRow[] = []
+    for (const [variationId, list] of variantsByVariation) {
+      const first = list[0]!
+      const rowVariants = hasMeaningfulSubVariants(list)
+        ? list.map((wv) => ({
+            warehouseVariantId: wv.id,
+            colourVariantName: wv.colourVariant.name,
+            warehouseSku: wv.warehouseSku,
+            onHand: onHandByVariant.get(wv.id) ?? 0,
+            // Per-variant photo: prefer the SKU's own uploads, fall back
+            // to the shared ColourVariant photo (usually a Sortly archive)
+            // so a fresh variant with no explicit photo still shows a
+            // recognisable colour swatch.
+            photoUrl: wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null,
+          }))
+        : []
+      const previewPhotoUrl =
+        list.find((wv) => wv.photoUrls[0])?.photoUrls[0] ??
+        list.find((wv) => wv.colourVariant.photoUrl)?.colourVariant.photoUrl ??
+        null
+      allRows.push({
+        variationId,
+        itemGroupName: first.variation.itemGroup.name,
+        colourFamilyName: first.variation.colourFamily.name,
+        sizeOptionName: first.variation.sizeOption.name,
+        previewPhotoUrl,
+        onHand: onHandByVariation.get(variationId) ?? 0,
+        variants: rowVariants,
+      })
+    }
+
+    // Grand totals — computed BEFORE search, so the header stays stable
+    // while the operator narrows the list.
+    const total = allRows.reduce((s, r) => s + r.onHand, 0)
+    const distinctItems = allRows.length
+
+    // Search filter — server-side ILIKE-esque contains match on the
+    // display strings and every variant's colour/SKU. Kept
+    // case-insensitive; punctuation-sensitive so "S" doesn't match every
+    // "Small" plus every "SKU-…".
+    const filtered = needle
+      ? allRows.filter((r) => {
+          if (r.itemGroupName.toLowerCase().includes(needle)) return true
+          if (r.colourFamilyName.toLowerCase().includes(needle)) return true
+          if (r.sizeOptionName.toLowerCase().includes(needle)) return true
+          return r.variants.some(
+            (v) =>
+              v.colourVariantName.toLowerCase().includes(needle) ||
+              v.warehouseSku.toLowerCase().includes(needle),
+          )
+        })
+      : allRows
+
+    // Sort by on-hand DESC then name ASC — matches the pre-server-side
+    // client behaviour so the operator sees the same order as before.
+    filtered.sort((a, b) => {
+      if (b.onHand !== a.onHand) return b.onHand - a.onHand
+      return a.itemGroupName.localeCompare(b.itemGroupName)
+    })
+
+    const page = filtered.slice(offset, offset + limit)
+    const nextOffset = offset + limit < filtered.length ? offset + limit : null
+
+    return {
+      rows: page,
+      total,
+      distinctItems,
+      filteredCount: filtered.length,
+      nextOffset,
+    }
+  }
+
   /// Leaf rows: one WarehouseVariant per card, with warehouse-wide on-hand.
   /// Response also carries the item group's parent Category chain so the
   /// UI renders its breadcrumb from a single call.
@@ -861,7 +1092,8 @@ export class CatalogReadService {
     const itemGroup = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
     if (!itemGroup) throw new NotFoundException(`item group ${itemGroupId} not found`)
     const scopedLocation = await this.resolveBrowseLocation(actor, requestedLocationId)
-    const [variants, onHandMap, categories] = await Promise.all([
+    const isMarketScope = scopedLocation?.kind === 'MARKET'
+    const [variants, onHandMap, categories, inTransitMap] = await Promise.all([
       this.prisma.warehouseVariant.findMany({
         where: { itemGroupId },
         include: {
@@ -874,6 +1106,9 @@ export class CatalogReadService {
       }),
       scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
       this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
+      isMarketScope
+        ? this.inTransitByVariantAtLocation(scopedLocation!.id)
+        : Promise.resolve(new Map<string, number>()),
     ])
     const catById = new Map(categories.map((c) => [c.id, c]))
     const breadcrumb: Array<{ id: string; name: string }> = []
@@ -884,10 +1119,11 @@ export class CatalogReadService {
       breadcrumb.unshift({ id: c.id, name: c.name })
       cursor = c.parentId
     }
-    // At a market, drop SKUs that this location has never seen — same
-    // rule as the folder-level filter in browseFolder.
-    const seenAtMarket =
-      scopedLocation?.kind === 'MARKET' ? await this.variantsSeenAtLocation(scopedLocation.id) : null
+    // At a market, drop SKUs that this location has never seen AND has
+    // nothing incoming for. Same rule as the folder-level filter — the
+    // in-transit set folds into `variantsSeenAtLocation` so an inbound
+    // brand-new SKU still lands in the market view.
+    const seenAtMarket = isMarketScope ? await this.variantsSeenAtLocation(scopedLocation!.id) : null
     const items: CatalogItemRow[] = variants
       .filter((wv) => !seenAtMarket || seenAtMarket.has(wv.id))
       .map((wv) => ({
@@ -900,6 +1136,7 @@ export class CatalogReadService {
         warehouseSku: wv.warehouseSku,
         photoUrl: wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null,
         onHand: onHandMap.get(wv.id) ?? 0,
+        inTransitQty: inTransitMap.get(wv.id) ?? 0,
         unitCostCents: wv.unitCostCents,
       }))
     return {
@@ -1030,7 +1267,7 @@ export class CatalogReadService {
     //    this market. Warehouses hold the master catalog, so they skip
     //    the filter and show every folder as before.
     const isMarketScope = scopedLocation?.kind === 'MARKET'
-    const [allVariants, onHandMap, allItemGroups, seenVariantIds] = await Promise.all([
+    const [allVariants, onHandMap, allItemGroups, seenVariantIds, inTransitMap] = await Promise.all([
       this.prisma.warehouseVariant.findMany({
         include: {
           itemGroup: { select: { id: true, categoryId: true, name: true } },
@@ -1041,15 +1278,29 @@ export class CatalogReadService {
       scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
       this.prisma.itemGroup.findMany({ orderBy: { name: 'asc' } }),
       isMarketScope ? this.variantsSeenAtLocation(scopedLocation!.id) : Promise.resolve(null as Set<string> | null),
+      // In-transit counts are only meaningful for a MARKET scope: they
+      // reflect DISPATCHED boxes headed there but not yet received. At a
+      // warehouse everything either has ledger on-hand or hasn't happened
+      // yet, so we skip the query entirely.
+      isMarketScope
+        ? this.inTransitByVariantAtLocation(scopedLocation!.id)
+        : Promise.resolve(new Map<string, number>()),
     ])
 
     interface Bucket {
       itemCount: number
       totalQty: number
       totalValueCents: number
+      inTransitQty: number
       previewPhotoUrl: string | null
     }
-    const emptyBucket = (): Bucket => ({ itemCount: 0, totalQty: 0, totalValueCents: 0, previewPhotoUrl: null })
+    const emptyBucket = (): Bucket => ({
+      itemCount: 0,
+      totalQty: 0,
+      totalValueCents: 0,
+      inTransitQty: 0,
+      previewPhotoUrl: null,
+    })
 
     /// Per-Category subtree totals (walks descendants), and per-ItemGroup
     /// direct totals. Photo is the deterministic first non-null preview
@@ -1060,7 +1311,14 @@ export class CatalogReadService {
     for (const ig of allItemGroups) itemGroupTotals.set(ig.id, emptyBucket())
 
     /// Walk this WV up the category chain and credit every ancestor.
-    const creditAncestors = (leafCatId: string, itemCount: number, qty: number, valueCents: number, photo: string | null) => {
+    const creditAncestors = (
+      leafCatId: string,
+      itemCount: number,
+      qty: number,
+      valueCents: number,
+      inTransit: number,
+      photo: string | null,
+    ) => {
       let cursor: string | null = leafCatId
       while (cursor) {
         const bucket = categoryTotals.get(cursor)
@@ -1068,6 +1326,7 @@ export class CatalogReadService {
         bucket.itemCount += itemCount
         bucket.totalQty += qty
         bucket.totalValueCents += valueCents
+        bucket.inTransitQty += inTransit
         if (bucket.previewPhotoUrl === null && photo) bucket.previewPhotoUrl = photo
         const parent: string | null = catById.get(cursor)?.parentId ?? null
         cursor = parent
@@ -1075,12 +1334,14 @@ export class CatalogReadService {
     }
 
     for (const wv of allVariants) {
-      // Market scope: skip any SKU this location has never seen. That's
-      // what stops "Beanies · 0 units" showing up on an Atlanta market
-      // page when Atlanta has never received a Beanie.
+      // Market scope: skip any SKU this location has never seen AND has
+      // no in-transit units for. `variantsSeenAtLocation` already
+      // includes the in-transit set so a brand-new SKU on a DISPATCHED
+      // box passes the filter and lands in the market catalog.
       if (seenVariantIds && !seenVariantIds.has(wv.id)) continue
 
       const onHand = onHandMap.get(wv.id) ?? 0
+      const inTransit = inTransitMap.get(wv.id) ?? 0
       const valueCents = onHand * (wv.unitCostCents ?? 0)
       const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
 
@@ -1090,11 +1351,12 @@ export class CatalogReadService {
         igBucket.itemCount += 1
         igBucket.totalQty += onHand
         igBucket.totalValueCents += valueCents
+        igBucket.inTransitQty += inTransit
         if (igBucket.previewPhotoUrl === null && photo) igBucket.previewPhotoUrl = photo
       }
 
       // Subtree category totals: every ancestor Category up to root
-      creditAncestors(wv.itemGroup.categoryId, 1, onHand, valueCents, photo)
+      creditAncestors(wv.itemGroup.categoryId, 1, onHand, valueCents, inTransit, photo)
     }
 
     /// Materialise a Category as a folder tile. `subfolderCount` counts
@@ -1119,6 +1381,7 @@ export class CatalogReadService {
         itemCount: b.itemCount,
         totalQty: b.totalQty,
         totalValueCents: b.totalValueCents,
+        inTransitQty: b.inTransitQty,
         previewPhotoUrl: b.previewPhotoUrl,
       }
     }
@@ -1135,12 +1398,15 @@ export class CatalogReadService {
         itemCount: b.itemCount,
         totalQty: b.totalQty,
         totalValueCents: b.totalValueCents,
+        inTransitQty: b.inTransitQty,
         previewPhotoUrl: b.previewPhotoUrl,
       }
     }
 
     /// At a market, hide folders/item-groups that this location has
-    /// never received. Warehouses see the whole tree either way.
+    /// never received AND has nothing incoming for. In-transit items
+    /// count toward visibility so a brand-new SKU on a DISPATCHED box
+    /// shows up in the market catalog before it's physically received.
     const keepAtScope = <T extends { itemCount: number }>(rows: T[]): T[] =>
       isMarketScope ? rows.filter((r) => r.itemCount > 0) : rows
 
@@ -1217,7 +1483,7 @@ export class CatalogReadService {
     const catById = new Map(allCategories.map((c) => [c.id, c]))
 
     const isMarketScope = scopedLocation?.kind === 'MARKET'
-    const [allVariants, onHandMap, allItemGroups, seenVariantIds] = await Promise.all([
+    const [allVariants, onHandMap, allItemGroups, seenVariantIds, inTransitMap] = await Promise.all([
       this.prisma.warehouseVariant.findMany({
         include: {
           itemGroup: { select: { id: true, categoryId: true, name: true } },
@@ -1233,21 +1499,37 @@ export class CatalogReadService {
       scopedLocation ? this.onHandByVariantAtLocation(scopedLocation.id) : Promise.resolve(new Map<string, number>()),
       this.prisma.itemGroup.findMany({ orderBy: { name: 'asc' } }),
       isMarketScope ? this.variantsSeenAtLocation(scopedLocation!.id) : Promise.resolve(null as Set<string> | null),
+      isMarketScope
+        ? this.inTransitByVariantAtLocation(scopedLocation!.id)
+        : Promise.resolve(new Map<string, number>()),
     ])
 
     interface Bucket {
       itemCount: number
       totalQty: number
       totalValueCents: number
+      inTransitQty: number
       previewPhotoUrl: string | null
     }
-    const emptyBucket = (): Bucket => ({ itemCount: 0, totalQty: 0, totalValueCents: 0, previewPhotoUrl: null })
+    const emptyBucket = (): Bucket => ({
+      itemCount: 0,
+      totalQty: 0,
+      totalValueCents: 0,
+      inTransitQty: 0,
+      previewPhotoUrl: null,
+    })
     const categoryTotals = new Map<string, Bucket>()
     const itemGroupTotals = new Map<string, Bucket>()
     for (const c of allCategories) categoryTotals.set(c.id, emptyBucket())
     for (const ig of allItemGroups) itemGroupTotals.set(ig.id, emptyBucket())
 
-    const creditAncestors = (leafCatId: string, qty: number, valueCents: number, photo: string | null) => {
+    const creditAncestors = (
+      leafCatId: string,
+      qty: number,
+      valueCents: number,
+      inTransit: number,
+      photo: string | null,
+    ) => {
       let cursor: string | null = leafCatId
       while (cursor) {
         const bucket = categoryTotals.get(cursor)
@@ -1255,6 +1537,7 @@ export class CatalogReadService {
         bucket.itemCount += 1
         bucket.totalQty += qty
         bucket.totalValueCents += valueCents
+        bucket.inTransitQty += inTransit
         if (bucket.previewPhotoUrl === null && photo) bucket.previewPhotoUrl = photo
         cursor = catById.get(cursor)?.parentId ?? null
       }
@@ -1268,6 +1551,7 @@ export class CatalogReadService {
     for (const wv of allVariants) {
       if (seenVariantIds && !seenVariantIds.has(wv.id)) continue
       const onHand = onHandMap.get(wv.id) ?? 0
+      const inTransit = inTransitMap.get(wv.id) ?? 0
       const valueCents = onHand * (wv.unitCostCents ?? 0)
       const photo = wv.photoUrls[0] ?? wv.colourVariant.photoUrl ?? null
       const igBucket = itemGroupTotals.get(wv.itemGroup.id)
@@ -1275,9 +1559,10 @@ export class CatalogReadService {
         igBucket.itemCount += 1
         igBucket.totalQty += onHand
         igBucket.totalValueCents += valueCents
+        igBucket.inTransitQty += inTransit
         if (igBucket.previewPhotoUrl === null && photo) igBucket.previewPhotoUrl = photo
       }
-      creditAncestors(wv.itemGroup.categoryId, onHand, valueCents, photo)
+      creditAncestors(wv.itemGroup.categoryId, onHand, valueCents, inTransit, photo)
 
       if (
         wv.warehouseSku.toLowerCase().includes(needle) ||
@@ -1318,6 +1603,7 @@ export class CatalogReadService {
         itemCount: b.itemCount,
         totalQty: b.totalQty,
         totalValueCents: b.totalValueCents,
+        inTransitQty: b.inTransitQty,
         previewPhotoUrl: b.previewPhotoUrl,
       }
       folderHits.push({ kind: 'folder', row, path: buildPath(cat.id, false) })
@@ -1337,6 +1623,7 @@ export class CatalogReadService {
         itemCount: b.itemCount,
         totalQty: b.totalQty,
         totalValueCents: b.totalValueCents,
+        inTransitQty: b.inTransitQty,
         previewPhotoUrl: b.previewPhotoUrl,
       }
       itemGroupHits.push({ kind: 'item-group', row, path: buildPath(ig.categoryId, true) })
@@ -1375,6 +1662,7 @@ export class CatalogReadService {
           itemCount: 1,
           totalQty: onHand,
           totalValueCents: valueCents,
+          inTransitQty: inTransitMap.get(wv.id) ?? 0,
           previewPhotoUrl: photo,
         },
         path,

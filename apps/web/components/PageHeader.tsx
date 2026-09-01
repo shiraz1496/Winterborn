@@ -1,9 +1,12 @@
 import type { ReactNode } from 'react'
+import { InfoTooltip } from './InfoTooltip'
 
 /// One consistent opening on every page. `eyebrow` is an optional small tag
 /// above the title (role scope, breadcrumb hint); `description` is a plain-
 /// language line answering "what am I looking at and what am I supposed to
-/// do here". Actions render on the right side when there is room.
+/// do here" — now shown as a hoverable info icon beside the title so it
+/// doesn't dominate the layout on every page. Actions render on the right
+/// side when there is room.
 export function PageHeader({
   title,
   description,
@@ -12,7 +15,7 @@ export function PageHeader({
   titleAdornment,
 }: {
   title: string
-  description?: string
+  description?: ReactNode
   eyebrow?: string
   actions?: ReactNode
   /// Inline slot rendered directly beside the h1 (e.g. a copy-title button).
@@ -26,12 +29,14 @@ export function PageHeader({
           {eyebrow && <div className="page-header-eyebrow">{eyebrow}</div>}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <h1 style={{ margin: 0 }}>{title}</h1>
+            {description && (
+              <InfoTooltip label={`About ${title}`}>{description}</InfoTooltip>
+            )}
             {titleAdornment}
           </div>
         </div>
         {actions && <div className="page-header-actions">{actions}</div>}
       </div>
-      {description && <p className="page-header-desc">{description}</p>}
     </header>
   )
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import type { SquareCatalogItemDto, SquareCatalogSyncResult, SquareMappingOrphans } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
+import { SectionHeading } from '../../../components/SectionHeading'
 import { RequireAuth } from '../../../components/RequireAuth'
 import {
   ApiError,
@@ -119,13 +120,11 @@ function SquareSyncBody() {
 
       <div className="dash-columns">
         <div>
-          <div className="section-heading">
-            <h2>In Square but not linked to a Winterborn product</h2>
-            <span className="eyebrow">{orphans.squareOnly.length}</span>
-          </div>
-          <p className="section-desc">
-            Cached Square items whose ID isn't set on any Winterborn ItemGroup. Either wire them up on the Square mapping page or ignore (they may be gift cards / tips / test items).
-          </p>
+          <SectionHeading
+            title="In Square but not linked to a Winterborn product"
+            description="Cached Square items whose ID isn't set on any Winterborn ItemGroup. Either wire them up on the Square mapping page or ignore (they may be gift cards / tips / test items)."
+            right={<span className="eyebrow">{orphans.squareOnly.length}</span>}
+          />
           {orphans.squareOnly.length === 0 ? (
             <div className="card">
               <p style={{ margin: 0, color: 'var(--text-dim)' }}>Nothing orphaned on the Square side.</p>
@@ -145,13 +144,11 @@ function SquareSyncBody() {
         </div>
 
         <div>
-          <div className="section-heading">
-            <h2>Winterborn products with no Square link yet</h2>
-            <span className="eyebrow">{orphans.winterbornOnly.length}</span>
-          </div>
-          <p className="section-desc">
-            Winterborn ItemGroups that don't have a Square item ID set. These won't decrement stock from Square sales until they're mapped.
-          </p>
+          <SectionHeading
+            title="Winterborn products with no Square link yet"
+            description="Winterborn ItemGroups that don't have a Square item ID set. These won't decrement stock from Square sales until they're mapped."
+            right={<span className="eyebrow">{orphans.winterbornOnly.length}</span>}
+          />
           {orphans.winterbornOnly.length === 0 ? (
             <div className="card">
               <p style={{ margin: 0, color: 'var(--text-dim)' }}>Every Winterborn product is linked to a Square item.</p>
@@ -176,11 +173,13 @@ function SquareSyncBody() {
         </div>
       </div>
 
-      <div className="section-heading" style={{ marginTop: 24 }}>
-        <h2>All cached Square items</h2>
-        <span className="eyebrow">{items.length}</span>
+      <div style={{ marginTop: 24 }}>
+        <SectionHeading
+          title="All cached Square items"
+          description="Straight dump of every ITEM row Square returned on the last sync."
+          right={<span className="eyebrow">{items.length}</span>}
+        />
       </div>
-      <p className="section-desc">Straight dump of every ITEM row Square returned on the last sync.</p>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
         <thead>
           <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--line)' }}>

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { PrismaModule } from './prisma/prisma.module.js'
+import { AuditModule } from './audit/audit.module.js'
 import { LedgerModule } from './ledger/ledger.module.js'
 import { SquareModule } from './square/square.module.js'
 import { AuthModule } from './auth/auth.module.js'
@@ -15,6 +16,7 @@ import { NotificationsModule } from './notifications/notifications.module.js'
 @Module({
   imports: [
     PrismaModule,
+    AuditModule,
     LedgerModule,
     SquareModule,
     AuthModule,

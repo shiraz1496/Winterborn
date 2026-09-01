@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { BoxesService } from './boxes.service.js'
+import { AuditService } from '../audit/audit.service.js'
 
 const UNIQUE_VIOLATION = 'P2002'
 
@@ -23,16 +24,25 @@ export class LoadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly boxes: BoxesService,
+    private readonly audit: AuditService,
   ) {}
 
   async create(input: CreateLoadInput, actor: CurrentUserPayload) {
-    return this.prisma.load.create({
+    const load = await this.prisma.load.create({
       data: {
         vehicleLabel: input.vehicleLabel,
         destinationLocationId: input.destinationLocationId,
         createdById: actor.id,
       },
     })
+    await this.audit.recordCreation(
+      null,
+      'Load',
+      load.id,
+      `${load.vehicleLabel} → ${load.destinationLocationId}`,
+      { actorId: actor.id, actorRole: actor.role, locationId: load.destinationLocationId, source: 'UI' },
+    )
+    return load
   }
 
   async list() {
@@ -79,6 +89,12 @@ export class LoadsService {
 
     if (!load.dispatchedAt) {
       await this.prisma.load.update({ where: { id: loadId }, data: { dispatchedAt: new Date() } })
+      await this.audit.recordTransition(null, 'Load', loadId, 'dispatchedAt', 'null', new Date().toISOString(), {
+        actorId: actor.id,
+        actorRole: actor.role,
+        locationId: load.destinationLocationId,
+        source: 'UI',
+      })
     }
 
     return { loadId, boxes: results }

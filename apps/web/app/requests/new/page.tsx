@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type { LocationDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
+import { CopyButton } from '../../../components/CopyButton'
 import { PageHeader } from '../../../components/PageHeader'
 import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { RequireAuth } from '../../../components/RequireAuth'
@@ -14,6 +15,7 @@ import {
   listLocations,
   listVariations,
   listWarehouseVariants,
+  stockByVariant,
 } from '../../../lib/api'
 import { useToast } from '../../../lib/toast'
 
@@ -43,6 +45,7 @@ function NewRequestBody() {
   const [locations, setLocations] = useState<LocationDto[]>([])
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [allVariants, setAllVariants] = useState<WarehouseVariantSummary[]>([])
+  const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
   const [locationId, setLocationId] = useState<string>(user?.locationId ?? '')
   const [query, setQuery] = useState('')
   const [families, setFamilies] = useState<DraftFamily[]>([])
@@ -65,6 +68,33 @@ function NewRequestBody() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /// Market on-hand for the selected location. Refetched whenever the
+  /// market picker changes so an owner switching between markets sees
+  /// the right numbers instead of a stale snapshot from the first market.
+  /// Per-variant sums at a market read as "sent, not yet reconciled"
+  /// (sales carry no variant), but summing them per family still gives
+  /// the family-level total accurate for planning what to request.
+  useEffect(() => {
+    if (!locationId) {
+      setOnHandByVariantId(new Map())
+      return
+    }
+    let cancelled = false
+    stockByVariant(locationId)
+      .then((stock) => {
+        if (cancelled) return
+        const m = new Map<string, number>()
+        for (const s of stock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
+        setOnHandByVariantId(m)
+      })
+      .catch(() => {
+        if (!cancelled) setOnHandByVariantId(new Map())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [locationId])
+
   const markets = useMemo(() => locations.filter((l) => l.kind === 'MARKET'), [locations])
   const variantsByVariation = useMemo(() => {
     const m = new Map<string, WarehouseVariantSummary[]>()
@@ -76,6 +106,14 @@ function NewRequestBody() {
     for (const [, list] of m) list.sort((a, b) => a.colourVariantName.localeCompare(b.colourVariantName))
     return m
   }, [allVariants])
+
+  const familyOnHand = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const [variationId, list] of variantsByVariation) {
+      m.set(variationId, list.reduce((sum, wv) => sum + (onHandByVariantId.get(wv.id) ?? 0), 0))
+    }
+    return m
+  }, [variantsByVariation, onHandByVariantId])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -226,6 +264,7 @@ function NewRequestBody() {
         <div className="list" style={{ marginBottom: 20 }}>
           {matches.map((v) => {
             const variantCount = variantsByVariation.get(v.id)?.length ?? 0
+            const onHand = familyOnHand.get(v.id) ?? 0
             return (
               <button
                 key={v.id}
@@ -247,9 +286,18 @@ function NewRequestBody() {
                     {v.colourFamilyName} · {v.sizeOptionName}
                   </div>
                 </div>
-                <span className="chip">
-                  {variantCount} variant{variantCount === 1 ? '' : 's'}
-                </span>
+                <div style={{ textAlign: 'right' }}>
+                  <div
+                    className="mono"
+                    style={{ fontWeight: 700, fontSize: '1.1rem', color: onHand === 0 ? 'var(--text-faint)' : 'var(--text)' }}
+                    aria-label={`${onHand} on hand in market`}
+                  >
+                    {onHand}
+                  </div>
+                  <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
+                    in market · {variantCount} variant{variantCount === 1 ? '' : 's'}
+                  </span>
+                </div>
               </button>
             )
           })}
@@ -278,11 +326,18 @@ function NewRequestBody() {
             return (
               <div key={f.variationId} className="card">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setOpenId(open ? null : f.variationId)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setOpenId(open ? null : f.variationId)
+                      }
+                    }}
+                    aria-expanded={open}
                     style={{
-                      all: 'unset',
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
@@ -297,7 +352,12 @@ function NewRequestBody() {
                       alt={f.itemGroupName}
                     />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="list-row-title">{f.itemGroupName}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span className="list-row-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {f.itemGroupName}
+                        </span>
+                        <CopyButton text={f.itemGroupName} label="Copy product name" size="sm" />
+                      </div>
                       <div className="list-row-meta">
                         <span style={{ color: 'var(--text-faint)' }}>
                           {(f.categoryPath.length > 1 ? f.categoryPath.slice(1) : f.categoryPath).join(' › ')} ·{' '}
@@ -313,7 +373,7 @@ function NewRequestBody() {
                         {f.variants.length} variant{f.variants.length === 1 ? '' : 's'}
                       </span>
                     </div>
-                  </button>
+                  </div>
                   <button
                     className="btn btn-ghost"
                     onClick={() => removeFamily(f.variationId)}
@@ -333,6 +393,7 @@ function NewRequestBody() {
                     ) : (
                       f.variants.map((v) => {
                         const qty = f.qtyByVariant[v.id] ?? 0
+                        const onHand = onHandByVariantId.get(v.id) ?? 0
                         return (
                           <div
                             key={v.id}
@@ -347,6 +408,12 @@ function NewRequestBody() {
                             <div className="list-row-body">
                               <div className="list-row-title">{v.colourVariantName}</div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
+                              <div
+                                className="list-row-meta"
+                                style={{ color: onHand === 0 ? 'var(--text-faint)' : 'var(--text-dim)' }}
+                              >
+                                {onHand} in market
+                              </div>
                             </div>
                             <div className="stepper">
                               <button
@@ -357,7 +424,16 @@ function NewRequestBody() {
                               >
                                 −
                               </button>
-                              <span className="stepper-value">{qty}</span>
+                              <input
+                                type="number"
+                                className="stepper-input"
+                                min={0}
+                                step={1}
+                                value={qty}
+                                onChange={(e) => setVariantQty(f.variationId, v.id, Number(e.target.value))}
+                                onFocus={(e) => e.currentTarget.select()}
+                                aria-label={`Quantity of ${v.colourVariantName}`}
+                              />
                               <button
                                 className="stepper-btn"
                                 onClick={() => setVariantQty(f.variationId, v.id, qty + 1)}

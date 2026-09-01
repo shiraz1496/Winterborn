@@ -89,6 +89,27 @@ export function FolderTile({ folder }: { folder: CatalogFolderRow }) {
           )}
           <IconStat glyph="stack" value={folder.itemCount} />
           <IconStat glyph="money" value={formatMoney(folder.totalValueCents)} />
+          {folder.inTransitQty > 0 && (
+            // Amber pill hints at "N units incoming" — matches the
+            // colour we use elsewhere for pending/inbound status so the
+            // market manager can spot arrivals at a glance.
+            <span
+              title="Units currently in transit to this market"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '2px 8px',
+                borderRadius: 999,
+                background: 'rgba(210, 137, 42, 0.14)',
+                color: 'var(--signal, #d2892a)',
+                fontSize: '0.7rem',
+                fontWeight: 700,
+                letterSpacing: '0.03em',
+              }}
+            >
+              +{folder.inTransitQty} in transit
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -163,25 +184,79 @@ export function Breadcrumbs({ crumbs }: { crumbs: Array<{ href?: string; label: 
       style={{
         display: 'flex',
         flexWrap: 'wrap',
-        gap: 6,
         alignItems: 'center',
         fontSize: '0.82rem',
-        marginBottom: 8,
-        color: 'var(--text-dim)',
+        marginBottom: 14,
+        padding: '8px 12px',
+        borderRadius: 999,
+        background: 'var(--surface-sunken)',
+        border: '1px solid var(--line)',
+        rowGap: 4,
+        columnGap: 2,
+        // Sit as a chip strip: readable but visually distinct from the
+        // page's H1. Keep the whole trail on one line when it fits; wrap
+        // gracefully on narrow screens.
+        maxWidth: 'fit-content',
       }}
     >
-      {crumbs.map((c, i) => (
-        <span key={`${i}:${c.label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          {c.href ? (
-            <Link href={c.href} style={{ color: 'var(--text-dim)', textDecoration: 'none' }}>
-              {c.label}
-            </Link>
-          ) : (
-            <span style={{ color: 'var(--ink)' }}>{c.label}</span>
-          )}
-          {i < crumbs.length - 1 && <span style={{ color: 'var(--text-faint)' }}>/</span>}
-        </span>
-      ))}
+      {crumbs.map((c, i) => {
+        const isLast = i === crumbs.length - 1
+        return (
+          <span key={`${i}:${c.label}`} style={{ display: 'inline-flex', alignItems: 'center' }}>
+            {c.href && !isLast ? (
+              <Link
+                href={c.href}
+                style={{
+                  color: 'var(--text-dim)',
+                  textDecoration: 'none',
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  transition: 'background 0.1s, color 0.1s',
+                }}
+                // Hover state via inline handlers — the app's globals.css
+                // doesn't ship a scoped Breadcrumb rule and we want the
+                // trail to visibly respond to pointer without touching
+                // shared styling elsewhere.
+                // Hover uses the same amber the sidebar's active nav
+                // item uses (`.app-sidebar-item.active` in globals.css) so
+                // the breadcrumb feels part of the same navigation system.
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'rgba(210, 137, 42, 0.1)'
+                  e.currentTarget.style.color = 'var(--signal, #d2892a)'
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent'
+                  e.currentTarget.style.color = 'var(--text-dim)'
+                }}
+              >
+                {c.label}
+              </Link>
+            ) : (
+              <span
+                aria-current={isLast ? 'page' : undefined}
+                style={{
+                  color: isLast ? 'var(--text)' : 'var(--text-dim)',
+                  fontWeight: isLast ? 600 : 400,
+                  padding: '2px 8px',
+                }}
+              >
+                {c.label}
+              </span>
+            )}
+            {!isLast && (
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 12 12"
+                aria-hidden="true"
+                style={{ color: 'var(--text-faint)', flexShrink: 0 }}
+              >
+                <path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </span>
+        )
+      })}
     </nav>
   )
 }

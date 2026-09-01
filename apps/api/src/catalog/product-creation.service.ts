@@ -11,6 +11,7 @@ import {
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
+import { AuditService } from '../audit/audit.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 
 /// Matrix-shaped product creation from the Receive Intake modal. Given
@@ -29,6 +30,7 @@ export class ProductCreationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: LedgerService,
+    private readonly audit: AuditService,
   ) {}
 
   async create(raw: CreateProductInput, user: CurrentUserPayload): Promise<CreateProductResult> {
@@ -221,8 +223,13 @@ export class ProductCreationService {
           variationCache.set(variationKey, variationId)
         }
 
+        // SKU is a stable identifier, deliberately not tied to a display
+        // name: renaming a colour or size later would otherwise silently
+        // invalidate any physical labels or external references pointing
+        // at the old string. The hash covers (itemGroup, colour, size)
+        // which is unique per SKU in the create-modal flow.
         const skuSeed = `${itemGroup.id}-${colourVariantId}-${sizeOptionId}`
-        const warehouseSku = `WV-${slugify(colourVariantName)}-${shortHash(skuSeed)}`
+        const warehouseSku = `WV-${shortHash(skuSeed)}`
 
         let wv
         try {
@@ -324,6 +331,17 @@ export class ProductCreationService {
       })
     }
 
+    // Audit outside the transaction — LedgerEvent rows above are the
+    // inventory record; the AuditLog row here is the "someone created
+    // a product" fact useful when the owner reviews recent additions.
+    await this.audit.recordCreation(
+      null,
+      'ItemGroup',
+      transactional.itemGroup.id,
+      `${transactional.itemGroup.name} — ${skus.length} SKU${skus.length === 1 ? '' : 's'}, ${totalUnits} initial units`,
+      { actorId: user.id, actorRole: user.role, source: 'UI' },
+    )
+
     return {
       itemGroupId: transactional.itemGroup.id,
       skusCreated: skus.length,
@@ -331,16 +349,6 @@ export class ProductCreationService {
       skus,
     }
   }
-}
-
-function slugify(value: string): string {
-  const slug = value
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  return slug || 'X'
 }
 
 function shortHash(value: string): string {

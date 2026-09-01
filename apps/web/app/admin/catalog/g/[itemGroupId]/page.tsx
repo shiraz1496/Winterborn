@@ -217,6 +217,29 @@ function ItemTile({ item }: { item: CatalogItemRow }) {
         >
           {item.onHand.toLocaleString()}
         </div>
+        {item.inTransitQty > 0 && (
+          // In-transit chip sits under the on-hand pill on the same corner.
+          // Signal (amber) so it reads as "attention / incoming", not stock
+          // that already counts. Only rendered at markets with pending
+          // arrivals — warehouses and empty markets get zero and skip it.
+          <div
+            style={{
+              position: 'absolute',
+              top: 32,
+              right: 6,
+              padding: '3px 8px',
+              borderRadius: 999,
+              background: 'var(--signal, #d2892a)',
+              color: '#fff',
+              fontSize: '0.68rem',
+              fontWeight: 700,
+              letterSpacing: '0.02em',
+            }}
+            title="Currently in transit — not yet received"
+          >
+            +{item.inTransitQty} in transit
+          </div>
+        )}
       </div>
       <div style={{ minWidth: 0 }}>
         <div

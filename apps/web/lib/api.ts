@@ -65,7 +65,9 @@ import {
   thresholdSchema,
   transitionRequestInputSchema,
   unassignedColourVariantSchema,
+  updateItemGroupInputSchema,
   updateRequestLineInputSchema,
+  updateWarehouseVariantInputSchema,
   variationSummarySchema,
   warehouseVariantSummarySchema,
   type AssignColourFamilyInput,
@@ -80,7 +82,9 @@ import {
   type PackBoxInput,
   type StockCorrectionInput,
   type UpdateAdminUserInput,
+  type UpdateItemGroupInput,
   type UpdateRequestLineInput,
+  type UpdateWarehouseVariantInput,
 } from '@winterborn/shared'
 
 /// Every path below is relative to this. NEXT_PUBLIC_API_URL, when set,
@@ -234,6 +238,53 @@ export function stockByVariant(locationId?: string) {
   return request('GET', `/stock/by-variant${qs({ locationId })}`, z.array(stockLevelSchema))
 }
 
+const warehouseInventoryResponseSchema = z.object({
+  rows: z.array(
+    z.object({
+      variationId: z.string(),
+      itemGroupName: z.string(),
+      colourFamilyName: z.string(),
+      sizeOptionName: z.string(),
+      previewPhotoUrl: z.string().nullable(),
+      onHand: z.number().int(),
+      variants: z.array(
+        z.object({
+          warehouseVariantId: z.string(),
+          colourVariantName: z.string(),
+          warehouseSku: z.string(),
+          onHand: z.number().int(),
+          photoUrl: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
+  total: z.number().int(),
+  distinctItems: z.number().int(),
+  filteredCount: z.number().int(),
+  nextOffset: z.number().int().nullable(),
+})
+export type WarehouseInventoryPage = z.infer<typeof warehouseInventoryResponseSchema>
+
+/// Paginated + searchable warehouse inventory. `q` is server-side
+/// filtered; `offset` supports "Load more" pagination.
+export function warehouseInventory(params: {
+  locationId?: string
+  q?: string
+  offset?: number
+  limit?: number
+} = {}) {
+  return request(
+    'GET',
+    `/warehouse/inventory${qs({
+      locationId: params.locationId,
+      q: params.q,
+      offset: params.offset != null ? String(params.offset) : undefined,
+      limit: params.limit != null ? String(params.limit) : undefined,
+    })}`,
+    warehouseInventoryResponseSchema,
+  )
+}
+
 export function salesSince(locationId?: string, days?: number) {
   return request('GET', `/stock/sales-since${qs({ locationId, days: days?.toString() })}`, z.array(salesRowSchema))
 }
@@ -294,6 +345,18 @@ export function createCategory(input: CreateCategoryInput) {
 export function createProduct(input: CreateProductInput) {
   const body = createProductInputSchema.parse(input)
   return request('POST', '/catalog/products', createProductResultSchema, body)
+}
+
+const updateResultSchema = z.object({ id: z.string(), changed: z.array(z.string()) })
+
+export function updateItemGroup(id: string, input: UpdateItemGroupInput) {
+  const body = updateItemGroupInputSchema.parse(input)
+  return request('PATCH', `/catalog/item-groups/${id}`, updateResultSchema, body)
+}
+
+export function updateWarehouseVariant(id: string, input: UpdateWarehouseVariantInput) {
+  const body = updateWarehouseVariantInputSchema.parse(input)
+  return request('PATCH', `/catalog/warehouse-variants/${id}`, updateResultSchema, body)
 }
 
 // ---- thresholds / decision queue -------------------------------------------
@@ -496,6 +559,21 @@ export function discardBox(id: string) {
   return request('DELETE', `/boxes/${id}`, z.object({ id: z.string(), discarded: z.boolean() }))
 }
 
+/// Net available at the warehouse per warehouse variant — the same
+/// number the pack service enforces server-side (on-hand minus PACKING
+/// reservations). Use this instead of `stockByVariant` on the pack UI
+/// so the "N available" chip matches what pack will actually accept.
+export function availableAtWarehouse(
+  warehouseVariantIds: string[],
+): Promise<{ available: Record<string, number> }> {
+  if (warehouseVariantIds.length === 0) return Promise.resolve({ available: {} })
+  return request(
+    'GET',
+    `/boxes/available${qs({ ids: warehouseVariantIds.join(',') })}`,
+    z.object({ available: z.record(z.number().int()) }),
+  )
+}
+
 export function getBoxLabel(id: string) {
   return request('GET', `/boxes/${id}/label`, boxLabelSchema)
 }
@@ -549,6 +627,61 @@ export function createAdminUser(input: CreateAdminUserInput) {
 
 export function updateAdminUser(id: string, input: UpdateAdminUserInput) {
   return request('PATCH', `/admin/users/${id}`, adminUserWithPasswordSchema, input)
+}
+
+// ---- audit trail (owner-only) -----------------------------------------------
+
+const auditEntrySchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  source: z.string(),
+  actorId: z.string().nullable(),
+  actorName: z.string().nullable(),
+  actorRole: z.string().nullable(),
+  locationId: z.string().nullable(),
+  locationName: z.string().nullable(),
+  entity: z.string(),
+  entityId: z.string(),
+  entityDisplayName: z.string().nullable(),
+  field: z.string(),
+  oldValue: z.string().nullable(),
+  newValue: z.string().nullable(),
+  oldValueDisplay: z.string().nullable(),
+  newValueDisplay: z.string().nullable(),
+  reason: z.string().nullable(),
+  origin: z.enum(['AUDIT_LOG', 'LEDGER_EVENT']),
+})
+export type AuditEntry = z.infer<typeof auditEntrySchema>
+
+const auditListResponseSchema = z.object({
+  entries: z.array(auditEntrySchema),
+  nextCursor: z.string().nullable(),
+})
+
+export function listAudit(params: {
+  cursor?: string
+  limit?: number
+  entity?: string
+  actorId?: string
+  origin?: 'AUDIT_LOG' | 'LEDGER_EVENT'
+  from?: string
+  to?: string
+  source?: string
+} = {}) {
+  return request(
+    'GET',
+    `/audit${qs({
+      cursor: params.cursor,
+      limit: params.limit?.toString(),
+      entity: params.entity,
+      actorId: params.actorId,
+      origin: params.origin,
+      from: params.from,
+      to: params.to,
+      source: params.source,
+    })}`,
+    auditListResponseSchema,
+  )
 }
 
 // ---- admin locations (owner + warehouse manager) ----------------------------

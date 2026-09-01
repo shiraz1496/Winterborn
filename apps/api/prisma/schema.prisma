@@ -529,19 +529,47 @@ model Threshold {
   @@unique([variationId, locationId])
 }
 
-/// Not optional. Both sides can edit a request before packing, and every edit
-/// records who, when, and old to new. Spec §5.7.
+/// Comprehensive change audit for state and configuration changes across
+/// the app. Inventory movements are NOT written here — those live in
+/// LedgerEvent, which already carries actor/source/note/reason and is
+/// append-only enforced by a DB trigger.
+///
+/// The 6 Ws are covered explicitly:
+///   What  = entity + entityId + field + oldValue → newValue
+///   Who   = actorId (nullable for system/migration writes) + actorRole snapshot
+///   When  = at
+///   Where = locationId (nullable — global catalog edits carry no location)
+///   Why   = reason (nullable free text)
+///   How   = source (UI / API / CLI / MIGRATION / WEBHOOK — enum below)
+///
+/// actorRole is snapshotted at write time so an audit reading "user X did Y
+/// as OWNER on 2026-01-01" survives a later role change or user deletion.
+enum AuditSource {
+  UI
+  API
+  CLI
+  MIGRATION
+  WEBHOOK
+  SYSTEM
+}
+
 model AuditLog {
-  id       String   @id @default(cuid())
-  entity   String
-  entityId String
-  field    String
-  oldValue String?
-  newValue String?
-  actorId  String?
-  at       DateTime @default(now())
+  id        String      @id @default(cuid())
+  entity    String
+  entityId  String
+  field     String
+  oldValue  String?
+  newValue  String?
+  actorId   String?
+  actorRole String?
+  locationId String?
+  reason    String?
+  source    AuditSource @default(SYSTEM)
+  at        DateTime    @default(now())
 
   @@index([entity, entityId])
+  @@index([actorId, at])
+  @@index([at])
 }
 
 /// Raw inbound Square payloads. The webhook endpoint writes here and returns

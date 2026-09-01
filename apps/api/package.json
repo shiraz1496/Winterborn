@@ -32,6 +32,8 @@
     "cli:seed-locations": "tsx src/cli/seed-locations.ts",
     "cli:seed-thresholds": "tsx src/cli/seed-thresholds.ts",
     "cli:migrate-to-flexible-attributes": "tsx src/cli/migrate-to-flexible-attributes.ts",
+    "cli:migrate-warehouse-skus": "tsx src/cli/migrate-warehouse-skus.ts",
+    "cli:fix-audit-sources": "tsx src/cli/fix-audit-sources.ts",
     "cli:sync-square-catalog": "tsx src/cli/sync-square-catalog.ts",
     "cli:reset-db-keep-users": "tsx src/cli/reset-db-keep-users.ts",
     "cli:import-sortly-xlsx": "tsx src/cli/import-sortly-xlsx.ts",

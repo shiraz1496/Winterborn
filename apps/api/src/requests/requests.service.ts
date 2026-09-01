@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common'
-import type { RequestState } from '@prisma/client'
+import type { Prisma, RequestState } from '@prisma/client'
 import {
   createRequestInputSchema,
   createRequestLineInputSchema,
@@ -10,7 +10,7 @@ import {
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
-import { AuditService } from './audit.service.js'
+import { AuditService } from '../audit/audit.service.js'
 import { BoxesService } from '../fulfilment/boxes.service.js'
 
 /// A request may only be edited (lines added/changed) before packing starts.
@@ -97,13 +97,37 @@ export class RequestsService {
   }
 
   async list(actor: CurrentUserPayload) {
-    const where = actor.role === 'MARKET_MANAGER' ? { locationId: actor.locationId ?? '__none__' } : {}
+    // Base scope: MMs see only their own market's requests; warehouse
+    // roles see every market's.
+    const where: Prisma.RestockRequestWhereInput =
+      actor.role === 'MARKET_MANAGER' ? { locationId: actor.locationId ?? '__none__' } : {}
+
+    // DRAFTs are visible only to their author's side of the workflow —
+    // the Market Manager who owns the market and the Owner who oversees
+    // everything. Warehouse Manager / Operator have no reason to see a
+    // half-composed request (they can't act on it until it's submitted),
+    // and showing DRAFTs to them created the confusing UX where a WM
+    // could see the row but hitting "Submit" would 403 server-side.
+    if (actor.role !== 'MARKET_MANAGER' && actor.role !== 'OWNER') {
+      where.state = { not: 'DRAFT' }
+    }
+
     return this.prisma.restockRequest.findMany({ where, include: { lines: true }, orderBy: { createdAt: 'desc' } })
   }
 
   async get(id: string, actor: CurrentUserPayload) {
     const request = await this.prisma.restockRequest.findUniqueOrThrow({ where: { id }, include: { lines: true } })
     this.assertLocationAccess(actor, request.locationId)
+    // Match the list filter: a DRAFT is only visible to its author's side
+    // (MM/Owner). Warehouse-side roles landing on the URL directly get a
+    // 403 instead of a rendered but unactionable page.
+    if (
+      request.state === 'DRAFT' &&
+      actor.role !== 'MARKET_MANAGER' &&
+      actor.role !== 'OWNER'
+    ) {
+      throw new ForbiddenException('this request is still a draft — the market has not submitted it yet')
+    }
     return request
   }
 

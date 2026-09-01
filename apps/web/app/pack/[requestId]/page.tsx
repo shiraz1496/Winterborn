@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import type { BoxDto, BoxLabelDto, LocationDto, RestockRequestDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
+import { SectionHeading } from '../../../components/SectionHeading'
 import { BoxLabel } from '../../../components/BoxLabel'
 import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { printLabelElement } from '../../../lib/print-label'
@@ -17,12 +18,12 @@ import {
   getBoxLabel,
   getRequest,
   listBoxes,
+  availableAtWarehouse,
   listLocations,
   listRequests,
   listVariations,
   listWarehouseVariants,
   packBox,
-  stockByVariant,
   transitionRequest,
 } from '../../../lib/api'
 
@@ -111,17 +112,20 @@ function PackBody() {
       const loc = allLocations.find((l: LocationDto) => l.id === req.locationId)
       setLocationName(loc?.name ?? null)
 
-      // Warehouse stock powers the "N available" chip + over-allocation
-      // warning on each variant row. Fetched here (once per page load) and
-      // again after every successful pack so the counters stay in sync.
-      const warehouseLoc = allLocations.find((l: LocationDto) => l.kind === 'WAREHOUSE')
-      if (warehouseLoc) {
+      // "N available" chip on each variant row reflects NET available at
+      // the warehouse (on-hand minus stock already committed to other
+      // PACKING boxes) — the same number the pack service enforces
+      // server-side. Reading raw on-hand instead used to cause "6
+      // available" chips followed by a "Not enough stock" server reject
+      // whenever leftover PACKING boxes had reserved units the client
+      // couldn't see. Fetched here per page load and again after every
+      // successful pack.
+      const variantIdsForThisRequest = perLine.flatMap((list) => list.map((v) => v.id))
+      if (variantIdsForThisRequest.length > 0) {
         try {
-          const rows = await stockByVariant(warehouseLoc.id)
+          const { available } = await availableAtWarehouse(variantIdsForThisRequest)
           const map = new Map<string, number>()
-          for (const r of rows) {
-            if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
-          }
+          for (const k of Object.keys(available)) map.set(k, available[k] ?? 0)
           setWarehouseStock(map)
         } catch {
           // Non-fatal — the pack UI still works without the warning.
@@ -272,18 +276,17 @@ function PackBody() {
         lines: [...draft.values()].map((d) => ({ warehouseVariantId: d.warehouseVariantId, quantity: d.quantity })),
       })
       setDraft(new Map())
-      const [fresh, warehouseLoc] = await Promise.all([
-        listBoxes({ requestId: request.id }),
-        listLocations().then((locs) => locs.find((l) => l.kind === 'WAREHOUSE')),
-      ])
+      const fresh = await listBoxes({ requestId: request.id })
       setBoxes(fresh)
-      // Refresh warehouse counters so remaining pack rows show updated
-      // "N available" after this box consumed a chunk of stock.
-      if (warehouseLoc) {
+      // Refresh net-available counters so remaining pack rows show
+      // updated "N available" after this box consumed a chunk of stock
+      // (and reserved it as a PACKING box until dispatch).
+      const variantIds = [...variantMeta.keys()]
+      if (variantIds.length > 0) {
         try {
-          const rows = await stockByVariant(warehouseLoc.id)
+          const { available } = await availableAtWarehouse(variantIds)
           const map = new Map<string, number>()
-          for (const r of rows) if (r.warehouseVariantId) map.set(r.warehouseVariantId, r.onHand)
+          for (const k of Object.keys(available)) map.set(k, available[k] ?? 0)
           setWarehouseStock(map)
         } catch {
           // Non-fatal.
@@ -576,13 +579,10 @@ function PackBody() {
         </div>
       )}
 
-      <div className="section-heading">
-        <h2>Resolve to variants</h2>
-      </div>
-      <p className="section-desc">
-        One card per product family. If the market picked specific variants, only those show up with the requested
-        quantity pre-filled. Family-level lines expand to show every warehouse variant so you can decide the split.
-      </p>
+      <SectionHeading
+        title="Resolve to variants"
+        description="One card per product family. If the market picked specific variants, only those show up with the requested quantity pre-filled. Family-level lines expand to show every warehouse variant so you can decide the split."
+      />
       {(() => {
         // Group request lines by family (variationId). Each family may
         // have multiple lines: some variant-level (each with its own

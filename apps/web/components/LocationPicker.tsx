@@ -55,7 +55,6 @@ export function LocationPicker({
         minWidth: 260,
       }}
     >
-      <span style={{ fontWeight: 600, flexShrink: 0 }}>Location:</span>
       <div style={{ flex: 1, minWidth: 200 }}>
         <SearchableSelect
           value={value}

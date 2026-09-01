@@ -40,6 +40,25 @@ export class BoxesController {
     return this.boxes.list({ requestId, destinationLocationId }, user)
   }
 
+  /// Net available at the warehouse per WarehouseVariant: on-hand from
+  /// the ledger minus units currently committed to PACKING boxes. This
+  /// is the same figure the pack service uses server-side to accept or
+  /// reject a new box, exposed so the pack UI can render matching "N
+  /// available" counters and stop showing a happy count that the actual
+  /// pack call will then reject.
+  ///
+  /// Empty response body means "no variants asked for". Missing keys in
+  /// the response map are 0 (nothing recorded, nothing reserved).
+  @Get('available')
+  async available(@Query('ids') idsParam?: string) {
+    const ids = (idsParam ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    if (ids.length === 0) return { available: {} as Record<string, number> }
+    const map = await this.boxes.availableAtWarehouse(ids)
+    const out: Record<string, number> = {}
+    for (const [k, v] of map) out[k] = v
+    return { available: out }
+  }
+
   @Get('by-token/:qrToken')
   getByToken(@Param('qrToken') qrToken: string) {
     return this.boxes.getByToken(qrToken)

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AdminUserDto, CurrentUserDto, LocationDto } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
+import { SectionHeading } from '../../../components/SectionHeading'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { SearchableSelect } from '../../../components/SearchableSelect'
 import {
@@ -124,19 +125,19 @@ function UsersBody() {
         </div>
       ) : (
         <>
-          <div className="section-heading">
-            <h2>Active</h2>
-            <span className="eyebrow">{grouped.active.length}</span>
-          </div>
+          <SectionHeading
+            title="Active"
+            right={<span className="eyebrow">{grouped.active.length}</span>}
+          />
           <UserGrid users={grouped.active} locationName={locationName} onEdit={setEditing} />
 
           {grouped.inactive.length > 0 && (
             <>
-              <div className="section-heading">
-                <h2>Deactivated</h2>
-                <span className="eyebrow">{grouped.inactive.length}</span>
-              </div>
-              <p className="section-desc">These accounts cannot log in. Reactivate to restore access.</p>
+              <SectionHeading
+                title="Deactivated"
+                description="These accounts cannot log in. Reactivate to restore access."
+                right={<span className="eyebrow">{grouped.inactive.length}</span>}
+              />
               <UserGrid users={grouped.inactive} locationName={locationName} onEdit={setEditing} />
             </>
           )}

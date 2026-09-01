@@ -10,6 +10,7 @@ import { CatalogController } from './catalog.controller.js'
 import { SquareCatalogSyncService } from './square-catalog-sync.service.js'
 import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
+import { ProductUpdateService } from './product-update.service.js'
 import { CloudinarySignatureService } from './cloudinary-signature.service.js'
 import { upsertSortlyFolderChain, type FolderCache } from './folder-tree.js'
 
@@ -428,6 +429,7 @@ export class SortlyImportService {
     SquareCatalogSyncService,
     StockCorrectionService,
     ProductCreationService,
+    ProductUpdateService,
     CloudinarySignatureService,
   ],
   exports: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
