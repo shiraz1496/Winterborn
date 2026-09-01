@@ -99,7 +99,16 @@ import {
 /// Matching hosts (only the port differs) keeps every viewer same-site.
 function resolveApiOrigin(): string {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL
-  if (typeof window !== 'undefined') return `http://${window.location.hostname}:3001`
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname } = window.location
+    // http:// (localhost / LAN dev): API listens on 3001 alongside.
+    if (protocol === 'http:') return `http://${hostname}:3001`
+    // https:// (Vercel, ngrok, any TLS host): go through the
+    // same-origin proxy defined in next.config.mjs. One origin →
+    // SameSite=Lax cookies work everywhere, including iOS Safari,
+    // whose ITP silently drops cross-site cookies from Render → Vercel.
+    return '/backend'
+  }
   return 'http://localhost:3001'
 }
 
