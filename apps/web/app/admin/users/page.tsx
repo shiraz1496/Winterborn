@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AdminUserDto, CurrentUserDto, LocationDto } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
+import { PasswordInput } from '../../../components/PasswordInput'
 import { SectionHeading } from '../../../components/SectionHeading'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { SearchableSelect } from '../../../components/SearchableSelect'
@@ -383,14 +384,14 @@ function UserModal({
           <div className="field">
             <label>{isEditing ? 'Set new password (leave blank to keep)' : 'Password'}</label>
             <div className="row" style={{ gap: 8 }}>
-              <input
-                type="text"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder={isEditing ? '(unchanged)' : 'min 8 characters'}
-                autoComplete="new-password"
-                style={{ flex: 1 }}
-              />
+              <div style={{ flex: 1 }}>
+                <PasswordInput
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  placeholder={isEditing ? '(unchanged)' : 'min 8 characters'}
+                  autoComplete="new-password"
+                />
+              </div>
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -401,7 +402,7 @@ function UserModal({
               </button>
             </div>
             <span className="eyebrow" style={{ color: 'var(--text-dim)', textTransform: 'none', letterSpacing: 0, fontSize: '0.8rem' }}>
-              Shown once after saving, so you can pass it to the user. Never stored in plaintext.
+              Shown once after saving, so you can pass it to the user. Never stored in plaintext. Toggle the eye icon to reveal what you typed.
             </span>
           </div>
 
