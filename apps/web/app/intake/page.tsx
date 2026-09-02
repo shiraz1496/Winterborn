@@ -180,7 +180,7 @@ function IntakeBody() {
         return haystack.includes(q)
       })
       .filter((v) => !takenIds.has(v.id))
-      .slice(0, 10)
+      .slice(0, 30)
   }, [query, variations, variants, families])
 
   function addFamily(v: VariationSummary) {
@@ -586,7 +586,17 @@ function IntakeBody() {
                               alt={v.colourVariantName}
                             />
                             <div className="list-row-body">
-                              <div className="list-row-title">{v.colourVariantName}</div>
+                              {/* Compose colour + axis-values so two SKUs
+                                  that share a colour but differ on a
+                                  custom axis (e.g. Blue Cross vs Blue
+                                  Straight) stay distinguishable at a
+                                  glance without polluting the shared
+                                  ColourVariant row. */}
+                              <div className="list-row-title">
+                                {v.axisValues.length > 0
+                                  ? `${v.colourVariantName} (${v.axisValues.join(', ')})`
+                                  : v.colourVariantName}
+                              </div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
                               <div
                                 className="list-row-meta"

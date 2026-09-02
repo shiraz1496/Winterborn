@@ -370,6 +370,127 @@ textarea {
   width: 100%;
 }
 
+/* Segmented control -- 2-N sibling options where one is active. Used for
+   any mutually-exclusive small choice (target modes, view toggles, etc.).
+   Sits inside a bordered container that holds all options at equal width. */
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  width: 100%;
+}
+.segmented-btn {
+  flex: 1;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  border-radius: calc(var(--radius-md) - 4px);
+  color: var(--text-dim);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  min-width: 0;
+}
+.segmented-btn:hover:not(.active):not(:disabled) {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+.segmented-btn.active {
+  background: var(--signal);
+  color: var(--signal-ink);
+}
+.segmented-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.segmented-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* Suggestion panel accent — signals "this is a smart-generated action"
+   without being loud. Slightly raised surface + left border in signal. */
+.suggest-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.suggest-panel-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.suggest-panel-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: rgba(220, 138, 40, 0.12);
+  color: var(--signal);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.suggest-panel-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.suggest-panel-body {
+  flex: 1;
+  min-width: 0;
+}
+.suggest-panel-title {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.98rem;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.2;
+}
+.suggest-panel-sub {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.suggest-panel-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.suggest-panel-notes {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  border-left: 2px solid var(--line-strong);
+}
+.suggest-panel-notes p {
+  margin: 4px 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.suggest-panel-notes p:first-child { margin-top: 0; }
+.suggest-panel-notes p:last-child { margin-bottom: 0; }
+
 /* ---- cards / lists ----------------------------------------------------- */
 
 .card {
@@ -524,6 +645,191 @@ textarea {
   border-color: #7a1414;
 }
 
+/* ---- stock-count pair -------------------------------------------------
+   Two-number widget used on the New Request page so "in market" and "in
+   warehouse" read as separate cells instead of a run-on sentence. Each
+   cell is a tiny label / value pair with its own tint; the warehouse
+   variant carries a subtle pine wash so the eye separates the numbers
+   at a glance even when both are small. */
+
+.stock-pair {
+  display: inline-flex;
+  gap: 4px;
+  align-items: stretch;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stock-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 8px;
+  min-width: 48px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+}
+
+.stock-cell-value {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: var(--text);
+}
+
+.stock-cell-value.is-zero {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.stock-cell-label {
+  font-size: 0.55rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.stock-cell.is-warehouse {
+  background: #eaf0ea;
+  border-color: #d5ded4;
+}
+
+.stock-cell.is-warehouse .stock-cell-label {
+  color: #4a6551;
+}
+
+/* Tablet: shrink the padding + numeric so a card header row doesn't
+   push the stock pair below the meta text. */
+@media (max-width: 900px) {
+  .stock-cell {
+    padding: 3px 6px;
+    min-width: 42px;
+  }
+  .stock-cell-value {
+    font-size: 0.82rem;
+  }
+  .stock-cell-label {
+    font-size: 0.5rem;
+    letter-spacing: 0.04em;
+  }
+}
+
+/* Phone: the meta labels drop to two letters ("MKT" / "WH") so the two
+   cells fit next to the requested-total column even on a 360px screen. */
+@media (max-width: 480px) {
+  .stock-pair {
+    gap: 3px;
+  }
+  .stock-cell {
+    padding: 3px 5px;
+    min-width: 34px;
+    gap: 1px;
+  }
+  .stock-cell-value {
+    font-size: 0.78rem;
+  }
+  .stock-cell-label {
+    font-size: 0.48rem;
+    letter-spacing: 0.03em;
+  }
+}
+
+/* Inline version for tight rows (per-variant stepper row) — same colour
+   split but rendered as small pills side-by-side inline with the meta
+   text, so the row height stays compact. */
+
+.stock-inline {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.stock-inline-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.stock-inline-pill.is-zero {
+  color: var(--text-faint);
+}
+
+.stock-inline-pill.is-warehouse {
+  background: #eaf0ea;
+  border-color: #d5ded4;
+}
+
+.stock-inline-pill-label {
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.stock-inline-pill.is-warehouse .stock-inline-pill-label {
+  color: #4a6551;
+}
+
+/* Backorder hint — shown on a variant row when warehouse on-hand is 0.
+   Signals "you can still request this; packing waits for the next
+   intake" so the operator doesn't skip zero-stock variants thinking
+   they're unrequestable. Amber wash keeps it distinct from the market /
+   warehouse pills without shouting like a hard error. */
+
+.backorder-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fff4e0;
+  border: 1px solid #f0d59e;
+  color: #8a5a12;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.backorder-hint svg {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .backorder-hint {
+    padding: 2px 6px;
+    font-size: 0.62rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .backorder-hint {
+    padding: 1px 5px;
+    font-size: 0.58rem;
+  }
+  .backorder-hint svg {
+    width: 9px;
+    height: 9px;
+  }
+}
+
 /* ---- colour swatches --------------------------------------------------
    The one deliberate signature motif. A swatch is a small solid square of
    the family's actual colour; a family with no mapped colour (the
@@ -648,11 +954,13 @@ textarea {
   padding: 6px 4px;
   height: var(--tap-primary);
   -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 .stepper-input::-webkit-outer-spin-button,
 .stepper-input::-webkit-inner-spin-button {
   -webkit-appearance: none;
+  appearance: none;
   margin: 0;
 }
 
@@ -765,6 +1073,35 @@ textarea {
   padding: 12px 14px;
   font-size: 0.88rem;
   margin-bottom: 16px;
+}
+
+/* Soft-inline notices. `notice-warn` for "you're about to do something
+   partial / lossy"; `notice-info` for neutral context. Modeled on
+   `.error-banner` so all three feel like the same design family. */
+.notice {
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.notice-warn {
+  background: #fff4e0;
+  border: 1px solid #f0d59e;
+  color: #8a5a12;
+}
+
+.notice-info {
+  background: rgba(74, 101, 81, 0.08);
+  border: 1px solid #d5ded4;
+  color: #34493a;
+}
+
+@media (max-width: 480px) {
+  .notice {
+    padding: 8px 10px;
+    font-size: 0.8rem;
+  }
 }
 
 .screen-loading {
@@ -1477,6 +1814,276 @@ textarea {
   font-size: 0.8rem;
 }
 
+/* Product-name pills on a request tile — surface what's actually in the
+   request without opening it. Wrap naturally on narrower cards; a "+N
+   more" chip signals the list is truncated. */
+
+.stock-tile-products {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin-top: 1px;
+}
+
+.stock-tile-product-pill {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 0.72rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stock-tile-product-more {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  padding: 2px 6px;
+}
+
+@media (max-width: 900px) {
+  .stock-tile-product-pill {
+    font-size: 0.68rem;
+    padding: 2px 7px;
+  }
+  .stock-tile-product-more {
+    font-size: 0.64rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .stock-tile-products {
+    gap: 3px;
+  }
+  .stock-tile-product-pill {
+    font-size: 0.64rem;
+    padding: 1px 6px;
+    max-width: 100%;
+  }
+  .stock-tile-product-more {
+    font-size: 0.6rem;
+    padding: 1px 4px;
+  }
+}
+
+/* ---- request cards ------------------------------------------------------
+   The Requests index tiles. Single-request and grouped-shipment cards
+   share the same shell so the grid reads as one family; the grouped
+   version wears a small pine ribbon at the top so the operator can tell
+   at a glance which cards are one shipment made of many requests. */
+
+/* Masonry-style column layout — each card only takes the vertical space
+   it needs, instead of every card in a grid row inheriting the tallest
+   card's height. Uses CSS multi-column (broadly supported) rather than
+   `grid-template-rows: masonry` which is still experimental. Cards flow
+   top-to-bottom per column, then wrap to the next column. */
+.request-grid {
+  column-count: 1;
+  column-gap: 8px;
+}
+
+@media (min-width: 640px) {
+  .request-grid {
+    column-count: 2;
+  }
+}
+
+@media (min-width: 960px) {
+  .request-grid {
+    column-count: 3;
+  }
+}
+
+@media (min-width: 1280px) {
+  .request-grid {
+    column-count: 4;
+  }
+}
+
+.request-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 13px 11px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  min-width: 0;
+  overflow: hidden;
+  text-decoration: none;
+  color: inherit;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  /* Multi-column layout hints: keep the card intact within a column and
+     add vertical spacing (column-gap only affects horizontal). */
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+/* State-coloured left accent — fills perceived whitespace on the left
+   edge and gives the operator a status-at-a-glance cue that mirrors the
+   coloured state chip on the right. */
+.request-card::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  transition: background 0.15s ease;
+}
+
+.request-card.is-packing::before { background: var(--signal); }
+.request-card.is-packed::before,
+.request-card.is-dispatched::before,
+.request-card.is-arrived::before,
+.request-card.is-closed::before { background: var(--pine, #4a6551); }
+.request-card.is-open::before { background: var(--rust, #b25a2b); }
+
+.request-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
+}
+
+.request-card:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+/* Grouped variant — pine top ribbon replaces the state stripe as the
+   dominant visual cue so the operator's eye lands on "this is one
+   shipment" first. */
+.request-card--grouped {
+  border-color: var(--pine, #4a6551);
+  padding-top: 9px;
+}
+
+.request-card--grouped::before {
+  top: 0;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 3px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--pine, #4a6551);
+}
+
+.request-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.request-card-heading {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.request-card-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-card-meta {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-card-ribbon {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 2px 9px;
+  margin-bottom: 1px;
+  border-radius: 999px;
+  background: var(--pine, #4a6551);
+  color: var(--pine-ink, #f6efe3);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.request-card-ribbon svg {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .request-card {
+    padding: 10px 12px 10px 15px;
+    gap: 5px;
+  }
+  .request-card::before {
+    left: 5px;
+  }
+  .request-card--grouped {
+    padding-top: 8px;
+  }
+  .request-card-title {
+    font-size: 0.9rem;
+  }
+  .request-card-meta {
+    font-size: 0.66rem;
+  }
+  .request-card-ribbon {
+    font-size: 0.52rem;
+    padding: 2px 7px;
+  }
+}
+
+@media (max-width: 480px) {
+  .request-card {
+    padding: 9px 11px 9px 14px;
+    gap: 5px;
+  }
+  .request-card-head {
+    gap: 8px;
+  }
+  .request-card-title {
+    font-size: 0.86rem;
+  }
+  .request-card-meta {
+    font-size: 0.63rem;
+  }
+  .request-card-ribbon {
+    font-size: 0.5rem;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+  }
+}
+
 /* ---- decision queue cards ------------------------------------------------
    Each auto-drafted request that's waiting on review renders as a card,
    with lines rendered as proper structured rows -- not a single paragraph
@@ -1710,6 +2317,16 @@ textarea {
     width: 100%;
     padding: 20px;
     background: #fff;
+  }
+
+  /* When printing a box label, keep ONLY the QR block visible. The rest
+     of the ticket (Winterborn header, destination, box id, packed date,
+     contents table) is hidden so the sticker carries just the QR + its
+     token. `visibility: hidden` (not `display: none`) preserves layout
+     so the QR still lands where you'd expect on the page. */
+  body.is-printing-label .print-target .label-ticket > :not(.label-qr-block),
+  body.is-printing-label .print-target .label-ticket > :not(.label-qr-block) * {
+    visibility: hidden !important;
   }
 }
 

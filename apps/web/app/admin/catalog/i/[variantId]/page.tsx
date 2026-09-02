@@ -1,7 +1,7 @@
 'use client'
 
 import { useParams } from 'next/navigation'
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { CatalogItemDetail, ColourFamilyDto } from '@winterborn/shared'
 import { PageHeader } from '../../../../../components/PageHeader'
 import { RequireAuth } from '../../../../../components/RequireAuth'
@@ -163,7 +163,23 @@ function ItemDetail() {
                 <dt style={{ color: 'var(--text-dim)' }}>Colour family</dt>
                 <dd style={{ margin: 0 }}>{detail.colourFamilyName}</dd>
                 <dt style={{ color: 'var(--text-dim)' }}>Colour variant</dt>
-                <dd style={{ margin: 0 }}>{detail.colourVariantName}</dd>
+                <dd style={{ margin: 0 }}>
+                  {/* When axes exist (Pattern / Style / custom), strip the
+                      parenthetical suffix ProductCreation appended to
+                      keep list-view names disambiguated — the axes are
+                      surfaced as their own rows below, so showing
+                      "Blue (Cross)" here would double-count Pattern. */}
+                  {detail.attributes.length > 0
+                    ? detail.colourVariantName.replace(/\s*\([^)]*\)\s*$/, '').trim() ||
+                      detail.colourVariantName
+                    : detail.colourVariantName}
+                </dd>
+                {detail.attributes.map((a) => (
+                  <Fragment key={a.name}>
+                    <dt style={{ color: 'var(--text-dim)' }}>{a.name}</dt>
+                    <dd style={{ margin: 0 }}>{a.value}</dd>
+                  </Fragment>
+                ))}
                 <dt style={{ color: 'var(--text-dim)' }}>Size</dt>
                 <dd style={{ margin: 0 }}>{detail.sizeOptionName}</dd>
                 <dt style={{ color: 'var(--text-dim)' }}>SKU</dt>

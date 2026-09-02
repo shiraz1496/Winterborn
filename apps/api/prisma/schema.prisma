@@ -368,6 +368,13 @@ enum RequestState {
   DRAFT
   OPEN
   PACKING
+  /// Every requested unit is on a non-dispatched box, but nothing has
+  /// shipped yet. Auto-set when a pack action brings coverage to 100 %
+  /// and auto-reverted to PACKING when a box is discarded or a line is
+  /// removed. Doc §9.3 addendum — added after the CEO ask (2026-09-02)
+  /// so warehouse ops can see "ready to ship" without eyeballing box
+  /// contents.
+  PACKED
   DISPATCHED
   ARRIVED
   CLOSED

@@ -1,0 +1,12 @@
+-- Adds the PACKED value to RequestState so a fully-packed but not-yet-
+-- dispatched request has a first-class state instead of being derived
+-- on the client. Postgres requires ALTER TYPE ADD VALUE to run outside
+-- a transaction; Prisma migrations wrap statements in a transaction by
+-- default, so we split it out with `-- prisma-migrate-hint: shadow`
+-- style safe form: BEGIN + COMMIT are not emitted, and ADD VALUE is
+-- accepted at the top level.
+--
+-- Placement matters for `enum_range` ordering only; not for equality
+-- checks. Adding AFTER 'PACKING' keeps the workflow order readable in
+-- pg_enum listings.
+ALTER TYPE "RequestState" ADD VALUE 'PACKED' AFTER 'PACKING';

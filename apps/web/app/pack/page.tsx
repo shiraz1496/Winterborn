@@ -20,11 +20,11 @@ function PackIndexBody() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Boxes are pulled unfiltered so we can compute "already fully packed"
-    // for every request without one call per request. A request whose
-    // total requested qty is already covered by boxes (own + siblings'
-    // shared multi-request boxes) is hidden from the pack index — the
-    // Pack CTA on it would be a dead end.
+    // Boxes come along so we can hide any request that already has
+    // packing progress — the operator resumes those from the request
+    // detail's "Continue packing" link (which routes back to this
+    // module's per-request URL). Keeps /pack focused on requests that
+    // have never been touched.
     Promise.all([listRequests(), listLocations(), listBoxes()])
       .then(([r, l, b]) => {
         setRequests(r)
@@ -35,43 +35,38 @@ function PackIndexBody() {
       .finally(() => setLoading(false))
   }, [])
 
-  const nameById = useMemo(() => new Map(locations.map((l) => [l.id, l.name])), [locations])
-
-  /// Two counters: units already dispatched (out the door, can't undo)
-  /// vs units in still-PACKING boxes (mutable — re-pack replaces them).
-  /// A request stays "packable" as long as either not everything is
-  /// packed OR the existing packing is still on the warehouse floor.
-  const packedByRequest = useMemo(() => {
-    const m = new Map<string, { dispatched: number; packing: number }>()
+  /// requestIds that have at least one box (any state) associated with
+  /// them — either as the sole owner (`box.requestId`) or via a
+  /// per-line requestId on a shared multi-request box. Used to filter
+  /// them out of the "start packing" list.
+  const requestIdsWithBoxes = useMemo(() => {
+    const set = new Set<string>()
     for (const b of boxes) {
-      const state = b.state
-      for (const line of b.lines) {
-        const rid = line.requestId ?? b.requestId ?? null
-        if (!rid) continue
-        const entry = m.get(rid) ?? { dispatched: 0, packing: 0 }
-        if (state === 'PACKING') entry.packing += line.quantity
-        else if (state === 'DISPATCHED' || state === 'ARRIVED') entry.dispatched += line.quantity
-        m.set(rid, entry)
-      }
+      if (b.requestId) set.add(b.requestId)
+      for (const line of b.lines) if (line.requestId) set.add(line.requestId)
     }
-    return m
+    return set
   }, [boxes])
+
+  const nameById = useMemo(() => new Map(locations.map((l) => [l.id, l.name])), [locations])
 
   const packable = useMemo(
     () =>
       requests
+        // Only OPEN / PACKING requests are actively "packable". PACKED
+        // requests have every requested unit on a box already (server-
+        // set via BoxesService.reconcileRequestPackedState) and live in
+        // the /requests "Packed" tab; DISPATCHED and later are done.
         .filter((r) => r.state === 'OPEN' || r.state === 'PACKING')
-        .filter((r) => {
-          const requested = r.lines.reduce((sum, l) => sum + l.qtyRequested, 0)
-          const { dispatched, packing } = packedByRequest.get(r.id) ?? { dispatched: 0, packing: 0 }
-          // Hide only when everything is already OUT — dispatched >=
-          // requested and nothing left mutable. If there's a PACKING
-          // box, the request is still workable (re-pack replaces it).
-          if (dispatched >= requested && packing === 0) return false
-          return true
-        })
+        // Also hide any request that already has box progress (partial
+        // or full, solo or shared). Once packing has started, further
+        // work happens from the request detail — a stray "Pack" tile
+        // here would let the operator start a *second* box against the
+        // same request and would confuse the "start packing" bucket
+        // with the "resume packing" one.
+        .filter((r) => !requestIdsWithBoxes.has(r.id))
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
-    [requests, packedByRequest],
+    [requests, requestIdsWithBoxes],
   )
 
   /// Every active MARKET location — same shape as the market dropdown

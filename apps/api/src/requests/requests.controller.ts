@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common'
-import type {
-  CreateRequestInput,
-  CreateRequestLineInput,
-  TransitionRequestInput,
-  UpdateRequestLineInput,
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, UseGuards } from '@nestjs/common'
+import {
+  generateSuggestionInputSchema,
+  type CreateRequestInput,
+  type CreateRequestLineInput,
+  type GenerateSuggestionInput,
+  type TransitionRequestInput,
+  type UpdateRequestLineInput,
 } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
@@ -12,6 +14,7 @@ import { CurrentUser } from '../auth/current-user.decorator.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { RequestsService } from './requests.service.js'
 import { RequestAnalysisService } from './request-analysis.service.js'
+import { PackingListSuggestionService } from './packing-list-suggestion.service.js'
 
 @Controller('requests')
 @UseGuards(JwtGuard, RolesGuard)
@@ -20,11 +23,31 @@ export class RequestsController {
   constructor(
     private readonly requests: RequestsService,
     private readonly analysis: RequestAnalysisService,
+    private readonly suggestion: PackingListSuggestionService,
   ) {}
 
   @Post()
   create(@Body() body: CreateRequestInput, @CurrentUser() user: CurrentUserPayload) {
     return this.requests.create(body, user)
+  }
+
+  /// Draft-a-whole-packing-list endpoint (CEO ask, voice notes 2026-09-01).
+  /// Owner only — the packing list draws on cross-market data (warehouse
+  /// stock, competing demand from other markets, colour mix per market)
+  /// and drives allocation decisions across the whole network. That's an
+  /// Owner-scope decision, not a per-market one. Market Managers can still
+  /// submit requests manually from `/requests/new`; they just do not get
+  /// the auto-generate path.
+  @Post('generate-suggestion')
+  async generateSuggestion(
+    @Body() body: GenerateSuggestionInput,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    if (user.role !== 'OWNER') {
+      throw new ForbiddenException(`${user.role} may not generate packing lists — Owner only`)
+    }
+    const parsed = generateSuggestionInputSchema.parse(body)
+    return this.suggestion.generate(parsed)
   }
 
   @Get()
@@ -78,5 +101,15 @@ export class RequestsController {
   @Post(':id/report-missing')
   reportMissing(@Param('id') id: string, @CurrentUser() user: CurrentUserPayload) {
     return this.requests.reportMissing(id, user)
+  }
+
+  /// Warehouse-side "undo pack" — discards every solo PACKING box on
+  /// this request and lets the auto-reconcile in BoxesService pull the
+  /// request state back from PACKED to PACKING. Shared boxes are left
+  /// alone and reported in `sharedSkipped` so the client can route the
+  /// operator to the shipment view for those.
+  @Post(':id/unpack')
+  unpack(@Param('id') id: string, @CurrentUser() user: CurrentUserPayload) {
+    return this.requests.unpack(id, user)
   }
 }

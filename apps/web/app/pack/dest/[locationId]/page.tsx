@@ -543,6 +543,18 @@ function DestinationPackBody() {
           ? verb
           : `${verb} — one label covers ${involvedRequests.size} requests`,
       )
+      // Same behaviour as the single-request pack screen: send the
+      // operator to the natural post-pack view so they can review the
+      // label / print the QR / hit dispatch. One request → its detail;
+      // multiple requests packed together → the grouped shipment view
+      // (that's what scopes the label + dispatch across the group).
+      const involvedIds = [...involvedRequests].filter((id): id is string => !!id)
+      if (involvedIds.length === 1) {
+        router.push(`/requests/${involvedIds[0]}`)
+      } else if (involvedIds.length > 1) {
+        const qs = involvedIds.map((id) => encodeURIComponent(id)).join(',')
+        router.push(`/requests/shipment?ids=${qs}`)
+      }
     } catch (err) {
       const insufficient = insufficientStockDetails(err)
       if (insufficient.length > 0) {
@@ -976,6 +988,26 @@ function DestinationPackBody() {
                         {familyRemaining <= 0 ? 'resolved' : `${familyRemaining} left`}
                       </span>
                     </div>
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      style={{
+                        color: 'var(--text-faint)',
+                        marginLeft: 6,
+                        flexShrink: 0,
+                        transition: 'transform 0.15s ease',
+                        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                      }}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
                   </button>
 
                   {open && (

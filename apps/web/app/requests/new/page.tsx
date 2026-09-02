@@ -12,11 +12,13 @@ import { useAuth } from '../../../lib/auth-context'
 import {
   ApiError,
   createRequest,
+  generateSuggestion,
   listLocations,
   listVariations,
   listWarehouseVariants,
   stockByVariant,
 } from '../../../lib/api'
+import type { GenerateSuggestionResult, SuggestionTargetMode } from '@winterborn/shared'
 import { useToast } from '../../../lib/toast'
 
 /// One family the market manager wants shipped. Contains a per-variant
@@ -46,6 +48,13 @@ function NewRequestBody() {
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [allVariants, setAllVariants] = useState<WarehouseVariantSummary[]>([])
   const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
+  // Warehouse on-hand per warehouse variant. Surfaced alongside the market
+  // number so the operator can compare "what's in this market" against
+  // "what's available to send" — the CEO was reading the market count as
+  // the warehouse count, so both need to be labelled and shown together.
+  const [onHandByVariantAtWarehouse, setOnHandByVariantAtWarehouse] = useState<Map<string, number>>(
+    () => new Map(),
+  )
   const [locationId, setLocationId] = useState<string>(user?.locationId ?? '')
   const [query, setQuery] = useState('')
   const [families, setFamilies] = useState<DraftFamily[]>([])
@@ -53,19 +62,32 @@ function NewRequestBody() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Packing-list suggestion panel state (CEO ask, voice notes 2026-09-01).
+  // Kept local to this page rather than a URL param — the operator is
+  // going to edit the draft here anyway, so no need to make the choice
+  // shareable.
+  const [suggestOpen, setSuggestOpen] = useState(false)
+  const [suggestMode, setSuggestMode] = useState<SuggestionTargetMode>('MATCH_LAST_YEAR')
+  const [suggestGrowthPct, setSuggestGrowthPct] = useState<number>(10)
+  const [suggestTargetUnits, setSuggestTargetUnits] = useState<number>(500)
+  const [suggestBusy, setSuggestBusy] = useState(false)
+  const [suggestNotes, setSuggestNotes] = useState<string[]>([])
+  // Optional explicit sales window override. When left blank, the
+  // backend falls back to the location's season window shifted back a
+  // year, or a trailing 12-month window ending a year ago. Exposed here
+  // so an operator can validate against a specific historical window
+  // during testing / demoing without waiting for the calendar to catch up.
+  const [suggestWindowStart, setSuggestWindowStart] = useState<string>('')
+  const [suggestWindowEnd, setSuggestWindowEnd] = useState<string>('')
+
   useEffect(() => {
     Promise.all([listLocations(), listVariations(), listWarehouseVariants()])
       .then(([l, v, wv]) => {
         setLocations(l)
         setVariations(v)
         setAllVariants(wv)
-        if (!isMarketManager && !locationId) {
-          const firstMarket = l.find((loc) => loc.kind === 'MARKET')
-          if (firstMarket) setLocationId(firstMarket.id)
-        }
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the catalog.'))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /// Market on-hand for the selected location. Refetched whenever the
@@ -96,6 +118,44 @@ function NewRequestBody() {
   }, [locationId])
 
   const markets = useMemo(() => locations.filter((l) => l.kind === 'MARKET'), [locations])
+  const warehouseId = useMemo(() => locations.find((l) => l.kind === 'WAREHOUSE')?.id ?? null, [locations])
+
+  // Warehouse on-hand, fetched once we know which warehouse to look at.
+  // Doesn't depend on the selected market — the "in warehouse" count is
+  // the same regardless of which market the operator is packing for.
+  useEffect(() => {
+    if (!warehouseId) {
+      setOnHandByVariantAtWarehouse(new Map())
+      return
+    }
+    let cancelled = false
+    stockByVariant(warehouseId)
+      .then((stock) => {
+        if (cancelled) return
+        const m = new Map<string, number>()
+        for (const s of stock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
+        setOnHandByVariantAtWarehouse(m)
+      })
+      .catch(() => {
+        if (!cancelled) setOnHandByVariantAtWarehouse(new Map())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [warehouseId])
+
+  // Auto-select the first market for owners so the picker isn't left on
+  // "pick one" — they still get the full list to switch. Market managers
+  // are pinned to their own location via user.locationId and skip this.
+  // Also runs when the currently selected id isn't in the market list
+  // (e.g. user.locationId happens to point at a warehouse), otherwise
+  // the trigger would silently show the placeholder.
+  useEffect(() => {
+    if (isMarketManager) return
+    if (markets.length === 0) return
+    if (locationId && markets.some((m) => m.id === locationId)) return
+    setLocationId(markets[0]!.id)
+  }, [isMarketManager, locationId, markets])
   const variantsByVariation = useMemo(() => {
     const m = new Map<string, WarehouseVariantSummary[]>()
     for (const wv of allVariants) {
@@ -114,6 +174,17 @@ function NewRequestBody() {
     }
     return m
   }, [variantsByVariation, onHandByVariantId])
+
+  const familyOnHandAtWarehouse = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const [variationId, list] of variantsByVariation) {
+      m.set(
+        variationId,
+        list.reduce((sum, wv) => sum + (onHandByVariantAtWarehouse.get(wv.id) ?? 0), 0),
+      )
+    }
+    return m
+  }, [variantsByVariation, onHandByVariantAtWarehouse])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -139,7 +210,7 @@ function NewRequestBody() {
           .includes(q)
       })
       .filter((v) => !takenIds.has(v.id))
-      .slice(0, 8)
+      .slice(0, 30)
   }, [query, variations, allVariants, families])
 
   function addFamily(v: VariationSummary) {
@@ -196,6 +267,75 @@ function NewRequestBody() {
     [families],
   )
 
+  /// Turn the backend's suggestion into the DraftFamily shape this page
+  /// already renders. Groups by variationId, keeps only warehouseVariants
+  /// we can display (the suggestion may refer to a variant that got
+  /// deleted between generation and hydration — skip cleanly if so).
+  function hydrateFromSuggestion(result: GenerateSuggestionResult) {
+    const draftByVariation = new Map<string, DraftFamily>()
+    for (const line of result.lines) {
+      if (!line.warehouseVariantId) continue
+      const meta = variations.find((v) => v.id === line.variationId)
+      const variantMeta = allVariants.find((wv) => wv.id === line.warehouseVariantId)
+      if (!meta || !variantMeta) continue
+
+      let draft = draftByVariation.get(line.variationId)
+      if (!draft) {
+        draft = {
+          variationId: line.variationId,
+          itemGroupName: meta.itemGroupName,
+          familyName: meta.colourFamilyName,
+          sizeName: meta.sizeOptionName,
+          categoryPath: meta.categoryPath,
+          variants: variantsByVariation.get(line.variationId) ?? [],
+          qtyByVariant: {},
+        }
+        draftByVariation.set(line.variationId, draft)
+      }
+      draft.qtyByVariant[line.warehouseVariantId] = line.qtyRecommended
+    }
+
+    const nextFamilies = [...draftByVariation.values()]
+    setFamilies(nextFamilies)
+    setSuggestNotes(result.notes)
+    // Close the picker automatically on success — the user is now looking
+    // at the result and can start editing.
+    setSuggestOpen(false)
+    // Collapse everything so the operator can scan the list; they can
+    // expand individual families to tweak per-colour qty.
+    setOpenId(null)
+  }
+
+  async function runSuggestion() {
+    if (!locationId) return
+    setSuggestBusy(true)
+    setError(null)
+    try {
+      const result = await generateSuggestion({
+        locationId,
+        targetMode: suggestMode,
+        ...(suggestMode === 'GROW_PCT' ? { growthPct: suggestGrowthPct } : {}),
+        ...(suggestMode === 'CUSTOM_UNITS' ? { targetUnits: suggestTargetUnits } : {}),
+        ...(suggestWindowStart ? { lastYearStart: new Date(`${suggestWindowStart}T00:00:00Z`) } : {}),
+        ...(suggestWindowEnd ? { lastYearEnd: new Date(`${suggestWindowEnd}T23:59:59Z`) } : {}),
+      })
+      hydrateFromSuggestion(result)
+      if (result.lines.length === 0) {
+        toast.info(result.notes[0] ?? 'No lines suggested for this market.')
+      } else {
+        toast.success(
+          `Suggested ${result.totals.totalRecommendedUnits} units across ${result.totals.variationsCovered} styles — edit below and submit when ready.`,
+        )
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Could not generate the packing list.'
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setSuggestBusy(false)
+    }
+  }
+
   async function submit() {
     if (!locationId || lineCount === 0) return
     setBusy(true)
@@ -249,6 +389,190 @@ function NewRequestBody() {
         </div>
       )}
 
+      {/* Packing-list suggestion (CEO ask, 2026-09-01). Owner only — the
+          suggestion pulls on cross-market data (warehouse stock, competing
+          demand, per-market colour mix) and drives allocation decisions
+          across the whole network. Market Managers still see the manual
+          search below and can request for their own market by hand. */}
+
+      {/**
+           * 
+           * 
+           * TODO: Suggest a packing list
+           * 
+           * 
+           */}
+      {/* {user?.role === 'OWNER' && (
+        <div className="suggest-panel">
+          <div className="suggest-panel-header">
+            <span className="suggest-panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8" />
+              </svg>
+            </span>
+            <div className="suggest-panel-body">
+              <h2 className="suggest-panel-title">Suggest a packing list</h2>
+              <p className="suggest-panel-sub">
+                Uses last season&rsquo;s sales at this market, current warehouse stock, and open requests from other markets.
+              </p>
+            </div>
+            {!suggestOpen && (
+              <button
+                className="btn btn-primary"
+                onClick={() => setSuggestOpen(true)}
+                disabled={!locationId}
+                style={{ width: 'auto', paddingLeft: 20, paddingRight: 20 }}
+                type="button"
+              >
+                Generate
+              </button>
+            )}
+          </div>
+
+          {suggestOpen && (
+            <div className="stack" style={{ marginTop: 16, gap: 14 }}>
+              <div className="field" style={{ margin: 0 }}>
+                <label>Target</label>
+                <div className="segmented" role="tablist" aria-label="Target mode">
+                  {(
+                    [
+                      {
+                        id: 'MATCH_LAST_YEAR',
+                        label: 'Match last season',
+                        icon: (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M4 17l6-6 4 4 6-8" />
+                            <path d="M14 7h6v6" />
+                          </svg>
+                        ),
+                      },
+                      {
+                        id: 'GROW_PCT',
+                        label: 'Grow by %',
+                        icon: (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M4 20l8-14 4 8 4-4" />
+                            <path d="M14 6h6v6" />
+                          </svg>
+                        ),
+                      },
+                      {
+                        id: 'CUSTOM_UNITS',
+                        label: 'Custom units',
+                        icon: (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="12" cy="12" r="8" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                        ),
+                      },
+                    ] as Array<{ id: SuggestionTargetMode; label: string; icon: JSX.Element }>
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      className={`segmented-btn${suggestMode === opt.id ? ' active' : ''}`}
+                      onClick={() => setSuggestMode(opt.id)}
+                      type="button"
+                      role="tab"
+                      aria-selected={suggestMode === opt.id}
+                    >
+                      {opt.icon}
+                      <span>{opt.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {suggestMode === 'GROW_PCT' && (
+                <div className="field" style={{ margin: 0 }}>
+                  <label htmlFor="growthPct">Growth (%)</label>
+                  <input
+                    id="growthPct"
+                    type="number"
+                    step={1}
+                    min={-100}
+                    max={500}
+                    value={suggestGrowthPct}
+                    onChange={(e) => setSuggestGrowthPct(Number(e.target.value))}
+                  />
+                  <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+                    Positive grows the target above last season, negative shrinks it.
+                  </p>
+                </div>
+              )}
+
+              {suggestMode === 'CUSTOM_UNITS' && (
+                <div className="field" style={{ margin: 0 }}>
+                  <label htmlFor="targetUnits">Total units to send</label>
+                  <input
+                    id="targetUnits"
+                    type="number"
+                    step={1}
+                    min={1}
+                    value={suggestTargetUnits}
+                    onChange={(e) => setSuggestTargetUnits(Number(e.target.value))}
+                  />
+                  <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+                    Split across styles in proportion to last season&rsquo;s mix at this market.
+                  </p>
+                </div>
+              )}
+
+              <div className="field" style={{ margin: 0 }}>
+                <label>Sales window <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>(optional)</span></label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <input
+                    type="date"
+                    value={suggestWindowStart}
+                    onChange={(e) => setSuggestWindowStart(e.target.value)}
+                    aria-label="Window start"
+                    style={{ flex: 1, minWidth: 140 }}
+                  />
+                  <input
+                    type="date"
+                    value={suggestWindowEnd}
+                    onChange={(e) => setSuggestWindowEnd(e.target.value)}
+                    aria-label="Window end"
+                    style={{ flex: 1, minWidth: 140 }}
+                  />
+                </div>
+                <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+                  Leave blank to use last season&rsquo;s window (or the trailing 12 months a year ago).
+                </p>
+              </div>
+
+              <div className="suggest-panel-actions">
+                <button
+                  className="btn"
+                  onClick={() => setSuggestOpen(false)}
+                  disabled={suggestBusy}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={runSuggestion}
+                  disabled={suggestBusy || !locationId}
+                  style={{ width: 'auto', paddingLeft: 24, paddingRight: 24 }}
+                  type="button"
+                >
+                  {suggestBusy ? 'Generating…' : 'Generate list'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {suggestNotes.length > 0 && (
+            <div className="suggest-panel-notes">
+              {suggestNotes.map((n, i) => (
+                <p key={i}>{n}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )} */}
+
       <div className="field">
         <label htmlFor="search">Add an item</label>
         <input
@@ -265,6 +589,7 @@ function NewRequestBody() {
           {matches.map((v) => {
             const variantCount = variantsByVariation.get(v.id)?.length ?? 0
             const onHand = familyOnHand.get(v.id) ?? 0
+            const onHandWh = familyOnHandAtWarehouse.get(v.id) ?? 0
             return (
               <button
                 key={v.id}
@@ -286,18 +611,35 @@ function NewRequestBody() {
                     {v.colourFamilyName} · {v.sizeOptionName}
                   </div>
                 </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div
-                    className="mono"
-                    style={{ fontWeight: 700, fontSize: '1.1rem', color: onHand === 0 ? 'var(--text-faint)' : 'var(--text)' }}
-                    aria-label={`${onHand} on hand in market`}
-                  >
-                    {onHand}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+                  <div className="stock-pair">
+                    <div className="stock-cell" aria-label={`${onHand} on hand in market`}>
+                      <span className={`stock-cell-value${onHand === 0 ? ' is-zero' : ''}`}>{onHand}</span>
+                      <span className="stock-cell-label">In market</span>
+                    </div>
+                    <div className="stock-cell is-warehouse" aria-label={`${onHandWh} on hand in warehouse`}>
+                      <span className={`stock-cell-value${onHandWh === 0 ? ' is-zero' : ''}`}>{onHandWh}</span>
+                      <span className="stock-cell-label">In warehouse</span>
+                    </div>
                   </div>
                   <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
-                    in market · {variantCount} variant{variantCount === 1 ? '' : 's'}
+                    {variantCount} variant{variantCount === 1 ? '' : 's'}
                   </span>
                 </div>
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  style={{ color: 'var(--text-faint)', marginLeft: 4, flexShrink: 0 }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
               </button>
             )
           })}
@@ -322,10 +664,21 @@ function NewRequestBody() {
         <div className="stack" style={{ marginBottom: 24 }}>
           {families.map((f) => {
             const familyTotal = Object.values(f.qtyByVariant).reduce((s, n) => s + n, 0)
+            const familyMarket = familyOnHand.get(f.variationId) ?? 0
+            const familyWarehouse = familyOnHandAtWarehouse.get(f.variationId) ?? 0
             const open = openId === f.variationId
             return (
               <div key={f.variationId} className="card">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => removeFamily(f.variationId)}
+                    aria-label="Remove item"
+                    title="Remove item"
+                    style={{ minHeight: 32, minWidth: 32, padding: '4px 8px', flexShrink: 0 }}
+                  >
+                    ✕
+                  </button>
                   <div
                     role="button"
                     tabIndex={0}
@@ -365,23 +718,47 @@ function NewRequestBody() {
                         {f.familyName} · {f.sizeName}
                       </div>
                     </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
-                        {familyTotal}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+                      <div style={{ textAlign: 'right' }}>
+                        <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem', lineHeight: 1 }}>
+                          {familyTotal}
+                        </div>
+                        <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
+                          Requested
+                        </span>
                       </div>
-                      <span className="eyebrow" style={{ color: 'var(--text-faint)' }}>
-                        {f.variants.length} variant{f.variants.length === 1 ? '' : 's'}
-                      </span>
+                      <div className="stock-pair">
+                        <div className="stock-cell" aria-label={`${familyMarket} on hand in market`}>
+                          <span className={`stock-cell-value${familyMarket === 0 ? ' is-zero' : ''}`}>{familyMarket}</span>
+                          <span className="stock-cell-label">In market</span>
+                        </div>
+                        <div className="stock-cell is-warehouse" aria-label={`${familyWarehouse} on hand in warehouse`}>
+                          <span className={`stock-cell-value${familyWarehouse === 0 ? ' is-zero' : ''}`}>{familyWarehouse}</span>
+                          <span className="stock-cell-label">In warehouse</span>
+                        </div>
+                      </div>
                     </div>
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      style={{
+                        color: 'var(--text-faint)',
+                        marginLeft: 4,
+                        flexShrink: 0,
+                        transition: 'transform 0.15s ease',
+                        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                      }}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
                   </div>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => removeFamily(f.variationId)}
-                    aria-label="Remove item"
-                    style={{ minHeight: 40, padding: '6px 10px' }}
-                  >
-                    ✕
-                  </button>
                 </div>
 
                 {open && (
@@ -394,6 +771,7 @@ function NewRequestBody() {
                       f.variants.map((v) => {
                         const qty = f.qtyByVariant[v.id] ?? 0
                         const onHand = onHandByVariantId.get(v.id) ?? 0
+                        const onHandWh = onHandByVariantAtWarehouse.get(v.id) ?? 0
                         return (
                           <div
                             key={v.id}
@@ -408,11 +786,35 @@ function NewRequestBody() {
                             <div className="list-row-body">
                               <div className="list-row-title">{v.colourVariantName}</div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
-                              <div
-                                className="list-row-meta"
-                                style={{ color: onHand === 0 ? 'var(--text-faint)' : 'var(--text-dim)' }}
-                              >
-                                {onHand} in market
+                              <div className="stock-inline" style={{ marginTop: 4, flexWrap: 'wrap' }}>
+                                <span
+                                  className={`stock-inline-pill${onHand === 0 ? ' is-zero' : ''}`}
+                                  aria-label={`${onHand} on hand in market`}
+                                  title={`${onHand} in market`}
+                                >
+                                  <span className="stock-inline-pill-label">Mkt</span>
+                                  {onHand}
+                                </span>
+                                <span
+                                  className={`stock-inline-pill is-warehouse${onHandWh === 0 ? ' is-zero' : ''}`}
+                                  aria-label={`${onHandWh} on hand in warehouse`}
+                                  title={`${onHandWh} in warehouse`}
+                                >
+                                  <span className="stock-inline-pill-label">Wh</span>
+                                  {onHandWh}
+                                </span>
+                                {onHandWh === 0 && (
+                                  <span
+                                    className="backorder-hint"
+                                    title="You can still request this, packing will begin when warehouse stock arrives."
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                      <circle cx="12" cy="12" r="9" />
+                                      <polyline points="12 7 12 12 15 14" />
+                                    </svg>
+                                    Backorder
+                                  </span>
+                                )}
                               </div>
                             </div>
                             <div className="stepper">

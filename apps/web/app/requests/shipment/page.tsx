@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import type {
   BoxDto,
   BoxLabelDto,
@@ -12,6 +12,7 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { ConfirmDialog } from '../../../components/ConfirmDialog'
 import { PageHeader } from '../../../components/PageHeader'
 import { ProductThumb, firstPhoto } from '../../../components/ProductThumb'
 import { RequireAuth } from '../../../components/RequireAuth'
@@ -21,6 +22,8 @@ import { printLabelElement } from '../../../lib/print-label'
 import { useToast } from '../../../lib/toast'
 import {
   ApiError,
+  discardBox,
+  dispatchBox,
   getBoxLabel,
   getRequest,
   listBoxes,
@@ -39,6 +42,7 @@ function ShipmentBody() {
   const { user } = useAuth()
   const toast = useToast()
   const searchParams = useSearchParams()
+  const router = useRouter()
   const idsParam = searchParams.get('ids') ?? ''
   const ids = useMemo(
     () => idsParam.split(',').map((s) => s.trim()).filter(Boolean),
@@ -54,6 +58,16 @@ function ShipmentBody() {
   const [openLabelBoxIds, setOpenLabelBoxIds] = useState<Set<string>>(new Set())
   const [openProductIds, setOpenProductIds] = useState<Set<string>>(new Set())
   const [scannerOpen, setScannerOpen] = useState(false)
+  /// Shared confirm-dialog slot. Each destructive action (dispatch,
+  /// unpack, report-missing) sets this to a prompt spec; the modal
+  /// renders whatever's here. `null` closes.
+  const [confirm, setConfirm] = useState<{
+    title: string
+    body: ReactNode
+    confirmLabel: string
+    variant: 'primary' | 'danger'
+    onConfirm: () => void | Promise<void>
+  } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -310,6 +324,158 @@ function ShipmentBody() {
     }
   }
 
+  /// Dispatch every PACKING box in this shipment in one go, so the
+  /// operator doesn't have to open /pack for each constituent request.
+  /// A grouped shipment usually has ONE shared box; sequential loop is
+  /// fine even if there are a few.
+  ///
+  /// Confirms first when the shipment is only partially packed —
+  /// `PACKING + DISPATCHED < requested` on any constituent request
+  /// means those leftover units will never ship (the request auto-
+  /// transitions to DISPATCHED and drops off /pack).
+  async function doDispatchShipment() {
+    if (!user) return
+    const packingBoxes = boxes.filter((b) => b.state === 'PACKING')
+    if (packingBoxes.length === 0) return
+
+    // Per-request coverage. Compare what will be on the wire once we
+    // dispatch (dispatched-already + packing) against what was asked
+    // for. Any shortfall is a short-ship.
+    const shortfalls: Array<{ requestId: string; requested: number; covered: number }> = []
+    for (const r of requests) {
+      const requested = r.lines.reduce((s, l) => s + l.qtyRequested, 0)
+      let covered = 0
+      for (const b of boxes) {
+        if (b.state !== 'PACKING' && b.state !== 'DISPATCHED' && b.state !== 'ARRIVED') continue
+        for (const line of b.lines) {
+          const rid = line.requestId ?? b.requestId ?? null
+          if (rid !== r.id) continue
+          covered += line.quantity
+        }
+      }
+      if (requested > 0 && covered < requested) {
+        shortfalls.push({ requestId: r.id, requested, covered })
+      }
+    }
+
+    const runDispatch = async () => {
+      setConfirm(null)
+      setBusy(true)
+      setError(null)
+      try {
+        for (const b of packingBoxes) {
+          await dispatchBox(b.id)
+        }
+        toast.success(
+          packingBoxes.length === 1
+            ? 'Shipment dispatched.'
+            : `Dispatched ${packingBoxes.length} boxes.`,
+        )
+        await reload()
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : 'Could not dispatch this shipment.'
+        setError(msg)
+        toast.error(msg)
+      } finally {
+        setBusy(false)
+      }
+    }
+
+    if (shortfalls.length > 0) {
+      setConfirm({
+        title: 'Dispatch a partially-packed shipment?',
+        confirmLabel: 'Dispatch anyway',
+        variant: 'danger',
+        body: (
+          <>
+            <p style={{ margin: '0 0 10px' }}>The following requests aren&rsquo;t fully packed:</p>
+            <ul style={{ margin: '0 0 12px', paddingLeft: 18, color: 'var(--text)' }}>
+              {shortfalls.map((s) => (
+                <li key={s.requestId}>
+                  <span className="mono" style={{ color: 'var(--text-dim)' }}>
+                    #{s.requestId.slice(0, 6)}
+                  </span>{' '}
+                  — {s.covered} of {s.requested} units on a box
+                </li>
+              ))}
+            </ul>
+            <p style={{ margin: 0 }}>
+              Dispatching now will ship what&rsquo;s on the boxes and{' '}
+              <strong>drop the remaining units</strong>. The requests will move to DISPATCHED and
+              can&rsquo;t be re-opened for packing.
+            </p>
+          </>
+        ),
+        onConfirm: runDispatch,
+      })
+      return
+    }
+
+    await runDispatch()
+  }
+
+  /// Unpack every PACKING box in the shipment. Loops the existing
+  /// discardBox endpoint; each discard triggers the server-side
+  /// reconcile, so every participating request drops back to PACKING
+  /// automatically as coverage falls.
+  async function doUnpackShipment() {
+    if (!user) return
+    const packingBoxes = boxes.filter((b) => b.state === 'PACKING')
+    if (packingBoxes.length === 0) return
+
+    setConfirm({
+      title: 'Unpack this shipment?',
+      confirmLabel: 'Unpack shipment',
+      variant: 'danger',
+      body: (
+        <>
+          <p style={{ margin: '0 0 10px' }}>
+            This will discard{' '}
+            <strong>
+              {packingBoxes.length} packed box{packingBoxes.length === 1 ? '' : 'es'}
+            </strong>{' '}
+            and revert every request in this shipment back to <strong>Packing</strong>.
+          </p>
+          <p style={{ margin: 0 }}>
+            You&rsquo;ll be sent straight into the pack screen to re-pack. Continue?
+          </p>
+        </>
+      ),
+      onConfirm: () => void runUnpack(),
+    })
+
+    async function runUnpack() {
+      setConfirm(null)
+      setBusy(true)
+      setError(null)
+      try {
+        for (const b of packingBoxes) {
+          await discardBox(b.id)
+        }
+        toast.success(
+          packingBoxes.length === 1
+            ? 'Shipment unpacked.'
+            : `Unpacked ${packingBoxes.length} boxes.`,
+        )
+        // Send the operator into the destination-scoped pack view so they
+        // can immediately re-pack the same set of requests.
+        const destinationId = requests[0]?.locationId
+        if (destinationId && ids.length > 0) {
+          const qs = new URLSearchParams({ requests: ids.join(',') }).toString()
+          router.push(`/pack/dest/${encodeURIComponent(destinationId)}?${qs}`)
+        } else {
+          await reload()
+        }
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : 'Could not unpack this shipment.'
+        setError(msg)
+        toast.error(msg)
+      } finally {
+        setBusy(false)
+      }
+    }
+  }
+
   async function toggleLabel(boxId: string) {
     setOpenLabelBoxIds((prev) => {
       const next = new Set(prev)
@@ -529,7 +695,26 @@ function ShipmentBody() {
                     {fullyDone ? numeratorLabel : `${line.qty - numerator} left`}
                   </span>
                 </div>
-                <span style={{ color: 'var(--text-faint)', fontSize: '0.8rem' }}>{isOpen ? '▾' : '▸'}</span>
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  style={{
+                    color: 'var(--text-faint)',
+                    marginLeft: 6,
+                    flexShrink: 0,
+                    transition: 'transform 0.15s ease',
+                    transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+                  }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
               </button>
               {isOpen && (
                 <div style={{ padding: '0 12px 12px 12px', borderTop: '1px solid var(--line)' }}>
@@ -638,6 +823,82 @@ function ShipmentBody() {
       )}
         </>
       )}
+
+      {(() => {
+        // Warehouse-side dispatch + unpack. Placed AFTER the boxes
+        // section so it mirrors the single-request detail (`Mark
+        // dispatched` and `Unpack` sit below the QR labels there too),
+        // instead of hovering above the products list.
+        if (!user) return null
+        const canAct =
+          user.role === 'OWNER' ||
+          user.role === 'WAREHOUSE_MANAGER' ||
+          user.role === 'WAREHOUSE_OPERATOR'
+        const packingBoxes = boxes.filter((b) => b.state === 'PACKING')
+        if (!canAct || packingBoxes.length === 0) return null
+
+        // Partial coverage detection — used to show a warning notice
+        // above the CTA before the operator clicks.
+        let anyShort = false
+        for (const r of requests) {
+          const requested = r.lines.reduce((s, l) => s + l.qtyRequested, 0)
+          let covered = 0
+          for (const b of boxes) {
+            if (b.state !== 'PACKING' && b.state !== 'DISPATCHED' && b.state !== 'ARRIVED') continue
+            for (const line of b.lines) {
+              const rid = line.requestId ?? b.requestId ?? null
+              if (rid === r.id) covered += line.quantity
+            }
+          }
+          if (requested > 0 && covered < requested) {
+            anyShort = true
+            break
+          }
+        }
+
+        return (
+          <div className="stack" style={{ marginTop: 24 }}>
+            {anyShort && (
+              <p className="notice notice-warn" style={{ margin: 0 }}>
+                Some requests aren&rsquo;t fully packed. Dispatching now will short-ship them —
+                unpacked units will be dropped and the requests can&rsquo;t be re-opened.
+              </p>
+            )}
+            <button
+              type="button"
+              className="btn btn-primary btn-block"
+              onClick={doDispatchShipment}
+              disabled={busy}
+            >
+              {busy
+                ? 'Working…'
+                : packingBoxes.length === 1
+                  ? 'Mark dispatched'
+                  : `Mark dispatched (${packingBoxes.length} boxes)`}
+            </button>
+            <button
+              type="button"
+              className="btn btn-block btn-danger"
+              onClick={doUnpackShipment}
+              disabled={busy}
+              title="Discard every packed box in this shipment and re-open each request for packing."
+            >
+              {busy ? 'Working…' : 'Unpack'}
+            </button>
+          </div>
+        )
+      })()}
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        body={confirm?.body ?? null}
+        confirmLabel={confirm?.confirmLabel ?? 'Confirm'}
+        variant={confirm?.variant ?? 'primary'}
+        busy={busy}
+        onConfirm={() => confirm?.onConfirm()}
+        onClose={() => setConfirm(null)}
+      />
     </div>
   )
 }

@@ -137,12 +137,17 @@ export const receiveBoxResultSchema = z.object({
 })
 export type ReceiveBoxResult = z.infer<typeof receiveBoxResultSchema>
 
+/// Shape of the POST /boxes/:id/dispatch response. One entry per box
+/// line, in the order the server wrote the DISPATCH ledger rows.
+/// `created` is false for idempotent re-dispatches (the ledger row
+/// already existed and the append was a no-op). No transferId here —
+/// the client never joins ledger rows itself; the receive path does
+/// that server-side via the shared idempotency key.
 export const dispatchResultSchema = z.object({
   boxId: z.string(),
-  transfers: z.array(
+  dispatched: z.array(
     z.object({
       warehouseVariantId: z.string(),
-      transferId: z.string(),
       created: z.boolean(),
     }),
   ),

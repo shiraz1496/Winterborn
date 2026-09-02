@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import type { BoxDto, BoxLabelDto, LocationDto, RestockRequestDto, VariationSummary, WarehouseVariantSummary } from '@winterborn/shared'
+import { ConfirmDialog } from '../../../components/ConfirmDialog'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { SectionHeading } from '../../../components/SectionHeading'
@@ -53,6 +54,7 @@ function insufficientStockDetails(err: unknown): Array<{ warehouseVariantId: str
 
 function PackBody() {
   const params = useParams<{ requestId: string }>()
+  const router = useRouter()
   const toast = useToast()
   const [request, setRequest] = useState<RestockRequestDto | null>(null)
   const [siblings, setSiblings] = useState<RestockRequestDto[]>([])
@@ -66,6 +68,14 @@ function PackBody() {
   const [labels, setLabels] = useState<Record<string, BoxLabelDto>>({})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /// Shared confirm-dialog slot — see ConfirmDialog. `null` closes.
+  const [confirm, setConfirm] = useState<{
+    title: string
+    body: ReactNode
+    confirmLabel: string
+    variant: 'primary' | 'danger'
+    onConfirm: () => void | Promise<void>
+  } | null>(null)
   const [loading, setLoading] = useState(true)
   const [hasPrefilled, setHasPrefilled] = useState<string | null>(null)
   // Live warehouse stock per warehouseVariant. Refetched after every
@@ -293,6 +303,11 @@ function PackBody() {
         }
       }
       toast.success(solosToDiscard.length > 0 ? 'Box re-packed' : 'Box packed')
+      // Send the operator back to the request detail after packing so they
+      // can review the label, print the QR, and hit "Mark dispatched" from
+      // the same place they see the boxes list. Prevents the pack screen
+      // from lingering as a stale "current box: 0 units" landing.
+      router.push(`/requests/${request.id}`)
     } catch (err) {
       // InsufficientStock from the backend arrives as ApiError with a
       // details array under body.details. Render a per-SKU message so the
@@ -338,35 +353,99 @@ function PackBody() {
 
   async function doDispatch(boxId: string) {
     if (!request) return
-    setBusy(true)
-    setError(null)
-    try {
-      await dispatchBox(boxId)
-      setBoxes(await listBoxes({ requestId: request.id }))
-      toast.success('Box dispatched — ledger updated')
-    } catch (err) {
-      // Client-side error can be a dropped connection while the server
-      // still succeeded — refetch and only show the error if the box
-      // is genuinely still in PACKING. This turns a benign transport
-      // hiccup into a silent success instead of a scary banner.
+
+    // Coverage guard: dispatching a box auto-flips every participating
+    // request to DISPATCHED, so any requested unit not on a box (this
+    // one or a sibling) is silently dropped. Warn the operator before
+    // that happens so partial ships are deliberate, not accidental.
+    const box = boxes.find((b) => b.id === boxId)
+    let shortfall: { requested: number; covered: number } | null = null
+    if (box) {
+      const involved = new Set<string>()
+      if (box.requestId) involved.add(box.requestId)
+      for (const line of box.lines) if (line.requestId) involved.add(line.requestId)
+      for (const rid of involved) {
+        // Siblings on shared boxes are handled from the shipment view;
+        // this loop conservatively only checks the current request.
+        if (rid !== request.id) continue
+        const requested = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+        let covered = 0
+        for (const b of boxes) {
+          for (const line of b.lines) {
+            const lineRid = line.requestId ?? b.requestId ?? null
+            if (lineRid === rid) covered += line.quantity
+          }
+        }
+        if (requested > 0 && covered < requested) {
+          shortfall = { requested, covered }
+          break
+        }
+      }
+    }
+
+    if (shortfall) {
+      const { requested, covered } = shortfall
+      const dropped = requested - covered
+      setConfirm({
+        title: 'Dispatch a partially-packed request?',
+        confirmLabel: 'Dispatch anyway',
+        variant: 'danger',
+        body: (
+          <>
+            <p style={{ margin: '0 0 10px' }}>
+              This request is only partially packed —{' '}
+              <strong>
+                {covered} of {requested} units
+              </strong>{' '}
+              on a box.
+            </p>
+            <p style={{ margin: 0 }}>
+              Dispatching now will ship the {covered} packed and{' '}
+              <strong>drop the remaining {dropped}</strong>. The request will move to DISPATCHED and
+              can&rsquo;t be re-opened for packing.
+            </p>
+          </>
+        ),
+        onConfirm: () => void runDispatch(),
+      })
+      return
+    }
+
+    await runDispatch()
+
+    async function runDispatch() {
+      if (!request) return
+      setConfirm(null)
+      setBusy(true)
+      setError(null)
       try {
-        const fresh = await listBoxes({ requestId: request.id })
-        setBoxes(fresh)
-        const box = fresh.find((b) => b.id === boxId)
-        if (box && box.state !== 'PACKING') {
-          toast.success('Box dispatched — ledger updated')
-        } else {
+        await dispatchBox(boxId)
+        setBoxes(await listBoxes({ requestId: request.id }))
+        toast.success('Box dispatched — ledger updated')
+      } catch (err) {
+        // Client-side error can be a dropped connection while the server
+        // still succeeded — refetch and only show the error if the box
+        // is genuinely still in PACKING. This turns a benign transport
+        // hiccup into a silent success instead of a scary banner.
+        try {
+          const fresh = await listBoxes({ requestId: request.id })
+          setBoxes(fresh)
+          const box = fresh.find((b) => b.id === boxId)
+          if (box && box.state !== 'PACKING') {
+            toast.success('Box dispatched — ledger updated')
+          } else {
+            const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
+            setError(msg)
+            toast.error(msg)
+          }
+        } catch {
           const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
           setError(msg)
           toast.error(msg)
         }
-      } catch {
-        const msg = err instanceof ApiError ? err.message : 'Could not dispatch that box.'
-        setError(msg)
-        toast.error(msg)
+      } finally {
+        setBusy(false)
       }
-    } finally {
-      setBusy(false)
     }
   }
 
@@ -693,6 +772,26 @@ function PackBody() {
                         {familyRemaining <= 0 ? 'resolved' : `${familyRemaining} left`}
                       </span>
                     </div>
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      style={{
+                        color: 'var(--text-faint)',
+                        marginLeft: 6,
+                        flexShrink: 0,
+                        transition: 'transform 0.15s ease',
+                        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                      }}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
                   </button>
 
                   {open && (
@@ -861,6 +960,17 @@ function PackBody() {
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        body={confirm?.body ?? null}
+        confirmLabel={confirm?.confirmLabel ?? 'Confirm'}
+        variant={confirm?.variant ?? 'primary'}
+        busy={busy}
+        onConfirm={() => confirm?.onConfirm()}
+        onClose={() => setConfirm(null)}
+      />
     </div>
   )
 }
