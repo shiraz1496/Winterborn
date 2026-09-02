@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import type {
@@ -14,6 +14,7 @@ import type {
   WarehouseVariantSummary,
 } from '@winterborn/shared'
 import { BoxLabel } from '../../../components/BoxLabel'
+import { ConfirmDialog } from '../../../components/ConfirmDialog'
 import { CopyButton } from '../../../components/CopyButton'
 import { InfoTooltip } from '../../../components/InfoTooltip'
 import { PageHeader } from '../../../components/PageHeader'
@@ -35,6 +36,7 @@ import {
   listWarehouseVariants,
   reportRequestMissing,
   transitionRequest,
+  unpackRequest,
   updateRequestLine,
 } from '../../../lib/api'
 
@@ -61,11 +63,16 @@ const NEXT_TRANSITION: Partial<Record<RequestState, { to: RequestState; label: s
   DRAFT: { to: 'OPEN', label: 'Submit request', allowed: ['MARKET_MANAGER', 'OWNER'] },
   OPEN: { to: 'PACKING', label: 'Start packing', allowed: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'] },
   PACKING: { to: 'DISPATCHED', label: 'Mark dispatched', allowed: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'] },
+  /// PACKED is the auto-set "fully packed, waiting to ship" state — the
+  /// button here goes straight to DISPATCHED. The PACKING↔PACKED
+  /// transition is triggered by pack/discard on the backend, not by an
+  /// operator click.
+  PACKED: { to: 'DISPATCHED', label: 'Mark dispatched', allowed: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'] },
   DISPATCHED: { to: 'CLOSED', label: 'Received & close', allowed: ['MARKET_MANAGER'] },
   ARRIVED: { to: 'CLOSED', label: 'Received & close', allowed: ['MARKET_MANAGER'] },
 }
 
-const FLOW: RequestState[] = ['DRAFT', 'OPEN', 'PACKING', 'DISPATCHED', 'CLOSED']
+const FLOW: RequestState[] = ['DRAFT', 'OPEN', 'PACKING', 'PACKED', 'DISPATCHED', 'CLOSED']
 
 function RequestDetailBody() {
   const { user } = useAuth()
@@ -84,6 +91,16 @@ function RequestDetailBody() {
   const [busy, setBusy] = useState(false)
   const [openFamilyId, setOpenFamilyId] = useState<string | null>(null)
   const [scannerOpen, setScannerOpen] = useState(false)
+  /// Shared confirm-dialog slot — see ConfirmDialog. Each destructive
+  /// action sets this to a prompt spec; the modal renders whatever's
+  /// here. `null` closes.
+  const [confirm, setConfirm] = useState<{
+    title: string
+    body: ReactNode
+    confirmLabel: string
+    variant: 'primary' | 'danger'
+    onConfirm: () => void | Promise<void>
+  } | null>(null)
 
   async function load() {
     try {
@@ -187,9 +204,9 @@ function RequestDetailBody() {
 
   const packingHasStarted = request
     ? request.state === 'PACKING' ||
-      request.state === 'DISPATCHED' ||
-      request.state === 'ARRIVED' ||
-      request.state === 'CLOSED'
+    request.state === 'DISPATCHED' ||
+    request.state === 'ARRIVED' ||
+    request.state === 'CLOSED'
     : false
 
   const locationName = locations.find((l) => l.id === request?.locationId)?.name ?? request?.locationId
@@ -229,6 +246,63 @@ function RequestDetailBody() {
       toast.error(msg)
     } finally {
       setBusy(false)
+    }
+  }
+
+  function doUnpack() {
+    if (!request) return
+    setConfirm({
+      title: 'Unpack this request?',
+      confirmLabel: 'Unpack request',
+      variant: 'danger',
+      body: (
+        <>
+          <p style={{ margin: '0 0 10px' }}>
+            This will discard every packed box for this request and revert it back to{' '}
+            <strong>Packing</strong> so you can re-pack.
+          </p>
+          <p style={{ margin: 0 }}>
+            Shared boxes (packed with other requests) are left alone — use the shipment view to
+            unpack those. You&rsquo;ll be sent to the pack screen once this finishes.
+          </p>
+        </>
+      ),
+      onConfirm: () => void runUnpack(),
+    })
+
+    async function runUnpack() {
+      if (!request) return
+      setConfirm(null)
+      setBusy(true)
+      setError(null)
+      try {
+        const res = await unpackRequest(request.id)
+        const parts: string[] = []
+        if (res.discarded.length > 0) {
+          parts.push(`${res.discarded.length} box${res.discarded.length === 1 ? '' : 'es'} unpacked`)
+        }
+        if (res.sharedSkipped.length > 0) {
+          parts.push(
+            `${res.sharedSkipped.length} shared box${res.sharedSkipped.length === 1 ? '' : 'es'} left — unpack via the shipment view`,
+          )
+        }
+        toast.success(parts.length > 0 ? parts.join(' · ') : 'No packed boxes to unpack.')
+        // Send the operator straight into the packing screen after
+        // unpack so they can immediately re-pack. If only shared boxes
+        // were left (nothing actually unpacked), stay put — the operator
+        // needs to open the shipment view to make progress.
+        if (res.discarded.length > 0) {
+          router.push(`/pack/${request.id}`)
+        } else {
+          await load()
+        }
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : 'Could not unpack this request.'
+        setError(msg)
+        toast.error(msg)
+      } finally {
+        setBusy(false)
+      }
     }
   }
 
@@ -311,9 +385,8 @@ function RequestDetailBody() {
           <Fragment key={s}>
             {i > 0 && <span className="step-arrow">→</span>}
             <span
-              className={`step ${
-                i < currentStepIdx ? 'step-done' : i === currentStepIdx ? 'step-current' : ''
-              }`}
+              className={`step ${i < currentStepIdx ? 'step-done' : i === currentStepIdx ? 'step-current' : ''
+                }`}
             >
               {s.toLowerCase()}
             </span>
@@ -322,6 +395,55 @@ function RequestDetailBody() {
       </div>
 
       {error && <p className="error-banner">{error}</p>}
+
+      {(() => {
+        // Short-shipped notice: shown once the request has left the
+        // warehouse and the delivered total is less than what was
+        // requested. Tells the market manager exactly how much is
+        // missing so they can re-request without hunting through boxes.
+        if (
+          request.state !== 'DISPATCHED' &&
+          request.state !== 'ARRIVED' &&
+          request.state !== 'CLOSED'
+        ) {
+          return null
+        }
+        const totalRequested = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+        let totalShipped = 0
+        for (const line of request.lines) totalShipped += shippedByLine.get(line.id) ?? 0
+        if (totalRequested === 0 || totalShipped >= totalRequested) return null
+        const short = totalRequested - totalShipped
+        return (
+          <p className="notice notice-warn" style={{ marginBottom: 16 }}>
+            <strong>Short-shipped:</strong> {totalShipped} of {totalRequested} units were dispatched.
+            The remaining {short} unit{short === 1 ? '' : 's'} {short === 1 ? 'was' : 'were'} not packed
+            and can no longer be added to this request. File a new request if you still need those units.
+          </p>
+        )
+      })()}
+
+      {(() => {
+        // Partial-packed warning: shown while the request is PACKED but
+        // coverage is less than what was asked for. Committing packing
+        // (creating any box) flips the request to PACKED regardless of
+        // full coverage — this notice is the safety net that tells the
+        // operator "you're about to ship less than the market asked
+        // for, and the shortfall can't be added later."
+        if (request.state !== 'PACKED') return null
+        const totalRequested = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+        let totalPacked = 0
+        for (const line of request.lines) totalPacked += shippedByLine.get(line.id) ?? 0
+        if (totalRequested === 0 || totalPacked >= totalRequested) return null
+        const left = totalRequested - totalPacked
+        return (
+          <p className="notice notice-warn" style={{ marginBottom: 16 }}>
+            <strong>Partially packed:</strong> only {totalPacked} of {totalRequested} units are on a
+            box. If you Mark dispatched now, only those {totalPacked} will ship — the remaining {left}{' '}
+            unit{left === 1 ? '' : 's'} will be dropped and the request can&rsquo;t be re-opened for
+            packing. Unpack and add more stock before dispatching if you need the rest to ship.
+          </p>
+        )
+      })()}
 
       <SectionHeading
         title="Items requested"
@@ -440,164 +562,164 @@ function RequestDetailBody() {
                   {open && (
                     <div className="stack" style={{ marginTop: 14, gap: 8 }}>
                       {lines.map((line) => {
-        const meta = variationById.get(line.variationId)
-        const a = analysisByLine.get(line.id)
-        const rec = a?.recommendation
-        const alloc = a?.allocation
-        return (
-          <div key={line.id} className="list-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', border: '1px solid var(--line)' }}>
-              {(() => {
-                const wv = line.warehouseVariantId
-                  ? warehouseVariantById.get(line.warehouseVariantId)
-                  : undefined
-                // Variant-level line: use that specific SKU's photo.
-                // Family-level line: fall back to the first photo across
-                // the family's variants so the row isn't blank.
-                const photoUrl = wv
-                  ? wv.photoUrl
-                  : firstPhoto(warehouseVariantsByVariation.get(line.variationId) ?? [])
-                const familyName = wv?.colourVariantName ?? meta?.colourFamilyName ?? ''
-                return (
-                  <ProductThumb
-                    photoUrl={photoUrl}
-                    familyName={familyName}
-                    alt={wv?.colourVariantName ?? meta?.itemGroupName ?? ''}
-                  />
-                )
-              })()}
-              <div className="list-row-body">
-                <div className="list-row-title">
-                  {line.warehouseVariantId && warehouseVariantById.get(line.warehouseVariantId)
-                    ? warehouseVariantById.get(line.warehouseVariantId)!.colourVariantName
-                    : `Any ${meta?.colourFamilyName ?? 'colour'}`}
-                </div>
-                <div className="list-row-meta mono">
-                  {line.warehouseVariantId && warehouseVariantById.get(line.warehouseVariantId)
-                    ? warehouseVariantById.get(line.warehouseVariantId)!.warehouseSku
-                    : meta?.sizeOptionName}
-                </div>
-                {packingHasStarted && (() => {
-                  const shipped = shippedByLine.get(line.id) ?? 0
-                  const requested = line.qtyRequested
-                  if (shipped >= requested) {
-                    return (
-                      <div style={{ marginTop: 6 }}>
-                        <span className="chip chip-pine">Shipped {shipped}</span>
-                      </div>
-                    )
-                  }
-                  if (shipped === 0) {
-                    return (
-                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <span className="chip chip-rust">Not shipped</span>
-                        <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
-                          Warehouse didn&apos;t include this item.
-                        </span>
-                      </div>
-                    )
-                  }
-                  return (
-                    <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <span className="chip chip-signal">
-                        Short — {shipped} of {requested} shipped
-                      </span>
-                    </div>
-                  )
-                })()}
-                {(rec || alloc) && (
-                  <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                    {rec && rec.qty != null && rec.qty !== line.qtyRequested && (
-                      <>
-                        <span
-                          className={rec.qty < line.qtyRequested ? 'chip chip-signal' : 'chip chip-pine'}
-                        >
-                          Recommend {rec.qty}
-                        </span>
-                        <InfoTooltip label="How this recommendation was calculated">
-                          <strong>Peak-week velocity</strong> at this market: <span className="mono">{rec.minLevel ?? '—'}</span>
-                          <br />
-                          <strong>Current on-hand</strong>: <span className="mono">{rec.onHand}</span>
-                          {rec.weeksRemaining != null && (
-                            <>
-                              <br />
-                              <strong>Weeks left in season</strong>: <span className="mono">{rec.weeksRemaining}</span>
-                            </>
-                          )}
-                          <br />
-                          The recommendation aims to cover the next two weeks of peak demand, minus what&apos;s already on
-                          the shelf. Style level only — never colour.
-                        </InfoTooltip>
-                      </>
-                    )}
-                    {rec && rec.qty == null && (
-                      <>
-                        <span className="chip">No baseline</span>
-                        <InfoTooltip label="Why no recommendation">
-                          No threshold is configured for this family at this market yet. Run the threshold seeder, or
-                          set one manually, before the system can recommend a quantity.
-                        </InfoTooltip>
-                      </>
-                    )}
-                    {alloc?.wouldStarveOthers && (
-                      <>
-                        <span className="chip chip-rust">
-                          Would starve {alloc.otherLocationCount} other
-                          {alloc.otherLocationCount === 1 ? '' : 's'}
-                        </span>
-                        <InfoTooltip label="Why this line risks starving other markets">
-                          <strong>Warehouse on-hand</strong>: <span className="mono">{alloc.warehouseOnHand}</span>
-                          <br />
-                          <strong>Claimed by other markets</strong>: <span className="mono">{alloc.otherOpenDemand}</span>
-                          {' across '}
-                          {alloc.otherLocationCount} location{alloc.otherLocationCount === 1 ? '' : 's'}
-                          <br />
-                          Sending {line.qtyRequested} to this market would leave less than what&apos;s already
-                          promised elsewhere. Consider a smaller quantity, or make sure a bigger intake is on the way.
-                        </InfoTooltip>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-              {editable ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {rec && rec.qty != null && rec.qty !== line.qtyRequested && (
-                    <button
-                      className="btn btn-ghost"
-                      onClick={() => setQty(line.id, rec.qty!)}
-                      disabled={busy}
-                      title="Set to the system's recommended quantity"
-                    >
-                      Use rec
-                    </button>
-                  )}
-                  <div className="stepper">
-                    <button
-                      className="stepper-btn"
-                      onClick={() => setQty(line.id, line.qtyRequested - 1)}
-                      disabled={busy}
-                      aria-label="Decrease"
-                    >
-                      −
-                    </button>
-                    <span className="stepper-value">{line.qtyRequested}</span>
-                    <button
-                      className="stepper-btn"
-                      onClick={() => setQty(line.id, line.qtyRequested + 1)}
-                      disabled={busy}
-                      aria-label="Increase"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
-                  {line.qtyRequested}
-                </div>
-              )}
-            </div>
-          )
+                        const meta = variationById.get(line.variationId)
+                        const a = analysisByLine.get(line.id)
+                        const rec = a?.recommendation
+                        const alloc = a?.allocation
+                        return (
+                          <div key={line.id} className="list-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', border: '1px solid var(--line)' }}>
+                            {(() => {
+                              const wv = line.warehouseVariantId
+                                ? warehouseVariantById.get(line.warehouseVariantId)
+                                : undefined
+                              // Variant-level line: use that specific SKU's photo.
+                              // Family-level line: fall back to the first photo across
+                              // the family's variants so the row isn't blank.
+                              const photoUrl = wv
+                                ? wv.photoUrl
+                                : firstPhoto(warehouseVariantsByVariation.get(line.variationId) ?? [])
+                              const familyName = wv?.colourVariantName ?? meta?.colourFamilyName ?? ''
+                              return (
+                                <ProductThumb
+                                  photoUrl={photoUrl}
+                                  familyName={familyName}
+                                  alt={wv?.colourVariantName ?? meta?.itemGroupName ?? ''}
+                                />
+                              )
+                            })()}
+                            <div className="list-row-body">
+                              <div className="list-row-title">
+                                {line.warehouseVariantId && warehouseVariantById.get(line.warehouseVariantId)
+                                  ? warehouseVariantById.get(line.warehouseVariantId)!.colourVariantName
+                                  : `Any ${meta?.colourFamilyName ?? 'colour'}`}
+                              </div>
+                              <div className="list-row-meta mono">
+                                {line.warehouseVariantId && warehouseVariantById.get(line.warehouseVariantId)
+                                  ? warehouseVariantById.get(line.warehouseVariantId)!.warehouseSku
+                                  : meta?.sizeOptionName}
+                              </div>
+                              {packingHasStarted && (() => {
+                                const shipped = shippedByLine.get(line.id) ?? 0
+                                const requested = line.qtyRequested
+                                if (shipped >= requested) {
+                                  return (
+                                    <div style={{ marginTop: 6 }}>
+                                      <span className="chip chip-pine">Shipped {shipped}</span>
+                                    </div>
+                                  )
+                                }
+                                if (shipped === 0) {
+                                  return (
+                                    <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                      <span className="chip chip-rust">Not shipped</span>
+                                      <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+                                        Warehouse didn&apos;t include this item.
+                                      </span>
+                                    </div>
+                                  )
+                                }
+                                return (
+                                  <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span className="chip chip-signal">
+                                      Short — {shipped} of {requested} shipped
+                                    </span>
+                                  </div>
+                                )
+                              })()}
+                              {(rec || alloc) && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                  {rec && rec.qty != null && rec.qty !== line.qtyRequested && (
+                                    <>
+                                      <span
+                                        className={rec.qty < line.qtyRequested ? 'chip chip-signal' : 'chip chip-pine'}
+                                      >
+                                        Recommend {rec.qty}
+                                      </span>
+                                      <InfoTooltip label="How this recommendation was calculated">
+                                        <strong>Peak-week velocity</strong> at this market: <span className="mono">{rec.minLevel ?? '—'}</span>
+                                        <br />
+                                        <strong>Current on-hand</strong>: <span className="mono">{rec.onHand}</span>
+                                        {rec.weeksRemaining != null && (
+                                          <>
+                                            <br />
+                                            <strong>Weeks left in season</strong>: <span className="mono">{rec.weeksRemaining}</span>
+                                          </>
+                                        )}
+                                        <br />
+                                        The recommendation aims to cover the next two weeks of peak demand, minus what&apos;s already on
+                                        the shelf. Style level only — never colour.
+                                      </InfoTooltip>
+                                    </>
+                                  )}
+                                  {rec && rec.qty == null && (
+                                    <>
+                                      <span className="chip">No baseline</span>
+                                      <InfoTooltip label="Why no recommendation">
+                                        No threshold is configured for this family at this market yet. Run the threshold seeder, or
+                                        set one manually, before the system can recommend a quantity.
+                                      </InfoTooltip>
+                                    </>
+                                  )}
+                                  {alloc?.wouldStarveOthers && (
+                                    <>
+                                      <span className="chip chip-rust">
+                                        Would starve {alloc.otherLocationCount} other
+                                        {alloc.otherLocationCount === 1 ? '' : 's'}
+                                      </span>
+                                      <InfoTooltip label="Why this line risks starving other markets">
+                                        <strong>Warehouse on-hand</strong>: <span className="mono">{alloc.warehouseOnHand}</span>
+                                        <br />
+                                        <strong>Claimed by other markets</strong>: <span className="mono">{alloc.otherOpenDemand}</span>
+                                        {' across '}
+                                        {alloc.otherLocationCount} location{alloc.otherLocationCount === 1 ? '' : 's'}
+                                        <br />
+                                        Sending {line.qtyRequested} to this market would leave less than what&apos;s already
+                                        promised elsewhere. Consider a smaller quantity, or make sure a bigger intake is on the way.
+                                      </InfoTooltip>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            {editable ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                {rec && rec.qty != null && rec.qty !== line.qtyRequested && (
+                                  <button
+                                    className="btn btn-ghost"
+                                    onClick={() => setQty(line.id, rec.qty!)}
+                                    disabled={busy}
+                                    title="Set to the system's recommended quantity"
+                                  >
+                                    Use rec
+                                  </button>
+                                )}
+                                <div className="stepper">
+                                  <button
+                                    className="stepper-btn"
+                                    onClick={() => setQty(line.id, line.qtyRequested - 1)}
+                                    disabled={busy}
+                                    aria-label="Decrease"
+                                  >
+                                    −
+                                  </button>
+                                  <span className="stepper-value">{line.qtyRequested}</span>
+                                  <button
+                                    className="stepper-btn"
+                                    onClick={() => setQty(line.id, line.qtyRequested + 1)}
+                                    disabled={busy}
+                                    aria-label="Increase"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="mono" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
+                                {line.qtyRequested}
+                              </div>
+                            )}
+                          </div>
+                        )
                       })}
                     </div>
                   )}
@@ -608,11 +730,11 @@ function RequestDetailBody() {
         )
       })()}
 
-      {!editable && request.state !== 'DRAFT' && (
+      {/* {!editable && request.state !== 'DRAFT' && (
         <p className="eyebrow" style={{ marginBottom: 16 }}>
           Lines are locked — packing has started.
         </p>
-      )}
+      )} */}
 
       {/* Action strip. Split into two buttons on DISPATCHED/ARRIVED so
           the receiving side (any role that can close: MM or warehouse)
@@ -636,9 +758,9 @@ function RequestDetailBody() {
             : res.box.contents.length <= 2
               ? ` (${res.box.contents.map((c) => `${c.colourVariantName} ×${c.quantity}`).join(', ')})`
               : ` (${res.box.contents
-                  .slice(0, 2)
-                  .map((c) => `${c.colourVariantName} ×${c.quantity}`)
-                  .join(', ')} + ${res.box.contents.length - 2} more)`
+                .slice(0, 2)
+                .map((c) => `${c.colourVariantName} ×${c.quantity}`)
+                .join(', ')} + ${res.box.contents.length - 2} more)`
 
           const multi = res.requests.length > 1
           const closed = res.requests.filter((r) => r.closed).map((r) => `#${r.id.slice(0, 6)}`)
@@ -855,7 +977,7 @@ function RequestDetailBody() {
               .map((id) => encodeURIComponent(id))
               .join(',')}`
             return (
-              <div className="stack">
+              <div className="stack" style={{ marginTop: 24 }}>
                 <p className="eyebrow" style={{ margin: 0, color: 'var(--text-dim)' }}>
                   Part of a shared shipment with {groupedRequestIds.size - 1} other request
                   {groupedRequestIds.size - 1 === 1 ? '' : 's'} — receive them together.
@@ -870,7 +992,7 @@ function RequestDetailBody() {
           const boxesReceived = boxes.filter((b) => b.state === 'ARRIVED').length
           const boxesTotal = boxes.length
           return (
-            <div className="stack">
+            <div className="stack" style={{ marginTop: 24 }}>
               {boxesTotal > 0 && (
                 <p className="eyebrow" style={{ margin: 0, color: 'var(--text-dim)' }}>
                   {boxesReceived} of {boxesTotal} box{boxesTotal === 1 ? '' : 'es'} received
@@ -898,23 +1020,66 @@ function RequestDetailBody() {
         // MM's call, not the warehouse's.
         if (inTransit) return null
 
-        if (!canPack && !canTransition) return null
+        // Grouped-shipment guard: if any of this request's boxes is
+        // shared with sibling requests, dispatching / unpacking has to
+        // happen from the shipment view (one dispatch call flips every
+        // participating request; a per-request unpack would silently
+        // mutate siblings). Boxes section already surfaces the "Open
+        // shipment" link, so keep this section quiet.
+        const hasSharedBox = boxes.some((b) => {
+          const ids = new Set<string>()
+          if (b.requestId) ids.add(b.requestId)
+          for (const line of b.lines) if (line.requestId) ids.add(line.requestId)
+          if (ids.size === 0) return false
+          for (const id of ids) if (id !== request.id) return true
+          return false
+        })
+        if (hasSharedBox) return null
+
+        const canUnpack = canPack && request.state === 'PACKED'
+        if (!canPack && !canTransition && !canUnpack) return null
 
         return (
-          <div className="stack">
+          <div className="stack" style={{ marginTop: 24 }}>
             {request.state === 'PACKING' && canPack && (
               <Link href={`/pack/${request.id}`} className="btn btn-primary">
                 Continue packing
               </Link>
             )}
             {canTransition && (
-              <button className="btn btn-block" onClick={() => doTransition(next.to)} disabled={busy}>
+              <button
+                className="btn btn-primary btn-block"
+                onClick={() => doTransition(next.to)}
+                disabled={busy}
+              >
                 {busy ? 'Working…' : next.label}
+              </button>
+            )}
+            {canUnpack && (
+              <button
+                type="button"
+                className="btn btn-block btn-danger"
+                onClick={doUnpack}
+                disabled={busy}
+                title="Discard packed boxes for this request and re-open it for packing."
+              >
+                {busy ? 'Working…' : 'Unpack'}
               </button>
             )}
           </div>
         )
       })()}
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        body={confirm?.body ?? null}
+        confirmLabel={confirm?.confirmLabel ?? 'Confirm'}
+        variant={confirm?.variant ?? 'primary'}
+        busy={busy}
+        onConfirm={() => confirm?.onConfirm()}
+        onClose={() => setConfirm(null)}
+      />
     </div>
   )
 }

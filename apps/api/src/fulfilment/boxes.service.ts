@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomBytes, randomUUID } from 'node:crypto'
+import type { RequestState } from '@prisma/client'
 import { transferKeyPrefix, type ReceiveBoxResult } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
@@ -75,6 +76,63 @@ export class BoxesService {
     private readonly ledgerRead: LedgerReadService,
     private readonly audit: AuditService,
   ) {}
+
+  /// Re-derives the PACKING ↔ PACKED state for a request based on box
+  /// existence. Called after every box mutation (pack, addLine, discard,
+  /// dispatch) so the stored state stays in sync with the boxes on the
+  /// floor without any client-side derivation. Never crosses the
+  /// PACKING/PACKED boundary in either direction — the state machine
+  /// still gates DRAFT/OPEN and post-dispatch transitions elsewhere.
+  ///
+  /// Rule: a request with *any* box coverage flips to PACKED — packing
+  /// is treated as "committed" the moment the first box exists, even
+  /// if the operator ran out of stock and couldn't fully cover the
+  /// requested count. Short coverage surfaces to the operator via the
+  /// partial-packed notice on the request detail and the dispatch
+  /// warning that leftover units will be dropped. Zero coverage flips
+  /// PACKED back to PACKING (e.g. all boxes discarded via unpack).
+  async reconcileRequestPackedState(requestId: string, actorId: string | null = null): Promise<void> {
+    const request = await this.prisma.restockRequest.findUnique({
+      where: { id: requestId },
+      include: { lines: true },
+    })
+    if (!request) return
+    // Only re-evaluate while the request is somewhere in the packing
+    // window. Once dispatched/arrived/closed, this method is a no-op.
+    if (request.state !== 'PACKING' && request.state !== 'PACKED') return
+
+    const requested = request.lines.reduce((s, l) => s + l.qtyRequested, 0)
+    if (requested === 0) return
+
+    // Any box that counts as coverage. Uses BoxLine.requestId
+    // (falling back to Box.requestId for solo boxes).
+    const anyBoxLine = await this.prisma.boxLine.findFirst({
+      where: {
+        OR: [
+          { requestId },
+          {
+            requestId: null,
+            box: { requestId },
+          },
+        ],
+        box: { state: { in: ['PACKING', 'DISPATCHED', 'ARRIVED'] } },
+      },
+      select: { id: true },
+    })
+
+    const shouldBe: RequestState = anyBoxLine ? 'PACKED' : 'PACKING'
+    if (shouldBe === request.state) return
+
+    await this.prisma.restockRequest.update({
+      where: { id: requestId },
+      data: { state: shouldBe },
+    })
+    await this.audit.recordTransition(null, 'RestockRequest', requestId, 'state', request.state, shouldBe, {
+      actorId,
+      actorRole: null,
+      source: 'UI',
+    })
+  }
 
   /// Compute how many units of each warehouse variant can still be committed
   /// to a new box line at the warehouse. Deducts quantities already committed
@@ -194,6 +252,18 @@ export class BoxesService {
       { actorId: actor.id, actorRole: actor.role, source: 'UI' },
     )
 
+    // Every request this box covers may have just crossed the 100 %
+    // coverage threshold — reconcile PACKING ↔ PACKED for each so the
+    // Requests list reflects reality without any client-side derivation.
+    const touchedRequestIds = new Set<string>()
+    if (finalBoxRequestId) touchedRequestIds.add(finalBoxRequestId)
+    for (const line of linesWithRequest) {
+      if (line.requestId) touchedRequestIds.add(line.requestId)
+    }
+    for (const rid of touchedRequestIds) {
+      await this.reconcileRequestPackedState(rid, actor.id)
+    }
+
     return box
   }
 
@@ -250,13 +320,20 @@ export class BoxesService {
   async discard(boxId: string) {
     const box = await this.prisma.box.findUniqueOrThrow({
       where: { id: boxId },
-      select: { state: true },
+      select: { state: true, requestId: true, lines: { select: { requestId: true } } },
     })
     if (box.state !== 'PACKING') {
       throw new BadRequestException(
         `box cannot be discarded — state=${box.state} (only PACKING boxes can be removed)`,
       )
     }
+    // Capture every request this box was helping fulfil before we drop
+    // the cascade — after the delete we can't look them up any more, and
+    // the coverage on each of them just fell.
+    const touchedRequestIds = new Set<string>()
+    if (box.requestId) touchedRequestIds.add(box.requestId)
+    for (const line of box.lines) if (line.requestId) touchedRequestIds.add(line.requestId)
+
     // Cascade on BoxLine handles line deletion; LoadBox links are
     // gone-when-box-is-gone by design (packing boxes shouldn't be on
     // a Load yet, but the join row would orphan cleanly if so).
@@ -269,7 +346,75 @@ export class BoxesService {
       newValue: 'DELETED',
       source: 'UI',
     })
+
+    // A discard usually drops coverage below 100 %, so PACKED requests
+    // fall back to PACKING. Reconcile runs the check either way.
+    for (const rid of touchedRequestIds) {
+      await this.reconcileRequestPackedState(rid, null)
+    }
+
     return { id: boxId, discarded: true }
+  }
+
+  /// Unpack an entire request: discards every solo PACKING box owned by
+  /// this request. Shared multi-request boxes are deliberately skipped —
+  /// unpacking those from one request's perspective would silently
+  /// unpack the siblings too; the operator has to do that from the
+  /// grouped shipment view.
+  ///
+  /// Returns which boxes were discarded and which were skipped so the
+  /// UI can tell the operator "n boxes still shared — unpack via the
+  /// shipment view". The auto-reconcile in `discard()` walks each
+  /// unpacked box's requestIds, which brings the parent request back
+  /// from PACKED to PACKING as coverage drops.
+  async unpackForRequest(
+    requestId: string,
+    actor: CurrentUserPayload,
+  ): Promise<{ discarded: string[]; sharedSkipped: string[] }> {
+    const request = await this.prisma.restockRequest.findUnique({ where: { id: requestId } })
+    if (!request) throw new NotFoundException(`request ${requestId} not found`)
+    if (request.state !== 'PACKING' && request.state !== 'PACKED') {
+      throw new BadRequestException(
+        `request cannot be unpacked — state=${request.state} (only PACKING / PACKED requests can be)`,
+      )
+    }
+
+    const packingBoxes = await this.prisma.box.findMany({
+      where: {
+        state: 'PACKING',
+        OR: [
+          { requestId },
+          { lines: { some: { requestId } } },
+        ],
+      },
+      include: { lines: { select: { requestId: true } } },
+    })
+
+    const discarded: string[] = []
+    const sharedSkipped: string[] = []
+    for (const box of packingBoxes) {
+      const involvedRequestIds = new Set<string>()
+      if (box.requestId) involvedRequestIds.add(box.requestId)
+      for (const line of box.lines) if (line.requestId) involvedRequestIds.add(line.requestId)
+      // Solo = every id involved is this request. Anything else is a
+      // shared box and requires the shipment-view path so we don't
+      // silently mutate a sibling request the operator can't see.
+      let solo = involvedRequestIds.size <= 1
+      if (solo) for (const rid of involvedRequestIds) if (rid !== requestId) { solo = false; break }
+      if (!solo) {
+        sharedSkipped.push(box.id)
+        continue
+      }
+      await this.discard(box.id)
+      discarded.push(box.id)
+    }
+
+    // Reconcile once more in case there were only shared boxes and none
+    // actually got discarded — belt-and-braces so the request state
+    // matches the current coverage regardless.
+    await this.reconcileRequestPackedState(requestId, actor.id)
+
+    return { discarded, sharedSkipped }
   }
 
   async addLine(boxId: string, input: PackBoxLineInput) {
@@ -285,9 +430,17 @@ export class BoxesService {
         { warehouseVariantId: input.warehouseVariantId, requested: input.quantity, available: avail },
       ])
     }
-    return this.prisma.boxLine.create({
+    const line = await this.prisma.boxLine.create({
       data: { boxId, warehouseVariantId: input.warehouseVariantId, quantity: input.quantity },
     })
+    // A fresh line pushes coverage up — reconcile the parent request(s).
+    const touchedRequestIds = new Set<string>()
+    if (box.requestId) touchedRequestIds.add(box.requestId)
+    if (line.requestId) touchedRequestIds.add(line.requestId)
+    for (const rid of touchedRequestIds) {
+      await this.reconcileRequestPackedState(rid, null)
+    }
+    return line
   }
 
   /**
@@ -371,19 +524,20 @@ export class BoxesService {
     // Auto-advance every parent request this box helps fulfil to
     // DISPATCHED on first box send. For a single-request box the set
     // is just `{box.requestId}`; for a multi-request box the set comes
-    // from the line-level requestIds instead. Only PACKING requests
-    // move — later states (DISPATCHED, CLOSED) stay put.
+    // from the line-level requestIds instead. Both PACKING (partial
+    // dispatch — leftover units are dropped) and PACKED (all units
+    // accounted for) qualify; later states stay put.
     const involvedRequestIds = new Set<string>()
     if (box.requestId) involvedRequestIds.add(box.requestId)
     for (const line of box.lines) if (line.requestId) involvedRequestIds.add(line.requestId)
     for (const requestId of involvedRequestIds) {
       const request = await this.prisma.restockRequest.findUnique({ where: { id: requestId } })
-      if (request && request.state === 'PACKING') {
+      if (request && (request.state === 'PACKING' || request.state === 'PACKED')) {
         await this.prisma.restockRequest.update({
           where: { id: requestId },
           data: { state: 'DISPATCHED' },
         })
-        await this.audit.recordTransition(null, 'RestockRequest', requestId, 'state', 'PACKING', 'DISPATCHED', {
+        await this.audit.recordTransition(null, 'RestockRequest', requestId, 'state', request.state, 'DISPATCHED', {
           actorId: actor?.id ?? null,
           actorRole: actor?.role ?? null,
           source: 'UI',

@@ -180,7 +180,7 @@ function IntakeBody() {
         return haystack.includes(q)
       })
       .filter((v) => !takenIds.has(v.id))
-      .slice(0, 10)
+      .slice(0, 30)
   }, [query, variations, variants, families])
 
   function addFamily(v: VariationSummary) {
@@ -443,6 +443,23 @@ function IntakeBody() {
                     on hand · {variantCount} variant{variantCount === 1 ? '' : 's'}
                   </span>
                 </div>
+                {/* Chevron on the right so the row obviously reads as
+                    actionable (click to add) — matches the pattern on
+                    the New Request search hits. */}
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  style={{ color: 'var(--text-faint)', marginLeft: 4, flexShrink: 0 }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
               </div>
             )
           })}
@@ -485,6 +502,18 @@ function IntakeBody() {
             return (
               <div key={f.variationId} className="card">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {/* Remove sits on the LEFT so it mirrors the New Request
+                      card layout — same eye path across screens: destructive
+                      action first, then thumbnail + title + meta + qty. */}
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => removeFamily(f.variationId)}
+                    aria-label="Remove"
+                    title="Remove item"
+                    style={{ minHeight: 32, minWidth: 32, padding: '4px 8px', flexShrink: 0 }}
+                  >
+                    ✕
+                  </button>
                   <div
                     role="button"
                     tabIndex={0}
@@ -558,14 +587,6 @@ function IntakeBody() {
                       </svg>
                     </div>
                   </div>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => removeFamily(f.variationId)}
-                    aria-label="Remove"
-                    style={{ minHeight: 40, padding: '6px 10px' }}
-                  >
-                    ✕
-                  </button>
                 </div>
 
                 {open && (
@@ -586,7 +607,17 @@ function IntakeBody() {
                               alt={v.colourVariantName}
                             />
                             <div className="list-row-body">
-                              <div className="list-row-title">{v.colourVariantName}</div>
+                              {/* Compose colour + axis-values so two SKUs
+                                  that share a colour but differ on a
+                                  custom axis (e.g. Blue Cross vs Blue
+                                  Straight) stay distinguishable at a
+                                  glance without polluting the shared
+                                  ColourVariant row. */}
+                              <div className="list-row-title">
+                                {v.axisValues.length > 0
+                                  ? `${v.colourVariantName} (${v.axisValues.join(', ')})`
+                                  : v.colourVariantName}
+                              </div>
                               <div className="list-row-meta mono">{v.warehouseSku}</div>
                               <div
                                 className="list-row-meta"

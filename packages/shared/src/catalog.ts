@@ -102,6 +102,14 @@ export const warehouseVariantSummarySchema = z.object({
   sizeOptionName: z.string(),
   warehouseSku: z.string(),
   photoUrl: z.string().nullable(),
+  /// Extra axis values bound to this SKU (Pattern, Style, Fit, …), not
+  /// including Colour or Size — those are already carried by
+  /// `colourVariantName` / `sizeOptionName`. Empty for the common case
+  /// of a plain colour+size SKU. List views can compose a
+  /// disambiguating label like `${colour} (${axisValues.join(', ')})`
+  /// so two SKUs that share a colour but differ on a custom axis stay
+  /// distinguishable without polluting the shared ColourVariant row.
+  axisValues: z.array(z.string()).default([]),
 })
 export type WarehouseVariantSummary = z.infer<typeof warehouseVariantSummarySchema>
 
@@ -578,6 +586,18 @@ export const catalogItemDetailSchema = z.object({
   /// category itself). Lets the item-detail page render its full crumb
   /// trail without a follow-up browse call.
   breadcrumb: z.array(catalogCrumbSchema),
+  /// Custom axes on this SKU — Pattern, Fit, Style, etc. — sourced
+  /// from WarehouseVariantAttribute → ProductAttributeValue →
+  /// ProductAttribute. Empty when the SKU has no axes beyond the built-in
+  /// Colour / Size, which is the common case for simple products.
+  /// Colour and Size are already shown as their own rows, so the
+  /// backend omits them here to avoid duplication.
+  attributes: z.array(
+    z.object({
+      name: z.string(),
+      value: z.string(),
+    }),
+  ),
 })
 export type CatalogItemDetail = z.infer<typeof catalogItemDetailSchema>
 
@@ -752,6 +772,20 @@ export const updateWarehouseVariantInputSchema = z.object({
   sizeOptionName: z.string().trim().min(1).max(60).transform(titleCase).optional(),
   colourFamilyId: z.string().min(1).optional(),
   photoUrls: z.array(z.string().url()).max(8).optional(),
+  /// Custom-axis renames (Style / Pattern / Fit / …). Each entry is
+  /// `{ name, value }` where `name` matches an existing ProductAttribute
+  /// on this SKU's ItemGroup. Rebinds this SKU's WarehouseVariantAttribute
+  /// link to point at either the existing ProductAttributeValue for
+  /// that (attribute, value), or a freshly-forked one if the value is
+  /// new — so siblings sharing the axis value stay put.
+  axisValues: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(50),
+        value: z.string().trim().min(1).max(100).transform(titleCase),
+      }),
+    )
+    .optional(),
 })
 export type UpdateWarehouseVariantInput = z.infer<typeof updateWarehouseVariantInputSchema>
 

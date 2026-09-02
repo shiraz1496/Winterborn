@@ -26,6 +26,8 @@ import {
   createLoadInputSchema,
   createRequestInputSchema,
   createRequestLineInputSchema,
+  generateSuggestionInputSchema,
+  generateSuggestionResultSchema,
   currentUserSchema,
   decisionQueueRowSchema,
   dispatchResultSchema,
@@ -75,6 +77,7 @@ import {
   type CreateLoadInput,
   type CreateRequestInput,
   type CreateRequestLineInput,
+  type GenerateSuggestionInput,
   type CreateWarehouseVariantInput,
   type CreateCategoryInput,
   type CreateProductInput,
@@ -534,8 +537,24 @@ export function getRequestAnalysis(requestId: string) {
   return request('GET', `/requests/${requestId}/analysis`, z.array(requestLineAnalysisSchema))
 }
 
+export function generateSuggestion(input: GenerateSuggestionInput) {
+  generateSuggestionInputSchema.parse(input)
+  return request('POST', '/requests/generate-suggestion', generateSuggestionResultSchema, input)
+}
+
 export function reportRequestMissing(requestId: string) {
   return request('POST', `/requests/${requestId}/report-missing`, z.object({ ok: z.literal(true) }))
+}
+
+/// Warehouse-only "undo pack" — discards every solo PACKING box on
+/// this request. Shared boxes come back in `sharedSkipped` so the UI
+/// can tell the operator "n boxes still shared — unpack via shipment".
+export function unpackRequest(requestId: string) {
+  return request(
+    'POST',
+    `/requests/${requestId}/unpack`,
+    z.object({ discarded: z.array(z.string()), sharedSkipped: z.array(z.string()) }),
+  )
 }
 
 // ---- boxes ------------------------------------------------------------------

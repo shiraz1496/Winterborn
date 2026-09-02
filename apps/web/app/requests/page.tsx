@@ -2,18 +2,27 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import type { BoxDto, LocationDto, RestockRequestDto } from '@winterborn/shared'
+import type { BoxDto, LocationDto, RestockRequestDto, VariationSummary } from '@winterborn/shared'
 import { PageHeader } from '../../components/PageHeader'
 import { RequireAuth } from '../../components/RequireAuth'
 import { SearchableSelect } from '../../components/SearchableSelect'
 import { useAuth } from '../../lib/auth-context'
-import { ApiError, listBoxes, listLocations, listRequests } from '../../lib/api'
+import { ApiError, listBoxes, listLocations, listRequests, listVariations } from '../../lib/api'
 
-const STATE_FILTERS = ['ALL', 'OPEN', 'PACKING', 'DISPATCHED', 'CLOSED'] as const
+const STATE_FILTERS = ['ALL', 'OPEN', 'PACKING', 'PACKED', 'DISPATCHED', 'CLOSED'] as const
 type StateFilter = (typeof STATE_FILTERS)[number]
 
-function chipClassFor(state: string): string {
-  if (state === 'DISPATCHED' || state === 'ARRIVED' || state === 'CLOSED') return 'chip chip-pine'
+/// The PACKED state is set by BoxesService.reconcileRequestPackedState()
+/// on the backend, so the frontend just renders whatever the server
+/// gives us — no client-side coverage math.
+function chipClassFor(state: RestockRequestDto['state']): string {
+  if (
+    state === 'PACKED' ||
+    state === 'DISPATCHED' ||
+    state === 'ARRIVED' ||
+    state === 'CLOSED'
+  )
+    return 'chip chip-pine'
   if (state === 'PACKING') return 'chip chip-signal'
   return 'chip'
 }
@@ -31,7 +40,8 @@ function RequestsBody() {
   const [requests, setRequests] = useState<RestockRequestDto[]>([])
   const [locations, setLocations] = useState<LocationDto[]>([])
   const [boxes, setBoxes] = useState<BoxDto[]>([])
-  const [filter, setFilter] = useState<StateFilter>('ALL')
+  const [variations, setVariations] = useState<VariationSummary[]>([])
+  const [filter, setFilter] = useState<StateFilter>('OPEN')
   const [marketFilter, setMarketFilter] = useState<string>('ALL')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -40,12 +50,13 @@ function RequestsBody() {
     let cancelled = false
     // Boxes are pulled alongside requests so requests sharing a physical
     // box can be grouped into a single "shipment" card.
-    Promise.all([listRequests(), listLocations(), listBoxes()])
-      .then(([r, l, b]) => {
+    Promise.all([listRequests(), listLocations(), listBoxes(), listVariations()])
+      .then(([r, l, b, v]) => {
         if (cancelled) return
         setRequests(r)
         setLocations(l)
         setBoxes(b)
+        setVariations(v)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Could not load requests.')
@@ -62,6 +73,11 @@ function RequestsBody() {
     const map = new Map(locations.map((l) => [l.id, l.name]))
     return (id: string) => map.get(id) ?? id
   }, [locations])
+
+  const variationName = useMemo(() => {
+    const map = new Map(variations.map((v) => [v.id, v.itemGroupName]))
+    return (id: string) => map.get(id) ?? null
+  }, [variations])
 
   const markets = useMemo(
     () => locations.filter((l) => l.kind === 'MARKET').sort((a, b) => a.name.localeCompare(b.name)),
@@ -100,6 +116,38 @@ function RequestsBody() {
     return (id: string) => find(id)
   }, [requests, boxes])
 
+  /// Short-shipped flag stays client-side because it's a comparison
+  /// between requested (on the request) and dispatched (on boxes) — no
+  /// separate backend state is needed once the request itself is in
+  /// DISPATCHED/ARRIVED/CLOSED.
+  const requestedByRequest = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const r of requests) m.set(r.id, r.lines.reduce((s, l) => s + l.qtyRequested, 0))
+    return m
+  }, [requests])
+
+  const dispatchedByRequest = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const b of boxes) {
+      if (b.state !== 'DISPATCHED' && b.state !== 'ARRIVED') continue
+      for (const line of b.lines) {
+        const rid = line.requestId ?? b.requestId ?? null
+        if (!rid) continue
+        m.set(rid, (m.get(rid) ?? 0) + line.quantity)
+      }
+    }
+    return m
+  }, [boxes])
+
+  const isShortShipped = useMemo(() => {
+    return (r: RestockRequestDto): boolean => {
+      if (r.state !== 'DISPATCHED' && r.state !== 'ARRIVED' && r.state !== 'CLOSED') return false
+      const requested = requestedByRequest.get(r.id) ?? 0
+      const dispatched = dispatchedByRequest.get(r.id) ?? 0
+      return requested > 0 && dispatched < requested
+    }
+  }, [dispatchedByRequest, requestedByRequest])
+
   interface RequestGroup {
     /// Canonical id (the union-find root). Stable across renders.
     id: string
@@ -109,10 +157,21 @@ function RequestsBody() {
     /// Union of state chips to show. For groups of >1, we surface a
     /// summary chip based on the most advanced state — a group is
     /// "closed" only when every request in it is closed, otherwise
-    /// it shows the earliest state (packing beats dispatched).
-    summaryState: string
+    /// it shows the earliest state (packing beats packed beats
+    /// dispatched, etc). Sourced from the server-provided state.
+    summaryState: RestockRequestDto['state']
+    /// True when any constituent request short-shipped.
+    hasShortShipped: boolean
   }
-  const STATE_ORDER = ['DRAFT', 'OPEN', 'PACKING', 'DISPATCHED', 'ARRIVED', 'CLOSED']
+  const STATE_ORDER: RestockRequestDto['state'][] = [
+    'DRAFT',
+    'OPEN',
+    'PACKING',
+    'PACKED',
+    'DISPATCHED',
+    'ARRIVED',
+    'CLOSED',
+  ]
   const groups = useMemo<RequestGroup[]>(() => {
     const buckets = new Map<string, RestockRequestDto[]>()
     for (const r of requests) {
@@ -124,9 +183,8 @@ function RequestsBody() {
     const result: RequestGroup[] = []
     for (const [id, list] of buckets) {
       list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-      // Summary state: earliest state in the group order. If any request
-      // is still OPEN, the whole shipment reads as OPEN, etc.
-      let summary = list[0]!.state
+      // Summary state: earliest server-provided state in the group order.
+      let summary: RestockRequestDto['state'] = list[0]!.state
       for (const r of list) {
         if (STATE_ORDER.indexOf(r.state) < STATE_ORDER.indexOf(summary)) summary = r.state
       }
@@ -135,6 +193,7 @@ function RequestsBody() {
         locationId: list[0]!.locationId,
         requests: list,
         summaryState: summary,
+        hasShortShipped: list.some(isShortShipped),
       })
     }
     // Newest group first (most recent request in the group defines the sort).
@@ -144,20 +203,21 @@ function RequestsBody() {
       return bLatest - aLatest
     })
     return result
-  }, [requests, groupsByRequestId])
+  }, [requests, groupsByRequestId, isShortShipped])
 
   const filtered = useMemo(() => {
-    // A group passes the state filter if any of its requests matches.
-    // CLOSED is treated as CLOSED|ARRIVED same as before.
-    const stateMatch = (r: RestockRequestDto) =>
-      filter === 'ALL'
-        ? true
-        : filter === 'CLOSED'
-          ? r.state === 'CLOSED' || r.state === 'ARRIVED'
-          : r.state === filter
+    // Filter on the group's summary state, not on individual requests.
+    // Grouped shipments carry ONE chip on the card (their summaryState
+    // — the earliest state in the group's members), so classifying on
+    // that same signal keeps the tab and the chip consistent: a
+    // partially-packed group with one PACKED and one PACKING request
+    // reads as PACKING on the card AND lives in the PACKING tab, not
+    // in both PACKING and PACKED.
     return groups.filter((g) => {
       if (marketFilter !== 'ALL' && g.locationId !== marketFilter) return false
-      return g.requests.some(stateMatch)
+      if (filter === 'ALL') return true
+      if (filter === 'CLOSED') return g.summaryState === 'CLOSED' || g.summaryState === 'ARRIVED'
+      return g.summaryState === filter
     })
   }, [groups, filter, marketFilter])
 
@@ -244,7 +304,7 @@ function RequestsBody() {
           )}
         </div>
       ) : (
-        <div className="stock-grid">
+        <div className="request-grid">
           {filtered.map((g) => {
             const totalLines = g.requests.reduce((sum, r) => sum + r.lines.length, 0)
             const dates = g.requests.map((r) => new Date(r.createdAt).getTime())
@@ -255,36 +315,80 @@ function RequestsBody() {
                 ? oldest.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
                 : `${oldest.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${newest.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
 
-            // Single-request "group" — render exactly like today.
-            if (g.requests.length === 1) {
-              const r = g.requests[0]!
-              return (
-                <Link
-                  key={g.id}
-                  href={`/requests/${r.id}`}
-                  className="stock-tile"
-                  style={{ textDecoration: 'none', color: 'inherit' }}
-                >
-                  <div className="stock-tile-body">
-                    <div className="stock-tile-title">{locationName(r.locationId)}</div>
-                    <div className="stock-tile-meta">
-                      {r.lines.length} line{r.lines.length === 1 ? '' : 's'} ·{' '}
-                      {new Date(r.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                    </div>
-                  </div>
-                  <span className={chipClassFor(r.state)}>{r.state.toLowerCase()}</span>
-                </Link>
-              )
+            // Distinct product names on this group's lines, capped to keep
+            // the card scannable. "+N more" tells the CEO the card is
+            // truncated so a quick glance is enough to know if the right
+            // things are in the shipment.
+            const productNames: string[] = []
+            const seen = new Set<string>()
+            for (const r of g.requests) {
+              for (const line of r.lines) {
+                const name = variationName(line.variationId)
+                if (!name || seen.has(name)) continue
+                seen.add(name)
+                productNames.push(name)
+              }
             }
-
-            // Multi-request grouped shipment card. The whole tile is a
-            // single Link into the shipment view scoped to the grouped
-            // requests — the drill-in shows the merged product list
-            // ("all products as one box"), not one constituent request.
             const totalUnits = g.requests.reduce(
               (sum, r) => sum + r.lines.reduce((s, l) => s + l.qtyRequested, 0),
               0,
             )
+            const previewLimit = 3
+            const previewNames = productNames.slice(0, previewLimit)
+            const extraNames = productNames.length - previewNames.length
+
+            const productPreview = previewNames.length > 0 && (
+              <div className="stock-tile-products">
+                {previewNames.map((n) => (
+                  <span key={n} className="stock-tile-product-pill" title={n}>
+                    {n}
+                  </span>
+                ))}
+                {extraNames > 0 && (
+                  <span className="stock-tile-product-more">+{extraNames} more</span>
+                )}
+              </div>
+            )
+
+            // Single-request card.
+            if (g.requests.length === 1) {
+              const r = g.requests[0]!
+              const shortShipped = isShortShipped(r)
+              return (
+                <Link
+                  key={g.id}
+                  href={`/requests/${r.id}`}
+                  className={`request-card is-${r.state.toLowerCase()}`}
+                >
+                  <div className="request-card-head">
+                    <div className="request-card-heading">
+                      <span className="request-card-title">{locationName(r.locationId)}</span>
+                      <span className="request-card-meta">
+                        {new Date(r.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                        {' · '}
+                        {totalUnits.toLocaleString()} unit{totalUnits === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {shortShipped && (
+                        <span
+                          className="chip chip-rust"
+                          title="Only part of the requested units were dispatched. The remainder was not packed."
+                        >
+                          short-shipped
+                        </span>
+                      )}
+                      <span className={chipClassFor(r.state)}>{r.state.toLowerCase()}</span>
+                    </div>
+                  </div>
+                  {productPreview}
+                </Link>
+              )
+            }
+
+            // Multi-request grouped shipment card. Same shell, plus a
+            // pine top-ribbon signalling the shipment grouping so the
+            // grid still reads as one design family.
             const shipmentHref = `/requests/shipment?ids=${g.requests
               .map((r) => encodeURIComponent(r.id))
               .join(',')}`
@@ -292,38 +396,37 @@ function RequestsBody() {
               <Link
                 key={g.id}
                 href={shipmentHref}
-                className="stock-tile"
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 10,
-                  borderColor: 'var(--pine, var(--line-strong))',
-                  background: 'var(--surface-sunken)',
-                  textDecoration: 'none',
-                  color: 'inherit',
-                }}
+                className={`request-card request-card--grouped is-${g.summaryState.toLowerCase()}`}
+                title={`Grouped shipment — ${g.requests.length} requests, ${totalLines} lines`}
               >
-                <div className="row-between" style={{ alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="stock-tile-title">{locationName(g.locationId)}</div>
-                    <div className="stock-tile-meta">
-                      {g.requests.length} requests · {totalLines} lines · {dateLabel}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span
-                      className="chip chip-pine"
-                      title="These requests were packed together in a shared box"
-                    >
-                      one shipment
+                <span className="request-card-ribbon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                    <line x1="12" y1="22.08" x2="12" y2="12" />
+                  </svg>
+                  Grouped shipment · {g.requests.length} requests
+                </span>
+                <div className="request-card-head">
+                  <div className="request-card-heading">
+                    <span className="request-card-title">{locationName(g.locationId)}</span>
+                    <span className="request-card-meta">
+                      {dateLabel} · {totalUnits.toLocaleString()} unit{totalUnits === 1 ? '' : 's'}
                     </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    {g.hasShortShipped && (
+                      <span
+                        className="chip chip-rust"
+                        title="At least one request in this shipment was short-shipped."
+                      >
+                        short-shipped
+                      </span>
+                    )}
                     <span className={chipClassFor(g.summaryState)}>{g.summaryState.toLowerCase()}</span>
                   </div>
                 </div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-                  {totalUnits.toLocaleString()} unit{totalUnits === 1 ? '' : 's'} across{' '}
-                  {g.requests.length} requests · view →
-                </div>
+                {productPreview}
               </Link>
             )
           })}

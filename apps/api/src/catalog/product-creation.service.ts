@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { createHash } from 'node:crypto'
-import { Prisma } from '@prisma/client'
 import {
   createProductInputSchema,
   intakeKey,
@@ -145,6 +144,10 @@ export class ProductCreationService {
         sizeOptionName: string
         warehouseSku: string
         photoUrl: string | null
+        /// Custom-axis values bound to this SKU (Pattern / Style / Fit).
+        /// Empty for plain colour+size products. Used by clients to
+        /// compose disambiguating labels without polluting ColourVariant.
+        axisValues: string[]
       }> = []
 
       for (const cell of nonZeroCells) {
@@ -157,13 +160,17 @@ export class ProductCreationService {
           ? cell.primary
           : DEFAULT_SIZE
 
-        // Colour variant name: composed of Color value + Style value
-        // when both are present. Style comes from the primary axis in
-        // the modal (Color is always the "inner" axis). Fallback to
-        // em-dash for truly-unadorned SKUs.
-        const style = input.primaryAxis?.name === 'Style' ? cell.primary : null
-        const colourVariantName =
-          cell.colour && style ? `${cell.colour} (${style})` : (cell.colour ?? style ?? NO_COLOUR_LABEL)
+        // ColourVariant name is JUST the colour — that row is shared
+        // across every product in the category that uses the same
+        // colour, so baking a per-product axis value like "(Cross)"
+        // into it would pollute the shared catalogue. When the primary
+        // axis isn't Size (Size lives on SizeOption), its value flows
+        // onto the SKU via WarehouseVariantAttribute below AND into the
+        // SKU seed so cells that share a colour but differ on the
+        // primary axis produce distinct SKUs.
+        const primaryLabel =
+          input.primaryAxis && input.primaryAxis.name !== 'Size' ? cell.primary : null
+        const colourVariantName = cell.colour ?? primaryLabel ?? NO_COLOUR_LABEL
 
         const matrixKey = `${cell.primary ?? NONE}::${cell.colour ?? NONE}`
         const photoUrls = input.photoUrls[matrixKey] ?? []
@@ -226,13 +233,16 @@ export class ProductCreationService {
         // SKU is a stable identifier, deliberately not tied to a display
         // name: renaming a colour or size later would otherwise silently
         // invalidate any physical labels or external references pointing
-        // at the old string. The hash covers (itemGroup, colour, size)
-        // which is unique per SKU in the create-modal flow.
-        const skuSeed = `${itemGroup.id}-${colourVariantId}-${sizeOptionId}`
+        // at the old string. Includes the primary axis value (Pattern,
+        // Style, Fit, etc.) so two cells that share a colour + size but
+        // differ on that axis produce distinct SKUs — without it, the
+        // shared ColourVariant would hash them to the same warehouseSku
+        // and one cell would silently overwrite the other.
+        const skuSeed = `${itemGroup.id}-${colourVariantId}-${sizeOptionId}-${primaryLabel ?? ''}`
         const warehouseSku = `WV-${shortHash(skuSeed)}`
 
-        let wv
-        try {
+        let wv = await tx.warehouseVariant.findUnique({ where: { warehouseSku } })
+        if (!wv) {
           wv = await tx.warehouseVariant.create({
             data: {
               itemGroupId: itemGroup.id,
@@ -244,14 +254,6 @@ export class ProductCreationService {
               photoUrls,
             },
           })
-        } catch (err) {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-            const existing = await tx.warehouseVariant.findUnique({ where: { warehouseSku } })
-            if (!existing) throw err
-            wv = existing
-          } else {
-            throw err
-          }
         }
 
         // Bind axis values on this SKU: primary value + colour value.
@@ -279,6 +281,7 @@ export class ProductCreationService {
           sizeOptionName: sizeName,
           warehouseSku: wv.warehouseSku,
           photoUrl: wv.photoUrls[0] ?? null,
+          axisValues: primaryLabel ? [primaryLabel] : [],
         })
       }
 
@@ -322,6 +325,7 @@ export class ProductCreationService {
         sizeOptionName: created.sizeOptionName,
         warehouseSku: created.warehouseSku,
         photoUrl: created.photoUrl,
+        axisValues: created.axisValues,
       }
       skus.push({
         warehouseVariant: summary,

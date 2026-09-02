@@ -20,15 +20,22 @@ const EDITABLE_STATES: readonly RequestState[] = ['DRAFT', 'OPEN']
 
 /**
  * The one explicit map of legal transitions (spec §9.3):
- * DRAFT -> OPEN -> PACKING -> DISPATCHED -> (ARRIVED) -> CLOSED.
+ * DRAFT -> OPEN -> PACKING -> (PACKED) -> DISPATCHED -> (ARRIVED) -> CLOSED.
  * ARRIVED is optional -- nothing in the math depends on it -- so DISPATCHED
- * may close directly. Every other pair, including a state "transitioning"
- * to itself, is illegal.
+ * may close directly. PACKED is inserted between PACKING and DISPATCHED
+ * for the "fully packed, waiting to ship" bucket; the pack service moves
+ * a request into PACKED automatically once every requested unit is on a
+ * non-dispatched box, and back to PACKING if a box is discarded.
+ * PACKING can still dispatch directly (partial dispatch — the leftover
+ * units are dropped, which is why the UI warns first).
+ * Every other pair, including a state "transitioning" to itself, is
+ * illegal.
  */
 export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly RequestState[]>> = {
   DRAFT: ['OPEN'],
   OPEN: ['PACKING'],
-  PACKING: ['DISPATCHED'],
+  PACKING: ['PACKED', 'DISPATCHED'],
+  PACKED: ['PACKING', 'DISPATCHED'],
   DISPATCHED: ['ARRIVED', 'CLOSED'],
   ARRIVED: ['CLOSED'],
   CLOSED: [],
@@ -38,18 +45,29 @@ export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly Request
 /// apps/web/app/requests/[id]/page.tsx. Any change here has to change
 /// there too (or the button will render but the API will 403).
 ///
-///   Submit (DRAFT→OPEN):        MM (requester) or OWNER
+///   Submit (DRAFT→OPEN):         MM (requester) or OWNER
 ///   Approve/pack (OPEN→PACKING): warehouse roles only
+///   Pack complete (PACKING↔PACKED / PACKED→DISPATCHED):
+///                                warehouse roles only. These are
+///                                normally fired automatically by
+///                                BoxesService, but the manual
+///                                transition endpoint has to allow them
+///                                too so a warehouse operator can force
+///                                the state if e.g. a physical count
+///                                overrides the automatic decision.
 ///   Ship (PACKING→DISPATCHED):   warehouse roles only
 ///   Receive (→CLOSED):           MM only — arrival is what only the
 ///                                destination can attest to.
-// Partial: only the 6 legal transitions are keys. Missing key = illegal,
+// Partial: only the legal transitions are keys. Missing key = illegal,
 // handled at the lookup site (see `if (!allowedRoles)` below). Without
-// Partial, TS demands all 36 State×State combinations be present.
+// Partial, TS demands all State×State combinations be present.
 const TRANSITION_ROLES: Readonly<Partial<Record<`${RequestState}->${RequestState}`, readonly CurrentUserPayload['role'][]>>> = {
   'DRAFT->OPEN': ['MARKET_MANAGER', 'OWNER'],
   'OPEN->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'PACKING->PACKED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'PACKED->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKING->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'PACKED->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'DISPATCHED->ARRIVED': ['MARKET_MANAGER'],
   'DISPATCHED->CLOSED': ['MARKET_MANAGER'],
   'ARRIVED->CLOSED': ['MARKET_MANAGER'],
@@ -268,6 +286,24 @@ export class RequestsService {
       })
       return updated
     })
+  }
+
+  /// Unpack every solo PACKING box for this request, dropping the state
+  /// back to PACKING via reconcile. Warehouse-side only — the market
+  /// never touches boxes. Shared multi-request boxes are skipped and
+  /// reported back to the caller so the UI can direct the operator to
+  /// the shipment view for those.
+  async unpack(requestId: string, actor: CurrentUserPayload) {
+    if (
+      actor.role !== 'OWNER' &&
+      actor.role !== 'WAREHOUSE_MANAGER' &&
+      actor.role !== 'WAREHOUSE_OPERATOR'
+    ) {
+      throw new ForbiddenException(`${actor.role} may not unpack a request`)
+    }
+    const request = await this.prisma.restockRequest.findUniqueOrThrow({ where: { id: requestId } })
+    this.assertLocationAccess(actor, request.locationId)
+    return this.boxes.unpackForRequest(requestId, actor)
   }
 
   /// Flags a dispatched request as "not received" from the destination's

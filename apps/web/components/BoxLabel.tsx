@@ -106,37 +106,45 @@ export function BoxLabel({ label }: { label: BoxLabelDto }) {
           </table>
         </div>
       )}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'center',
-          padding: '14px 0 6px',
-        }}
-      >
-        {qrDataUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={qrDataUrl}
-            alt={`QR code for box ${label.qrToken.slice(0, 12).toUpperCase()}`}
-            width={200}
-            height={200}
-            style={{ display: 'block' }}
-          />
-        ) : (
-          <div
-            style={{
-              width: 200,
-              height: 200,
-              background: 'var(--paper, #fff)',
-              border: '1px dashed var(--paper-ink, #666)',
-              opacity: 0.4,
-            }}
-            aria-hidden="true"
-          />
-        )}
-      </div>
-      <div className="label-token" style={{ fontSize: '0.7rem', textAlign: 'center', opacity: 0.7 }}>
-        {label.qrToken}
+      {/* Everything from here down is what Print isolates. The wrapper
+          class lets print CSS hide the header / box-id / contents
+          block above so a printed sticker carries the QR and its token
+          only — nothing else the scanner or eye needs. On-screen
+          layout is untouched (screen operators still see the full
+          ticket alongside the QR). */}
+      <div className="label-qr-block">
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'center',
+            padding: '14px 0 6px',
+          }}
+        >
+          {qrDataUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={qrDataUrl}
+              alt={`QR code for box ${label.qrToken.slice(0, 12).toUpperCase()}`}
+              width={200}
+              height={200}
+              style={{ display: 'block' }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 200,
+                height: 200,
+                background: 'var(--paper, #fff)',
+                border: '1px dashed var(--paper-ink, #666)',
+                opacity: 0.4,
+              }}
+              aria-hidden="true"
+            />
+          )}
+        </div>
+        <div className="label-token" style={{ fontSize: '0.7rem', textAlign: 'center', opacity: 0.7 }}>
+          {label.qrToken}
+        </div>
       </div>
     </div>
   )

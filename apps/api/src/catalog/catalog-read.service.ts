@@ -263,6 +263,9 @@ export class CatalogReadService {
         sizeOptionName: sizeOption.name,
         warehouseSku: created.warehouseSku,
         photoUrl: colourVariant.photoUrl ?? null,
+        // Single-SKU create flow doesn't bind custom axes; existing axes
+        // on the item group aren't retroactively attached here.
+        axisValues: [],
       }
     })
   }
@@ -270,7 +273,17 @@ export class CatalogReadService {
   async listWarehouseVariants(variationId?: string): Promise<WarehouseVariantSummary[]> {
     const rows = await this.prisma.warehouseVariant.findMany({
       where: variationId ? { variationId } : undefined,
-      include: { itemGroup: true, colourVariant: true, sizeOption: true },
+      include: {
+        itemGroup: true,
+        colourVariant: true,
+        sizeOption: true,
+        /// Attribute values for the custom axes (Pattern / Style / Fit
+        /// / …). Colour and Size have their own fields so the mapper
+        /// below strips those to keep axisValues purely additive.
+        attributes: {
+          include: { productAttributeValue: { include: { productAttribute: true } } },
+        },
+      },
       orderBy: [{ colourVariant: { name: 'asc' } }],
     })
     return rows.map((r) => ({
@@ -281,6 +294,7 @@ export class CatalogReadService {
       sizeOptionName: r.sizeOption.name,
       warehouseSku: r.warehouseSku,
       photoUrl: r.photoUrls[0] ?? r.colourVariant.photoUrl ?? null,
+      axisValues: extractCustomAxisValues(r.attributes),
     }))
   }
 
@@ -954,7 +968,10 @@ export class CatalogReadService {
     // on-hand at this warehouse — cheap groupBy queries. Plus the full
     // WarehouseVariant catalog joined to its item-group/colour-family/size
     // metadata so we can render the display row without a second call.
-    const [byFamily, byVariant, variants] = await Promise.all([
+    // Categories load alongside so the search filter below can walk the
+    // ancestor chain and match on folder names ("Scarves > Scarves
+    // (Peru) > …") — same "deep search" the /catalog view offers.
+    const [byFamily, byVariant, variants, allCategories] = await Promise.all([
       this.prisma.ledgerEvent.groupBy({
         by: ['variationId'],
         _sum: { quantity: true },
@@ -967,7 +984,7 @@ export class CatalogReadService {
       }),
       this.prisma.warehouseVariant.findMany({
         include: {
-          itemGroup: { select: { name: true } },
+          itemGroup: { select: { name: true, categoryId: true } },
           colourVariant: { select: { name: true, photoUrl: true } },
           sizeOption: { select: { name: true } },
           variation: {
@@ -975,12 +992,34 @@ export class CatalogReadService {
               id: true,
               colourFamily: { select: { name: true } },
               sizeOption: { select: { name: true } },
-              itemGroup: { select: { name: true } },
+              itemGroup: { select: { name: true, categoryId: true } },
             },
+          },
+          /// Custom-axis values (Pattern / Style / Fit / …). Included so
+          /// the search matches e.g. "Cross" or "Straight" for a product
+          /// with a Pattern axis, not just colour + SKU.
+          attributes: {
+            include: { productAttributeValue: true },
           },
         },
       }),
+      this.prisma.category.findMany({ select: { id: true, name: true, parentId: true } }),
     ])
+    const catById = new Map(allCategories.map((c) => [c.id, c]))
+    /// Build the flattened ancestor-name string for each leaf category
+    /// once — small (~20 rows) so an in-memory cache is fine.
+    const ancestorNamesForCat = new Map<string, string>()
+    for (const c of allCategories) {
+      const parts: string[] = []
+      let cursor: string | null = c.id
+      while (cursor) {
+        const node = catById.get(cursor)
+        if (!node) break
+        parts.unshift(node.name.toLowerCase())
+        cursor = node.parentId
+      }
+      ancestorNamesForCat.set(c.id, parts.join(' > '))
+    }
 
     const onHandByVariation = new Map(byFamily.map((r) => [r.variationId, r._sum.quantity ?? 0]))
     const onHandByVariant = new Map<string, number>()
@@ -1009,7 +1048,16 @@ export class CatalogReadService {
     // Materialise one row per variation. Rows that never had a variant
     // recorded (fresh product with only family-level history) still show
     // up because we key off variantsByVariation, not the ledger.
+    //
+    // Per row, we ALSO build a `searchHaystack` string: everything the
+    // filter can match on — display metadata (item group, colour family,
+    // size), the leaf → root category chain ("scarves > scarves (peru) >
+    // …"), every axis value across every variant (Pattern: Cross,
+    // Style: Fringed, …), every SKU, and every colour variant name. The
+    // filter below then does one lowercase `.includes(needle)` per row
+    // instead of many field-by-field checks.
     const allRows: WarehouseInventoryRow[] = []
+    const haystackByVariation = new Map<string, string>()
     for (const [variationId, list] of variantsByVariation) {
       const first = list[0]!
       const rowVariants = hasMeaningfulSubVariants(list)
@@ -1029,6 +1077,27 @@ export class CatalogReadService {
         list.find((wv) => wv.photoUrls[0])?.photoUrls[0] ??
         list.find((wv) => wv.colourVariant.photoUrl)?.colourVariant.photoUrl ??
         null
+      // Build the searchable haystack for this row. Category chain comes
+      // from the item group's leaf category; axis values union across
+      // every variant so a match on Cross surfaces the whole row.
+      const categoryChain = ancestorNamesForCat.get(first.itemGroup.categoryId) ?? ''
+      const axisValues = new Set<string>()
+      for (const wv of list) {
+        for (const link of wv.attributes) axisValues.add(link.productAttributeValue.value.toLowerCase())
+      }
+      const skuBag = list.map((wv) => wv.warehouseSku.toLowerCase()).join(' ')
+      const colourBag = list.map((wv) => wv.colourVariant.name.toLowerCase()).join(' ')
+      const haystack = [
+        first.variation.itemGroup.name.toLowerCase(),
+        first.variation.colourFamily.name.toLowerCase(),
+        first.variation.sizeOption.name.toLowerCase(),
+        categoryChain,
+        colourBag,
+        skuBag,
+        [...axisValues].join(' '),
+      ].join(' ')
+      haystackByVariation.set(variationId, haystack)
+
       allRows.push({
         variationId,
         itemGroupName: first.variation.itemGroup.name,
@@ -1045,21 +1114,15 @@ export class CatalogReadService {
     const total = allRows.reduce((s, r) => s + r.onHand, 0)
     const distinctItems = allRows.length
 
-    // Search filter — server-side ILIKE-esque contains match on the
-    // display strings and every variant's colour/SKU. Kept
-    // case-insensitive; punctuation-sensitive so "S" doesn't match every
-    // "Small" plus every "SKU-…".
+    // Search filter — server-side ILIKE-esque contains match against
+    // the per-row haystack built above (display metadata + category
+    // chain + axis values + SKUs + colour names). Same behaviour as the
+    // /catalog "deep search" so operators moving between the two views
+    // don't have to reset their mental model. Kept case-insensitive;
+    // punctuation-sensitive so "S" doesn't match every "Small" plus
+    // every "SKU-…".
     const filtered = needle
-      ? allRows.filter((r) => {
-          if (r.itemGroupName.toLowerCase().includes(needle)) return true
-          if (r.colourFamilyName.toLowerCase().includes(needle)) return true
-          if (r.sizeOptionName.toLowerCase().includes(needle)) return true
-          return r.variants.some(
-            (v) =>
-              v.colourVariantName.toLowerCase().includes(needle) ||
-              v.warehouseSku.toLowerCase().includes(needle),
-          )
-        })
+      ? allRows.filter((r) => (haystackByVariation.get(r.variationId) ?? '').includes(needle))
       : allRows
 
     // Sort by on-hand DESC then name ASC — matches the pre-server-side
@@ -1161,6 +1224,12 @@ export class CatalogReadService {
         colourVariant: { include: { colourFamily: true } },
         sizeOption: true,
         variation: { include: { colourFamily: true } },
+        /// Bring back every axis value bound to this SKU (Style, Pattern,
+        /// Fit, custom …). Colour and Size have their own detail rows
+        /// so the render layer filters those out of this list.
+        attributes: {
+          include: { productAttributeValue: { include: { productAttribute: true } } },
+        },
       },
     })
     if (!wv) throw new NotFoundException(`warehouse variant ${warehouseVariantId} not found`)
@@ -1196,6 +1265,17 @@ export class CatalogReadService {
     const totalOnHand = stockByLocation.reduce((s, r) => s + r.onHand, 0)
     const backfillPhoto = wv.colourVariant.photoUrl
     const photoUrls = wv.photoUrls.length > 0 ? wv.photoUrls : backfillPhoto ? [backfillPhoto] : []
+    // Filter out Color/Size — those have dedicated detail rows already
+    // — and dedupe by axis name so the render layer just maps 1:1.
+    const attributes: Array<{ name: string; value: string }> = []
+    const seenAxisNames = new Set<string>()
+    for (const link of wv.attributes) {
+      const name = link.productAttributeValue.productAttribute.name
+      if (name === 'Color' || name === 'Size') continue
+      if (seenAxisNames.has(name)) continue
+      seenAxisNames.add(name)
+      attributes.push({ name, value: link.productAttributeValue.value })
+    }
     return {
       warehouseVariantId: wv.id,
       warehouseSku: wv.warehouseSku,
@@ -1212,6 +1292,7 @@ export class CatalogReadService {
       totalOnHand,
       stockByLocation,
       breadcrumb,
+      attributes,
     }
   }
 
@@ -1697,4 +1778,31 @@ function slugify(value: string): string {
 
 function shortHash(value: string): string {
   return createHash('sha1').update(value).digest('hex').slice(0, 8)
+}
+
+/// Flatten `WarehouseVariantAttribute[]` (Prisma-shape after
+/// `include: { productAttributeValue: { include: { productAttribute: true } } }`)
+/// into just the axis values for custom axes. Colour and Size are
+/// already carried by `colourVariantName` / `sizeOptionName`, so we drop
+/// those to keep the return array purely additive.
+function extractCustomAxisValues(
+  links: Array<{
+    productAttributeValue: {
+      value: string
+      productAttribute: { name: string }
+    }
+  }>,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const link of links) {
+    const name = link.productAttributeValue.productAttribute.name
+    if (name === 'Color' || name === 'Size') continue
+    const value = link.productAttributeValue.value
+    const key = `${name}::${value}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out
 }
