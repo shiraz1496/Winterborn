@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type {
+  CreatedProductSku,
   VariationSummary,
   WarehouseVariantSummary,
 } from '@winterborn/shared'
@@ -311,7 +312,12 @@ function IntakeBody() {
   /// cache (so the search dropdown finds the new items immediately) and
   /// confirm to the operator that it landed. No auto-add to the intake
   /// queue — that would double-count any qty the operator entered.
-  async function onProductCreated(summary: { skusCreated: number; totalUnitsRecorded: number; itemGroupName: string }) {
+  async function onProductCreated(summary: {
+    skusCreated: number
+    totalUnitsRecorded: number
+    itemGroupName: string
+    skus: CreatedProductSku[]
+  }) {
     setCreating(false)
     const [freshVariations, freshVariants, freshStock] = await Promise.all([
       listVariations(),
@@ -323,6 +329,42 @@ function IntakeBody() {
     const m = new Map<string, number>()
     for (const s of freshStock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
     setOnHandByVariantId(m)
+
+    // Rebuild the "Last intake" panel from the newly-created SKUs so
+    // the operator sees the actual product they just created instead
+    // of a stale summary from an earlier receive. One FamilyResult per
+    // variation (a product-creation matrix can span several variations
+    // when Size is the primary axis); `created` is always true here
+    // because the ledger row was written for the very first time.
+    if (summary.skus.length > 0) {
+      const meta = new Map(freshVariations.map((v) => [v.id, v]))
+      const byVariation = new Map<string, FamilyResult>()
+      for (const sku of summary.skus) {
+        if (sku.quantity <= 0) continue
+        const v = meta.get(sku.variationId)
+        if (!v) continue
+        let entry = byVariation.get(sku.variationId)
+        if (!entry) {
+          entry = {
+            variationId: sku.variationId,
+            itemGroupName: v.itemGroupName,
+            familyName: v.colourFamilyName,
+            sizeName: v.sizeOptionName,
+            lines: [],
+          }
+          byVariation.set(sku.variationId, entry)
+        }
+        entry.lines.push({
+          colourVariantName: sku.warehouseVariant.colourVariantName,
+          quantity: sku.quantity,
+          onHand: m.get(sku.warehouseVariant.id) ?? sku.quantity,
+          created: true,
+        })
+      }
+      const results = [...byVariation.values()]
+      if (results.length > 0) setLastResults(results)
+    }
+
     toast.success(
       `Created ${summary.itemGroupName} — ${summary.skusCreated} SKU${summary.skusCreated === 1 ? '' : 's'}` +
       (summary.totalUnitsRecorded > 0
@@ -711,7 +753,15 @@ function NewProductModal({
 }: {
   initialItemGroup: string
   onClose: () => void
-  onCreated: (summary: { skusCreated: number; totalUnitsRecorded: number; itemGroupName: string }) => void
+  onCreated: (summary: {
+    skusCreated: number
+    totalUnitsRecorded: number
+    itemGroupName: string
+    /// Bubbled up so the parent's "Last intake" panel can rerender
+    /// with the newly-created product's initial-stock intake — same
+    /// summary the confirm-intake flow shows for regular receives.
+    skus: CreatedProductSku[]
+  }) => void
 }) {
   const toast = useToast()
   const [chain, setChain] = useState<string[]>([])
@@ -898,6 +948,7 @@ function NewProductModal({
         skusCreated: res.skusCreated,
         totalUnitsRecorded: res.totalUnitsRecorded,
         itemGroupName: itemGroupName.trim(),
+        skus: res.skus,
       })
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Could not create the product.'
