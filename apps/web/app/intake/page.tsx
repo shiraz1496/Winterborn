@@ -949,7 +949,7 @@ function NewProductModal({
         </div>
 
         <div className="field">
-          <label>Primary variant axis (optional)</label>
+          <label>Variants (optional)</label>
           {!primaryAxisName && !addingCustomAxis && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {PRIMARY_AXIS_CANDIDATES.map((name) => (
