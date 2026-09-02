@@ -108,3 +108,82 @@ export const requestLineAnalysisSchema = z.object({
   allocation: requestLineAllocationSchema,
 })
 export type RequestLineAnalysis = z.infer<typeof requestLineAnalysisSchema>
+
+/// Packing-list suggestion input (POST /requests/generate-suggestion).
+///
+/// Answers the CEO's ask (voice notes 2026-09-01): given a market, produce
+/// a full draft packing list — which products, which colours, how many —
+/// that the operator can then approve, edit, or reject before it becomes
+/// a real request. This is distinct from RequestLineAnalysis, which
+/// evaluates an already-drafted line; this generates the whole draft from
+/// last year's sales + current stock.
+///
+/// Target modes:
+///   MATCH_LAST_YEAR: qty per variation = last year's sales at this market
+///   GROW_PCT:        qty per variation = last year's sales * (1 + growthPct/100)
+///   CUSTOM_UNITS:    a total unit budget split across variations in proportion
+///                    to last year's mix at this market
+export const suggestionTargetModeSchema = z.enum(['MATCH_LAST_YEAR', 'GROW_PCT', 'CUSTOM_UNITS'])
+export type SuggestionTargetMode = z.infer<typeof suggestionTargetModeSchema>
+
+export const generateSuggestionInputSchema = z
+  .object({
+    locationId: z.string().min(1),
+    targetMode: suggestionTargetModeSchema,
+    /// Required when targetMode = GROW_PCT. Integer percent (10 = +10%).
+    /// Negative is allowed (a market shrinking after a slow season).
+    growthPct: z.number().int().min(-100).max(500).optional(),
+    /// Required when targetMode = CUSTOM_UNITS.
+    targetUnits: z.number().int().positive().optional(),
+    /// Optional explicit window for "last year". Defaults to the same season
+    /// window one year ago (from Location.seasonStart/seasonEnd) when set,
+    /// otherwise trailing 12 months ending one year before today.
+    lastYearStart: z.coerce.date().optional(),
+    lastYearEnd: z.coerce.date().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.targetMode === 'GROW_PCT' && v.growthPct === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['growthPct'], message: 'growthPct required for GROW_PCT mode' })
+    }
+    if (v.targetMode === 'CUSTOM_UNITS' && v.targetUnits === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['targetUnits'], message: 'targetUnits required for CUSTOM_UNITS mode' })
+    }
+  })
+export type GenerateSuggestionInput = z.infer<typeof generateSuggestionInputSchema>
+
+/// One recommended line in the generated packing list. Each row is one
+/// (variation, warehouseVariant) pair the operator can accept as-is,
+/// edit the qty on, or drop.
+export const suggestionLineSchema = z.object({
+  variationId: z.string(),
+  warehouseVariantId: z.string().nullable(),
+  qtyRecommended: z.number().int().nonnegative(),
+  /// Signal breakdown so the UI can show the operator *why* this number
+  /// exists — the "6 W's" answer for recommendations.
+  lastYearSold: z.number().int().nonnegative(),
+  warehouseOnHand: z.number().int().nonnegative(),
+  otherLocationDemand: z.number().int().nonnegative(),
+  /// Short human sentence explaining the number in plain English.
+  /// e.g. "Sold 42 last year at Denver; warehouse has 30 available."
+  rationale: z.string(),
+})
+export type SuggestionLine = z.infer<typeof suggestionLineSchema>
+
+export const generateSuggestionResultSchema = z.object({
+  locationId: z.string(),
+  targetMode: suggestionTargetModeSchema,
+  window: z.object({
+    start: z.coerce.date(),
+    end: z.coerce.date(),
+  }),
+  lines: z.array(suggestionLineSchema),
+  totals: z.object({
+    variationsCovered: z.number().int().nonnegative(),
+    totalRecommendedUnits: z.number().int().nonnegative(),
+    totalLastYearUnits: z.number().int().nonnegative(),
+  }),
+  /// Human-readable caveats surfaced to the operator: which data source
+  /// was used, why the answer might be low-confidence, etc.
+  notes: z.array(z.string()),
+})
+export type GenerateSuggestionResult = z.infer<typeof generateSuggestionResultSchema>

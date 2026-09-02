@@ -26,6 +26,8 @@ import {
   createLoadInputSchema,
   createRequestInputSchema,
   createRequestLineInputSchema,
+  generateSuggestionInputSchema,
+  generateSuggestionResultSchema,
   currentUserSchema,
   decisionQueueRowSchema,
   dispatchResultSchema,
@@ -75,6 +77,7 @@ import {
   type CreateLoadInput,
   type CreateRequestInput,
   type CreateRequestLineInput,
+  type GenerateSuggestionInput,
   type CreateWarehouseVariantInput,
   type CreateCategoryInput,
   type CreateProductInput,
@@ -532,6 +535,11 @@ export function transitionRequest(requestId: string, state: string) {
 
 export function getRequestAnalysis(requestId: string) {
   return request('GET', `/requests/${requestId}/analysis`, z.array(requestLineAnalysisSchema))
+}
+
+export function generateSuggestion(input: GenerateSuggestionInput) {
+  generateSuggestionInputSchema.parse(input)
+  return request('POST', '/requests/generate-suggestion', generateSuggestionResultSchema, input)
 }
 
 export function reportRequestMissing(requestId: string) {

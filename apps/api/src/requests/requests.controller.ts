@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common'
-import type {
-  CreateRequestInput,
-  CreateRequestLineInput,
-  TransitionRequestInput,
-  UpdateRequestLineInput,
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, UseGuards } from '@nestjs/common'
+import {
+  generateSuggestionInputSchema,
+  type CreateRequestInput,
+  type CreateRequestLineInput,
+  type GenerateSuggestionInput,
+  type TransitionRequestInput,
+  type UpdateRequestLineInput,
 } from '@winterborn/shared'
 import { JwtGuard } from '../auth/jwt.guard.js'
 import { RolesGuard } from '../auth/roles.guard.js'
@@ -12,6 +14,7 @@ import { CurrentUser } from '../auth/current-user.decorator.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { RequestsService } from './requests.service.js'
 import { RequestAnalysisService } from './request-analysis.service.js'
+import { PackingListSuggestionService } from './packing-list-suggestion.service.js'
 
 @Controller('requests')
 @UseGuards(JwtGuard, RolesGuard)
@@ -20,11 +23,32 @@ export class RequestsController {
   constructor(
     private readonly requests: RequestsService,
     private readonly analysis: RequestAnalysisService,
+    private readonly suggestion: PackingListSuggestionService,
   ) {}
 
   @Post()
   create(@Body() body: CreateRequestInput, @CurrentUser() user: CurrentUserPayload) {
     return this.requests.create(body, user)
+  }
+
+  /// Draft-a-whole-packing-list endpoint (CEO ask, voice notes 2026-09-01).
+  /// Owner + Market Manager only — the same roles who can go on to submit
+  /// the resulting draft. Warehouse roles have no reason to generate a
+  /// packing list from scratch (they act on submitted requests, not
+  /// initiate them). MM is restricted to their own market by the service.
+  @Post('generate-suggestion')
+  async generateSuggestion(
+    @Body() body: GenerateSuggestionInput,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    if (user.role !== 'OWNER' && user.role !== 'MARKET_MANAGER') {
+      throw new ForbiddenException(`${user.role} may not generate packing lists`)
+    }
+    const parsed = generateSuggestionInputSchema.parse(body)
+    if (user.role === 'MARKET_MANAGER' && user.locationId !== parsed.locationId) {
+      throw new ForbiddenException("cannot generate a packing list for another market")
+    }
+    return this.suggestion.generate(parsed)
   }
 
   @Get()

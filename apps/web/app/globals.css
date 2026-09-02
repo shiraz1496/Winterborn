@@ -370,6 +370,127 @@ textarea {
   width: 100%;
 }
 
+/* Segmented control -- 2-N sibling options where one is active. Used for
+   any mutually-exclusive small choice (target modes, view toggles, etc.).
+   Sits inside a bordered container that holds all options at equal width. */
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  width: 100%;
+}
+.segmented-btn {
+  flex: 1;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  border-radius: calc(var(--radius-md) - 4px);
+  color: var(--text-dim);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  min-width: 0;
+}
+.segmented-btn:hover:not(.active):not(:disabled) {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+.segmented-btn.active {
+  background: var(--signal);
+  color: var(--signal-ink);
+}
+.segmented-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.segmented-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* Suggestion panel accent — signals "this is a smart-generated action"
+   without being loud. Slightly raised surface + left border in signal. */
+.suggest-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.suggest-panel-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.suggest-panel-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: rgba(220, 138, 40, 0.12);
+  color: var(--signal);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.suggest-panel-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.suggest-panel-body {
+  flex: 1;
+  min-width: 0;
+}
+.suggest-panel-title {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.98rem;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.2;
+}
+.suggest-panel-sub {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.suggest-panel-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.suggest-panel-notes {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  border-left: 2px solid var(--line-strong);
+}
+.suggest-panel-notes p {
+  margin: 4px 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.suggest-panel-notes p:first-child { margin-top: 0; }
+.suggest-panel-notes p:last-child { margin-bottom: 0; }
+
 /* ---- cards / lists ----------------------------------------------------- */
 
 .card {

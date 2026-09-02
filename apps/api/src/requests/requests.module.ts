@@ -5,6 +5,7 @@ import { FulfilmentModule } from '../fulfilment/fulfilment.module.js'
 import { RequestsService } from './requests.service.js'
 import { RequestsController } from './requests.controller.js'
 import { RequestAnalysisService } from './request-analysis.service.js'
+import { PackingListSuggestionService } from './packing-list-suggestion.service.js'
 
 // FulfilmentModule import: RequestsService needs BoxesService to post the
 // INTAKE ledger rows when a market manager closes a received request.
@@ -14,7 +15,7 @@ import { RequestAnalysisService } from './request-analysis.service.js'
 @Module({
   imports: [AuthModule, LedgerModule, FulfilmentModule],
   controllers: [RequestsController],
-  providers: [RequestsService, RequestAnalysisService],
-  exports: [RequestsService, RequestAnalysisService],
+  providers: [RequestsService, RequestAnalysisService, PackingListSuggestionService],
+  exports: [RequestsService, RequestAnalysisService, PackingListSuggestionService],
 })
 export class RequestsModule {}
