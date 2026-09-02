@@ -92,37 +92,6 @@ export default function LoginPage() {
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
-
-      <div
-        style={{
-          marginTop: 32,
-          padding: 14,
-          border: '1px dashed var(--line-strong)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--surface-sunken)',
-        }}
-      >
-        <p className="eyebrow" style={{ marginBottom: 8 }}>
-          Roles
-        </p>
-        <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-dim)', fontSize: '0.82rem', lineHeight: 1.6 }}>
-          <li>
-            <strong style={{ color: 'var(--text)' }}>Owner</strong> — full access, catalog and settings.
-          </li>
-          <li>
-            <strong style={{ color: 'var(--text)' }}>Warehouse manager</strong> — receive, pack, ship, approve.
-          </li>
-          <li>
-            <strong style={{ color: 'var(--text)' }}>Warehouse operator</strong> — receive and pack only.
-          </li>
-          <li>
-            <strong style={{ color: 'var(--text)' }}>Market manager</strong> — see one market and request restocks.
-          </li>
-          <li>
-            <strong style={{ color: 'var(--text)' }}>Sales</strong> — Square till only, no app access.
-          </li>
-        </ul>
-      </div>
     </div>
   )
 }
