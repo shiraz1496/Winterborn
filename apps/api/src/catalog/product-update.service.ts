@@ -205,7 +205,32 @@ export class ProductUpdateService {
         })
       }
 
-      // 6. Photos — full replace, already uploaded to Cloudinary by client.
+      // 6. Custom axis values (Style / Pattern / Fit / …). Each entry
+      //    rebinds THIS SKU's WarehouseVariantAttribute for the named
+      //    axis to either an existing ProductAttributeValue or a
+      //    freshly-forked one, matching the safe rename-or-fork pattern
+      //    used for Colour variant and Size above. Siblings sharing the
+      //    original value are untouched.
+      if (input.axisValues && input.axisValues.length > 0) {
+        for (const { name, value } of input.axisValues) {
+          const result = await this.renameOrRebindProductAttributeValue(
+            tx,
+            id,
+            wv.itemGroup.id,
+            name,
+            value,
+          )
+          if (result.changed) {
+            audit.push({
+              field: `axis:${name}`,
+              oldValue: result.oldValue,
+              newValue: value,
+            })
+          }
+        }
+      }
+
+      // 7. Photos — full replace, already uploaded to Cloudinary by client.
       if (input.photoUrls !== undefined) {
         const before = wv.photoUrls
         const after = input.photoUrls
@@ -243,8 +268,117 @@ export class ProductUpdateService {
       input.colourVariantName === undefined &&
       input.sizeOptionName === undefined &&
       input.colourFamilyId === undefined &&
-      input.photoUrls === undefined
+      input.photoUrls === undefined &&
+      (input.axisValues === undefined || input.axisValues.length === 0)
     )
+  }
+
+  /// Rebind THIS SKU's WarehouseVariantAttribute link for the named
+  /// axis to point at (existing or forked) ProductAttributeValue for
+  /// the new value. Follows the same safety rules as
+  /// `renameOrRebindColourVariant`: reuse an existing value row if one
+  /// matches, otherwise rename in place if this SKU is its sole user,
+  /// otherwise fork. `attributeName` must be an existing
+  /// ProductAttribute on the SKU's ItemGroup — new axes are created via
+  /// the product-creation flow, not here.
+  private async renameOrRebindProductAttributeValue(
+    tx: Prisma.TransactionClient,
+    warehouseVariantId: string,
+    itemGroupId: string,
+    attributeName: string,
+    newValue: string,
+  ): Promise<{ changed: boolean; oldValue: string | null }> {
+    const attribute = await tx.productAttribute.findUnique({
+      where: { itemGroupId_name: { itemGroupId, name: attributeName } },
+    })
+    if (!attribute) {
+      throw new NotFoundException(
+        `attribute "${attributeName}" not found on this product — cannot rename its value`,
+      )
+    }
+
+    // The link this SKU currently has for that attribute. May be
+    // absent (SKU wasn't tagged with this axis yet), in which case we
+    // just insert a fresh link to the target value.
+    const currentLink = await tx.warehouseVariantAttribute.findFirst({
+      where: {
+        warehouseVariantId,
+        productAttributeValue: { productAttributeId: attribute.id },
+      },
+      include: { productAttributeValue: true },
+    })
+
+    // No-op if the current link already points at the target value.
+    if (currentLink && currentLink.productAttributeValue.value === newValue) {
+      return { changed: false, oldValue: newValue }
+    }
+
+    // Prefer an existing value row for (attribute, newValue). If found,
+    // just rebind this SKU's link to it.
+    const targetValue = await tx.productAttributeValue.findUnique({
+      where: {
+        productAttributeId_value: { productAttributeId: attribute.id, value: newValue },
+      },
+    })
+
+    let newValueId: string
+    const oldValue = currentLink?.productAttributeValue.value ?? null
+
+    if (targetValue) {
+      newValueId = targetValue.id
+    } else if (currentLink) {
+      // Fork-or-rename: if this SKU is the sole user of its current
+      // value row we can rename in place; otherwise fork a new row so
+      // siblings' link stays valid.
+      const otherUsers = await tx.warehouseVariantAttribute.count({
+        where: {
+          productAttributeValueId: currentLink.productAttributeValueId,
+          warehouseVariantId: { not: warehouseVariantId },
+        },
+      })
+      if (otherUsers === 0) {
+        await tx.productAttributeValue.update({
+          where: { id: currentLink.productAttributeValueId },
+          data: { value: newValue },
+        })
+        return { changed: true, oldValue }
+      }
+      const forked = await tx.productAttributeValue.create({
+        data: {
+          productAttributeId: attribute.id,
+          value: newValue,
+          displayOrder: 0,
+        },
+      })
+      newValueId = forked.id
+    } else {
+      // No current link at all — just create the value if needed and
+      // link this SKU to it.
+      const created = await tx.productAttributeValue.create({
+        data: {
+          productAttributeId: attribute.id,
+          value: newValue,
+          displayOrder: 0,
+        },
+      })
+      newValueId = created.id
+    }
+
+    // Delete the old link (if any) and create the new one.
+    if (currentLink) {
+      await tx.warehouseVariantAttribute.delete({
+        where: {
+          warehouseVariantId_productAttributeValueId: {
+            warehouseVariantId,
+            productAttributeValueId: currentLink.productAttributeValueId,
+          },
+        },
+      })
+    }
+    await tx.warehouseVariantAttribute.create({
+      data: { warehouseVariantId, productAttributeValueId: newValueId },
+    })
+    return { changed: true, oldValue }
   }
 
   /// Fold this WarehouseVariant's ColourVariant into either an existing row

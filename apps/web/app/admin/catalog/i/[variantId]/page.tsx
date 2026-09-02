@@ -171,7 +171,7 @@ function ItemDetail() {
                       "Blue (Cross)" here would double-count Pattern. */}
                   {detail.attributes.length > 0
                     ? detail.colourVariantName.replace(/\s*\([^)]*\)\s*$/, '').trim() ||
-                      detail.colourVariantName
+                    detail.colourVariantName
                     : detail.colourVariantName}
                 </dd>
                 {detail.attributes.map((a) => (
@@ -249,6 +249,13 @@ function DetailsEditor({
   const [itemGroupName, setItemGroupName] = useState(detail.itemGroupName)
   const [colourVariantName, setColourVariantName] = useState(detail.colourVariantName)
   const [sizeOptionName, setSizeOptionName] = useState(detail.sizeOptionName)
+  /// Custom-axis (Style / Pattern / Fit / …) drafts, keyed by axis
+  /// name. Seeded from the read-side attributes so an unchanged save
+  /// is a no-op; on submit the diff against `detail.attributes` decides
+  /// which entries land in the update patch.
+  const [axisDrafts, setAxisDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(detail.attributes.map((a) => [a.name, a.value])),
+  )
   const [unitCostDollars, setUnitCostDollars] = useState(
     detail.unitCostCents !== null ? (detail.unitCostCents / 100).toFixed(2) : '',
   )
@@ -333,6 +340,7 @@ function DetailsEditor({
         sizeOptionName?: string
         colourFamilyId?: string
         photoUrls?: string[]
+        axisValues?: Array<{ name: string; value: string }>
       } = {}
       if (colourVariantName.trim() && colourVariantName.trim() !== detail.colourVariantName) {
         wvPatch.colourVariantName = colourVariantName.trim()
@@ -343,6 +351,19 @@ function DetailsEditor({
       if (colourFamilyId && originalColourFamilyId && colourFamilyId !== originalColourFamilyId) {
         wvPatch.colourFamilyId = colourFamilyId
       }
+      // Diff custom-axis drafts against the original attributes. Only
+      // send entries where the operator actually typed a new value —
+      // blank inputs and unchanged values are skipped so the backend
+      // no-ops on identity submits.
+      const originalByAxis = new Map(detail.attributes.map((a) => [a.name, a.value]))
+      const changedAxes: Array<{ name: string; value: string }> = []
+      for (const [name, draft] of Object.entries(axisDrafts)) {
+        const trimmed = draft.trim()
+        if (!trimmed) continue
+        const original = originalByAxis.get(name) ?? ''
+        if (trimmed !== original) changedAxes.push({ name, value: trimmed })
+      }
+      if (changedAxes.length > 0) wvPatch.axisValues = changedAxes
       const trimmedCost = unitCostDollars.trim()
       if (trimmedCost === '') {
         if (detail.unitCostCents !== null) wvPatch.unitCostCents = null
@@ -493,6 +514,24 @@ function DetailsEditor({
           maxLength={120}
         />
       </div>
+
+      {/* Custom axes (Style / Pattern / Fit / …). Rendered as first-
+          class fields — one `.field` block per axis, same shape as Size
+          and Colour variant above. On save, each changed value rebinds
+          THIS SKU's attribute link to either the existing value row,
+          an in-place rename (if this SKU is the sole user), or a
+          freshly-forked value; siblings sharing the old value stay put. */}
+      {detail.attributes.map((a) => (
+        <div key={a.name} className="field" style={{ marginBottom: 0 }}>
+          <label htmlFor={`edit-axis-${a.name}`}>{a.name}</label>
+          <input
+            id={`edit-axis-${a.name}`}
+            value={axisDrafts[a.name] ?? ''}
+            onChange={(e) => setAxisDrafts((prev) => ({ ...prev, [a.name]: e.target.value }))}
+            maxLength={100}
+          />
+        </div>
+      ))}
 
       <div className="field" style={{ marginBottom: 0 }}>
         <label htmlFor="edit-size">Size</label>

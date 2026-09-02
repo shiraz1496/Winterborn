@@ -772,6 +772,20 @@ export const updateWarehouseVariantInputSchema = z.object({
   sizeOptionName: z.string().trim().min(1).max(60).transform(titleCase).optional(),
   colourFamilyId: z.string().min(1).optional(),
   photoUrls: z.array(z.string().url()).max(8).optional(),
+  /// Custom-axis renames (Style / Pattern / Fit / …). Each entry is
+  /// `{ name, value }` where `name` matches an existing ProductAttribute
+  /// on this SKU's ItemGroup. Rebinds this SKU's WarehouseVariantAttribute
+  /// link to point at either the existing ProductAttributeValue for
+  /// that (attribute, value), or a freshly-forked one if the value is
+  /// new — so siblings sharing the axis value stay put.
+  axisValues: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(50),
+        value: z.string().trim().min(1).max(100).transform(titleCase),
+      }),
+    )
+    .optional(),
 })
 export type UpdateWarehouseVariantInput = z.infer<typeof updateWarehouseVariantInputSchema>
 
