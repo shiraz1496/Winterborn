@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, type ReactNode } from 'react'
+import { useBodyScrollLock } from '../lib/use-body-scroll-lock'
 
 /**
  * Themed replacement for `window.confirm` — same intent (a modal yes/no
@@ -46,6 +47,7 @@ export function ConfirmDialog({
   onClose,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null)
+  useBodyScrollLock(open)
 
   useEffect(() => {
     if (!open) return
@@ -86,13 +88,13 @@ export function ConfirmDialog({
     >
       <div
         onClick={(e) => e.stopPropagation()}
+        className="modal-card-scroll"
         style={{
           width: 'min(460px, 100%)',
           background: 'var(--surface)',
           borderRadius: 'var(--radius-lg)',
           border: '1px solid var(--line-strong)',
           boxShadow: '0 24px 48px rgba(0, 0, 0, 0.25)',
-          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
         }}

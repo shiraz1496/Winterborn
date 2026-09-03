@@ -75,6 +75,11 @@ const ICONS = {
       <path d="M8 12h8" />
     </svg>
   ),
+  sparkles: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8" />
+    </svg>
+  ),
 }
 
 const WAREHOUSE_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR']
@@ -94,6 +99,7 @@ interface Tab {
 const TABS: Tab[] = [
   { href: '/', label: 'Dashboard', icon: 'dashboard', roles: ALL_ROLES },
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
+  { href: '/requests/suggest', label: 'Suggest', icon: 'sparkles', roles: ['OWNER'] },
   { href: '/intake', label: 'Receive intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
@@ -105,7 +111,7 @@ const TABS: Tab[] = [
   // { href: '/admin/colours', label: 'Colour queue', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   // { href: '/admin/square-mapping', label: 'Square mapping', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   // { href: '/admin/square-sync', label: 'Square sync', icon: 'square', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
-  // { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
+  { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
   { href: '/admin/audit', label: 'Audits', icon: 'admin', roles: ['OWNER'] },
 ]
@@ -113,6 +119,12 @@ const TABS: Tab[] = [
 export function SideNav({ user, onSignOut }: { user: CurrentUserDto; onSignOut: () => void }) {
   const pathname = usePathname()
   const tabs = TABS.filter((t) => !t.roles || t.roles.includes(user.role))
+  // Longest-prefix wins so a nested route like /requests/suggest highlights
+  // the Suggest tab, not both Suggest AND Requests. Plain `startsWith`
+  // would light up every ancestor.
+  const activeHref = [...tabs]
+    .filter((t) => (t.href === '/' ? pathname === '/' : pathname === t.href || pathname.startsWith(t.href + '/')))
+    .sort((a, b) => b.href.length - a.href.length)[0]?.href
 
   return (
     <aside className="app-sidebar" aria-label="Primary navigation">
@@ -130,7 +142,7 @@ export function SideNav({ user, onSignOut }: { user: CurrentUserDto; onSignOut: 
 
       <nav className="app-sidebar-nav">
         {tabs.map((tab) => {
-          const active = tab.href === '/' ? pathname === '/' : pathname.startsWith(tab.href)
+          const active = tab.href === activeHref
           return (
             <Link key={tab.href} href={tab.href} className={`app-sidebar-item${active ? ' active' : ''}`}>
               {ICONS[tab.icon]}

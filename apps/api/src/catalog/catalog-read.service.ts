@@ -100,7 +100,7 @@ export class CatalogReadService {
 
   async listCategories(): Promise<CategoryDto[]> {
     const rows = await this.prisma.category.findMany({ orderBy: { name: 'asc' } })
-    return rows.map((r) => ({ id: r.id, name: r.name }))
+    return rows.map((r) => ({ id: r.id, name: r.name, parentId: r.parentId }))
   }
 
   /// Create a Category anywhere in the tree — root when parentId is null,

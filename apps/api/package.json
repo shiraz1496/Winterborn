@@ -37,6 +37,8 @@
     "cli:backfill-square-sales": "tsx src/cli/backfill-square-sales.ts",
     "cli:auto-map-square-catalog": "tsx src/cli/auto-map-square-catalog.ts",
     "cli:seed-fake-sales": "tsx src/cli/seed-fake-sales.ts",
+    "cli:seed-suggest-test-data": "tsx src/cli/seed-suggest-test-data.ts",
+    "cli:wipe-fake-sales": "tsx src/cli/wipe-fake-sales.ts",
     "cli:sync-square-catalog": "tsx src/cli/sync-square-catalog.ts",
     "cli:reset-db-keep-users": "tsx src/cli/reset-db-keep-users.ts",
     "cli:import-sortly-xlsx": "tsx src/cli/import-sortly-xlsx.ts",

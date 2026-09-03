@@ -14,6 +14,7 @@ import {
   listLocations,
   updateAdminUser,
 } from '../../../lib/api'
+import { useBodyScrollLock } from '../../../lib/use-body-scroll-lock'
 import { useToast } from '../../../lib/toast'
 
 type Role = CurrentUserDto['role']
@@ -297,6 +298,7 @@ function UserModal({
   onClose: () => void
   onSave: (form: FormState) => Promise<void>
 }) {
+  useBodyScrollLock()
   const [form, setForm] = useState<FormState>({
     email: user?.email ?? '',
     name: user?.name ?? '',

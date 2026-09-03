@@ -3,6 +3,11 @@ import {
   adminLocationSchema,
   adminUserSchema,
   adminUserWithPasswordSchema,
+  createAdminLocationInputSchema,
+  createAdminLocationResultSchema,
+  squareLocationAddressDtoSchema,
+  updateAdminLocationInputSchema,
+  updateAdminLocationResultSchema,
   syncSquareLocationsResultSchema,
   assignColourFamilyInputSchema,
   boxLabelSchema,
@@ -73,7 +78,9 @@ import {
   variationSummarySchema,
   warehouseVariantSummarySchema,
   type AssignColourFamilyInput,
+  type CreateAdminLocationInput,
   type CreateAdminUserInput,
+  type UpdateAdminLocationInput,
   type CreateLoadInput,
   type CreateRequestInput,
   type CreateRequestLineInput,
@@ -720,4 +727,18 @@ export function listAdminLocations() {
 
 export function syncSquareLocations() {
   return request('POST', '/admin/locations/sync', syncSquareLocationsResultSchema)
+}
+
+export function createAdminLocation(input: CreateAdminLocationInput) {
+  createAdminLocationInputSchema.parse(input)
+  return request('POST', '/admin/locations', createAdminLocationResultSchema, input)
+}
+
+export function updateAdminLocation(id: string, input: UpdateAdminLocationInput) {
+  updateAdminLocationInputSchema.parse(input)
+  return request('PATCH', `/admin/locations/${id}`, updateAdminLocationResultSchema, input)
+}
+
+export function getAdminLocationSquareAddress(id: string) {
+  return request('GET', `/admin/locations/${id}/square-details`, squareLocationAddressDtoSchema)
 }

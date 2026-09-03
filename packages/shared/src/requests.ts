@@ -30,6 +30,13 @@ export const createRequestInputSchema = z.object({
   locationId: z.string().min(1),
   createdFrom: requestOriginSchema,
   lines: z.array(createRequestLineInputSchema).min(1),
+  /// Where the request should land on creation. Defaults to DRAFT (the
+  /// existing manual flow — user drafts, then explicitly hits Submit).
+  /// OPEN is used by the Approve-a-suggestion flow so the packing list
+  /// enters the warehouse pipeline in one click. The server enforces the
+  /// same role gate that DRAFT→OPEN would need, so this is not a way to
+  /// bypass permissions.
+  initialState: z.enum(['DRAFT', 'OPEN']).optional(),
 })
 export type CreateRequestInput = z.infer<typeof createRequestInputSchema>
 
@@ -130,11 +137,26 @@ export type RequestLineAnalysis = z.infer<typeof requestLineAnalysisSchema>
 /// last year's sales + current stock.
 ///
 /// Target modes:
-///   MATCH_LAST_YEAR: qty per variation = last year's sales at this market
-///   GROW_PCT:        qty per variation = last year's sales * (1 + growthPct/100)
-///   CUSTOM_UNITS:    a total unit budget split across variations in proportion
-///                    to last year's mix at this market
-export const suggestionTargetModeSchema = z.enum(['MATCH_LAST_YEAR', 'GROW_PCT', 'CUSTOM_UNITS'])
+///   MATCH_LAST_YEAR:  qty per variation = last year's sales at this market
+///   GROW_PCT:         qty per variation = last year's sales * (1 + growthPct/100)
+///   CUSTOM_UNITS:     a total unit budget split across variations in proportion
+///                     to last year's mix at this market
+///   CUSTOM_REVENUE:   a total dollar budget split across variations in
+///                     proportion to last year's REVENUE mix (units × price),
+///                     then converted back to units using each variation's
+///                     current price from the Square catalog cache
+///   INITIAL_SHIPMENT: the "kick off the season" mode from CEO voice note 2
+///                     — targets a share of current warehouse stock (default
+///                     85%) for the candidate variations, distributed
+///                     proportionally to last year's mix at this market. No
+///                     input required beyond an optional override pct.
+export const suggestionTargetModeSchema = z.enum([
+  'MATCH_LAST_YEAR',
+  'GROW_PCT',
+  'CUSTOM_UNITS',
+  'CUSTOM_REVENUE',
+  'INITIAL_SHIPMENT',
+])
 export type SuggestionTargetMode = z.infer<typeof suggestionTargetModeSchema>
 
 export const generateSuggestionInputSchema = z
@@ -146,11 +168,27 @@ export const generateSuggestionInputSchema = z
     growthPct: z.number().int().min(-100).max(500).optional(),
     /// Required when targetMode = CUSTOM_UNITS.
     targetUnits: z.number().int().positive().optional(),
+    /// Required when targetMode = CUSTOM_REVENUE. Dollars (not cents) so
+    /// the operator types "50000" not "5000000" — the service converts
+    /// to cents internally to match Square's priceCents convention.
+    targetRevenueDollars: z.number().int().positive().optional(),
+    /// Used only when targetMode = INITIAL_SHIPMENT. Defaults to 85 (the
+    /// CEO's "80-90% of stock" language, rounded to the midpoint). Cap
+    /// at 100 so we never try to ship more than the warehouse has.
+    initialShipmentPct: z.number().int().min(1).max(100).optional(),
     /// Optional explicit window for "last year". Defaults to the same season
     /// window one year ago (from Location.seasonStart/seasonEnd) when set,
     /// otherwise trailing 12 months ending one year before today.
     lastYearStart: z.coerce.date().optional(),
     lastYearEnd: z.coerce.date().optional(),
+    /// Optional filter — restrict the suggestion to variations whose
+    /// ItemGroup belongs to any of the given categories, OR any descendant
+    /// of them. Empty / omitted means no filter (all variations
+    /// considered). The IDs can be at any level of the tree; the service
+    /// walks the tree down to include children. Matches the CEO's ask
+    /// "high-level products, top category" — the UI presents roots only,
+    /// but the backend accepts any category and walks the tree.
+    categoryIds: z.array(z.string().min(1)).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.targetMode === 'GROW_PCT' && v.growthPct === undefined) {
@@ -159,12 +197,28 @@ export const generateSuggestionInputSchema = z
     if (v.targetMode === 'CUSTOM_UNITS' && v.targetUnits === undefined) {
       ctx.addIssue({ code: 'custom', path: ['targetUnits'], message: 'targetUnits required for CUSTOM_UNITS mode' })
     }
+    if (v.targetMode === 'CUSTOM_REVENUE' && v.targetRevenueDollars === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['targetRevenueDollars'],
+        message: 'targetRevenueDollars required for CUSTOM_REVENUE mode',
+      })
+    }
   })
 export type GenerateSuggestionInput = z.infer<typeof generateSuggestionInputSchema>
 
 /// One recommended line in the generated packing list. Each row is one
 /// (variation, warehouseVariant) pair the operator can accept as-is,
 /// edit the qty on, or drop.
+/// How confident the engine is in one line's number.
+///   HIGH   = real data at this market, enough signal to trust
+///   MEDIUM = real data but sparse, or the target mode extrapolates
+///            beyond the observed range
+///   LOW    = fell back to cross-market inference or dispatch history —
+///            the number is an educated guess, not a measured fact
+export const suggestionConfidenceSchema = z.enum(['HIGH', 'MEDIUM', 'LOW'])
+export type SuggestionConfidence = z.infer<typeof suggestionConfidenceSchema>
+
 export const suggestionLineSchema = z.object({
   variationId: z.string(),
   warehouseVariantId: z.string().nullable(),
@@ -172,11 +226,20 @@ export const suggestionLineSchema = z.object({
   /// Signal breakdown so the UI can show the operator *why* this number
   /// exists — the "6 W's" answer for recommendations.
   lastYearSold: z.number().int().nonnegative(),
+  /// Family-level total units sold at this market last season. Used to
+  /// sort the results so highest-demand *products* lead — not just
+  /// highest-recommended-qty, which can diverge from demand in Custom-
+  /// revenue or Grow-% modes. Identical across every line in the same
+  /// family (they all belong to the same variation).
+  familyLastYearSold: z.number().int().nonnegative(),
   warehouseOnHand: z.number().int().nonnegative(),
   otherLocationDemand: z.number().int().nonnegative(),
   /// Short human sentence explaining the number in plain English.
   /// e.g. "Sold 42 last year at Denver; warehouse has 30 available."
   rationale: z.string(),
+  /// Confidence in this specific line's number. Surfaced in the UI as a
+  /// small badge so a reviewer knows which lines to eyeball more closely.
+  confidence: suggestionConfidenceSchema,
 })
 export type SuggestionLine = z.infer<typeof suggestionLineSchema>
 

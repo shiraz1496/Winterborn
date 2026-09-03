@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Html5Qrcode, Html5QrcodeScannerState } from 'html5-qrcode'
 import type { ReceiveBoxResult } from '@winterborn/shared'
 import { ApiError, receiveBox } from '../lib/api'
+import { useBodyScrollLock } from '../lib/use-body-scroll-lock'
 
 /// Modal camera scanner. Opens a live camera view (via html5-qrcode),
 /// reads a single QR code, calls POST /boxes/receive with the token,
@@ -32,6 +33,7 @@ export function Scanner({
   const busyRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<'starting' | 'scanning' | 'submitting'>('starting')
+  useBodyScrollLock(open)
 
   useEffect(() => {
     if (!open) return
@@ -149,11 +151,11 @@ export function Scanner({
     >
       <div
         onClick={(e) => e.stopPropagation()}
+        className="modal-card-scroll"
         style={{
           width: 'min(420px, 100%)',
           background: 'var(--surface)',
           borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
         }}
