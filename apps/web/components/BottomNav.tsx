@@ -28,6 +28,11 @@ const ICONS = {
       <path d="M3 21h18" strokeLinecap="round" />
     </svg>
   ),
+  sparkles: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8" />
+    </svg>
+  ),
   requests: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M5 3h11l3 3v15H5z" />
@@ -95,6 +100,7 @@ const ALL_ROLES: CurrentUserDto['role'][] = ['OWNER', 'WAREHOUSE_MANAGER', 'WARE
 const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/', label: 'Home', icon: 'dashboard', roles: ALL_ROLES },
   { href: '/requests', label: 'Requests', icon: 'requests', roles: REQUEST_VIEW_ROLES },
+  { href: '/requests/suggest', label: 'Suggest', icon: 'sparkles', roles: ['OWNER'] },
   { href: '/intake', label: 'Intake', icon: 'intake', roles: WAREHOUSE_ROLES },
   { href: '/pack', label: 'Pack', icon: 'pack', roles: WAREHOUSE_ROLES },
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
@@ -111,11 +117,17 @@ const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
 export function BottomNav({ role }: { role: CurrentUserDto['role'] }) {
   const pathname = usePathname()
   const tabs = ALL_TABS.filter((t) => !t.roles || t.roles.includes(role))
+  // Longest-prefix wins — see SideNav for the reasoning. A nested route
+  // like /requests/suggest should highlight Suggest, not Suggest AND
+  // Requests both.
+  const activeHref = [...tabs]
+    .filter((t) => (t.href === '/' ? pathname === '/' : pathname === t.href || pathname.startsWith(t.href + '/')))
+    .sort((a, b) => b.href.length - a.href.length)[0]?.href
 
   return (
     <nav className="bottom-nav">
       {tabs.map((tab) => {
-        const active = tab.href === '/' ? pathname === '/' : pathname.startsWith(tab.href)
+        const active = tab.href === activeHref
         return (
           <Link key={tab.href} href={tab.href} className={`bottom-nav-item${active ? ' active' : ''}`}>
             {ICONS[tab.icon]}

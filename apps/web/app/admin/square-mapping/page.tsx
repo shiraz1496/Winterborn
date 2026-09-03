@@ -13,6 +13,7 @@ import {
   listItemGroupsForMapping,
   updateItemGroupMapping,
 } from '../../../lib/api'
+import { useBodyScrollLock } from '../../../lib/use-body-scroll-lock'
 
 /**
  * Axis-first mapping modal.
@@ -148,6 +149,7 @@ function ProductList({ onSelect, refreshKey }: { onSelect: (itemGroupId: string)
 }
 
 function MappingModal({ itemGroupId, onClose, onSaved }: { itemGroupId: string; onClose: () => void; onSaved: () => void }) {
+  useBodyScrollLock()
   const [detail, setDetail] = useState<ItemGroupDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -358,11 +360,11 @@ function MappingModal({ itemGroupId, onClose, onSaved }: { itemGroupId: string; 
       aria-modal="true"
       aria-label="Product mapping"
       onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: '5vh 20px', zIndex: 1000, overflowY: 'auto' }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '5vh 20px', zIndex: 1000, overflowY: 'auto' }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ width: 'min(820px, 100%)', background: 'var(--surface)', borderRadius: 'var(--radius-lg)', boxShadow: '0 8px 32px rgba(0,0,0,0.2)', padding: 20, maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+        style={{ width: 'min(820px, 100%)', background: 'var(--surface)', borderRadius: 'var(--radius-lg)', boxShadow: '0 8px 32px rgba(0,0,0,0.2)', padding: 20, maxHeight: '85vh', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}
       >
         {loading ? (
           <div className="screen-loading"><div className="spinner" aria-hidden="true" /></div>

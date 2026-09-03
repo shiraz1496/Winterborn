@@ -86,8 +86,22 @@ export class RequestsService {
     this.assertLocationAccess(actor, parsed.locationId)
     this.assertCanEditLines(actor, parsed.locationId)
 
+    // If the caller asked for the request to land in OPEN state directly
+    // (Approve-a-suggestion flow), enforce the same role gate that a manual
+    // DRAFT→OPEN transition would need. Do this before opening the
+    // transaction so a permission failure never leaves a half-written row.
+    const wantOpen = parsed.initialState === 'OPEN'
+    if (wantOpen) {
+      const allowedRoles = TRANSITION_ROLES['DRAFT->OPEN']
+      if (!allowedRoles || !allowedRoles.includes(actor.role)) {
+        throw new ForbiddenException(
+          `${actor.role} may not create a request directly in OPEN state`,
+        )
+      }
+    }
+
     return this.prisma.$transaction(async (tx) => {
-      const request = await tx.restockRequest.create({
+      const created = await tx.restockRequest.create({
         data: {
           locationId: parsed.locationId,
           createdFrom: parsed.createdFrom,
@@ -104,13 +118,34 @@ export class RequestsService {
       })
       await this.audit.record(tx, {
         entity: 'RestockRequest',
-        entityId: request.id,
+        entityId: created.id,
         field: 'state',
         oldValue: null,
-        newValue: request.state,
+        newValue: created.state,
         actorId: actor.id,
       })
-      return request
+
+      // Atomic DRAFT → OPEN when requested. Emitted as a second audit
+      // row (matches what `transition()` produces when a user clicks
+      // Submit manually) so the audit trail cannot tell the difference
+      // between "created draft then submitted" and "approved directly."
+      if (wantOpen && created.state === 'DRAFT') {
+        const opened = await tx.restockRequest.update({
+          where: { id: created.id },
+          data: { state: 'OPEN' },
+          include: { lines: true },
+        })
+        await this.audit.record(tx, {
+          entity: 'RestockRequest',
+          entityId: created.id,
+          field: 'state',
+          oldValue: 'DRAFT',
+          newValue: 'OPEN',
+          actorId: actor.id,
+        })
+        return opened
+      }
+      return created
     })
   }
 

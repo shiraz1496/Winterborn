@@ -23,6 +23,7 @@ import { SearchableSelect } from '../components/SearchableSelect'
 import { StatusLegend } from '../components/StatusLegend'
 import { StockStatusChip } from '../components/StockStatusChip'
 import { useAuth } from '../lib/auth-context'
+import { useBodyScrollLock } from '../lib/use-body-scroll-lock'
 import {
   ApiError,
   decisionQueue,
@@ -50,6 +51,7 @@ function DashboardBody() {
   const [warehouseVariantCatalog, setWarehouseVariantCatalog] = useState<WarehouseVariantSummary[]>([])
   // Warehouse drawer state was here — moved to /warehouse (own page).
   const [marketDrawerOpen, setMarketDrawerOpen] = useState(false)
+  useBodyScrollLock(marketDrawerOpen)
   const [marketOpenVariationId, setMarketOpenVariationId] = useState<string | null>(null)
   const [marketVariantStock, setMarketVariantStock] = useState<StockLevel[]>([])
   const [marketVariantCatalog, setMarketVariantCatalog] = useState<WarehouseVariantSummary[]>([])

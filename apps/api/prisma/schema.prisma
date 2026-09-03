@@ -293,6 +293,28 @@ model Location {
   seasonEnd        DateTime?
   isActive         Boolean      @default(true)
 
+  /// Cached address block. Populated on create + update + sync-from-Square
+  /// so the edit modal can pre-fill from the local row instead of doing a
+  /// per-open Square round-trip. Every field is nullable — legacy rows
+  /// created before this schema change simply have no address until the
+  /// next sync or edit populates them. Square is still authoritative;
+  /// these columns are a cache.
+  addressLine1      String?
+  addressLine2      String?
+  addressCity       String?
+  addressState      String?
+  addressPostalCode String?
+  addressCountry    String?
+
+  /// Cached business hours in Square's shape:
+  ///   { periods: [{ dayOfWeek, startLocalTime, endLocalTime }, ...] }
+  /// Stored as JSON because the shape is inherently a bag of periods (a
+  /// single day can have multiple, one per period — think lunch break)
+  /// and we never need to query on individual times. Populated on create
+  /// + update + sync-from-Square; nullable for rows that pre-date this
+  /// column or for which no hours were configured.
+  businessHours Json?
+
   ledgerEvents    LedgerEvent[]
   restockRequests RestockRequest[]
   boxes           Box[]

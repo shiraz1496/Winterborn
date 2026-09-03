@@ -44,6 +44,23 @@ export const locationSchema = z.object({
 })
 export type LocationDto = z.infer<typeof locationSchema>
 
+/// One open-to-close block on one weekday. Square accepts multiple
+/// periods per day (a lunch-break split), so we model this as a flat
+/// list and let one day appear more than once.
+export const businessHoursPeriodSchema = z.object({
+  dayOfWeek: z.enum(['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']),
+  /// 24-hour HH:MM:SS. HTML `<input type="time">` produces HH:MM which
+  /// the frontend normalises to HH:MM:00 before sending.
+  startLocalTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'HH:MM or HH:MM:SS'),
+  endLocalTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'HH:MM or HH:MM:SS'),
+})
+export type BusinessHoursPeriod = z.infer<typeof businessHoursPeriodSchema>
+
+export const businessHoursSchema = z.object({
+  periods: z.array(businessHoursPeriodSchema),
+})
+export type BusinessHours = z.infer<typeof businessHoursSchema>
+
 /// Admin view of a Location, exposing the Square link the read-only
 /// `locationSchema` intentionally hides. Owner + Warehouse Manager only.
 export const adminLocationSchema = z.object({
@@ -53,6 +70,19 @@ export const adminLocationSchema = z.object({
   timezone: z.string(),
   isActive: z.boolean(),
   squareLocationId: z.string().nullable(),
+  /// Cached address. Populated on create + edit + sync-from-Square so the
+  /// edit modal can render without a per-open Square round-trip. Nullable
+  /// on rows that pre-date the address cache and haven't been touched
+  /// since — the modal shows those fields blank.
+  addressLine1: z.string().nullable(),
+  addressLine2: z.string().nullable(),
+  addressCity: z.string().nullable(),
+  addressState: z.string().nullable(),
+  addressPostalCode: z.string().nullable(),
+  addressCountry: z.string().nullable(),
+  /// Cached business hours as returned from Square (or as last saved).
+  /// Nullable when no hours were configured.
+  businessHours: businessHoursSchema.nullable(),
 })
 export type AdminLocationDto = z.infer<typeof adminLocationSchema>
 
@@ -72,6 +102,151 @@ export const syncSquareLocationsResultSchema = z.object({
   squareTotal: z.number().int(),
 })
 export type SyncSquareLocationsResult = z.infer<typeof syncSquareLocationsResultSchema>
+
+/// Input to POST /admin/locations. Address is only required when creating
+/// a MARKET that should also be created in Square — the Square Locations
+/// API rejects create calls without at least a country. WAREHOUSE rows
+/// never touch Square (Square has no warehouse concept).
+/// A curated set of ISO 3166-1 alpha-2 codes for the countries Winterborn
+/// actually ships to. Non-exhaustive on purpose — Square accepts every ISO
+/// code, but this is a small safety net for the "typed UK, expected GB"
+/// class of mistakes. Add codes as new markets open.
+const KNOWN_COUNTRY_CODES = new Set([
+  'US', 'CA', 'GB', 'IE', 'AU', 'NZ', 'FR', 'DE', 'ES', 'IT', 'NL', 'SE', 'NO', 'DK', 'FI',
+  'JP', 'KR', 'CN', 'HK', 'SG', 'MX', 'BR', 'AR', 'ZA', 'AE', 'IN',
+])
+
+/// Common informal names → correct ISO codes. Used only to produce a
+/// friendlier error message; we never silently rewrite the operator's
+/// input.
+const COUNTRY_ALIASES: Record<string, string> = {
+  UK: 'GB',
+  USA: 'US',
+  UAE: 'AE',
+}
+
+export const adminAddressInputSchema = z.object({
+  line1: z.string().min(1),
+  line2: z.string().optional(),
+  city: z.string().min(1),
+  /// ISO 3166-2 subdivision or plain state/province name — Square accepts
+  /// either for `administrative_district_level_1`.
+  state: z.string().min(1),
+  postalCode: z.string().min(1),
+  /// ISO 3166-1 alpha-2 country code (e.g. "US", "GB", "CA"). Required by
+  /// Square. Uppercased and validated against a curated whitelist; the
+  /// most common mistakes ("UK" → GB, "USA" → US) produce a targeted
+  /// error message rather than a generic Square rejection.
+  country: z
+    .string()
+    .length(2, { message: 'Country must be a 2-letter ISO 3166-1 alpha-2 code (e.g. US, GB, CA)' })
+    .transform((v) => v.toUpperCase())
+    .refine(
+      (v) => KNOWN_COUNTRY_CODES.has(v),
+      (v) => ({
+        message:
+          COUNTRY_ALIASES[v] !== undefined
+            ? `"${v}" is not a valid ISO country code — did you mean "${COUNTRY_ALIASES[v]}"?`
+            : `"${v}" is not a recognised ISO 3166-1 alpha-2 country code (e.g. US, GB, CA, AU)`,
+      }),
+    ),
+})
+export type AdminAddressInput = z.infer<typeof adminAddressInputSchema>
+
+export const createAdminLocationInputSchema = z
+  .object({
+    name: z.string().min(1),
+    kind: locationKindSchema,
+    /// IANA timezone (e.g. "America/New_York"). The Square API accepts
+    /// IANA names directly; the local Location.timezone column stores
+    /// the same string.
+    timezone: z.string().min(1),
+    address: adminAddressInputSchema.optional(),
+    seasonStart: z.coerce.date().optional(),
+    seasonEnd: z.coerce.date().optional(),
+    /// Optional business hours. Mirrored to Square when syncing.
+    businessHours: businessHoursSchema.optional(),
+    /// When true and kind === MARKET, the location is also created in
+    /// Square and the returned id is stored on the local row. Defaults
+    /// true for MARKET, ignored for WAREHOUSE.
+    syncToSquare: z.boolean().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.kind === 'MARKET' && v.syncToSquare !== false && !v.address) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['address'],
+        message: 'address is required when creating a MARKET location in Square',
+      })
+    }
+  })
+export type CreateAdminLocationInput = z.infer<typeof createAdminLocationInputSchema>
+
+/// Response envelope so the UI can differentiate the two success shapes:
+/// created-in-both vs local-only.
+export const createAdminLocationResultSchema = z.object({
+  location: adminLocationSchema,
+  syncedToSquare: z.boolean(),
+})
+export type CreateAdminLocationResult = z.infer<typeof createAdminLocationResultSchema>
+
+/// Input to PATCH /admin/locations/:id. Every field is optional so the
+/// same endpoint services both narrow updates (the active toggle sends
+/// just `isActive`) and full edits from the modal. When the location is
+/// Square-linked, applicable fields are mirrored to Square in the same
+/// call — name, timezone, address, active status.
+///
+/// Kind and squareLocationId are deliberately NOT editable — changing
+/// either would silently reassign historical sales to a different meaning.
+/// Delete + recreate is the honest way to change kind; use the pull-sync
+/// or the create-in-Square flow to change Square linkage.
+export const updateAdminLocationInputSchema = z
+  .object({
+    isActive: z.boolean().optional(),
+    name: z.string().min(1).optional(),
+    timezone: z.string().min(1).optional(),
+    address: adminAddressInputSchema.optional(),
+    seasonStart: z.coerce.date().nullable().optional(),
+    seasonEnd: z.coerce.date().nullable().optional(),
+    /// Full replacement of the location's business hours. Send `null` to
+    /// clear, omit to leave unchanged.
+    businessHours: businessHoursSchema.nullable().optional(),
+    /// When true (and the row is a MARKET currently NOT linked to Square)
+    /// the update creates the location in Square as part of the save and
+    /// stores the returned id on the local row. Requires `address` in the
+    /// same input. No-op when the row is already Square-linked, or when
+    /// it's a WAREHOUSE.
+    linkToSquare: z.boolean().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.linkToSquare && !v.address) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['address'],
+        message: 'address is required to link this location to Square',
+      })
+    }
+  })
+export type UpdateAdminLocationInput = z.infer<typeof updateAdminLocationInputSchema>
+
+export const updateAdminLocationResultSchema = z.object({
+  location: adminLocationSchema,
+  syncedToSquare: z.boolean(),
+})
+export type UpdateAdminLocationResult = z.infer<typeof updateAdminLocationResultSchema>
+
+/// Response for GET /admin/locations/:id/square-details. Address fields
+/// are nullable because Square can (very rarely) return a location with
+/// partial address data. The edit modal pre-fills whatever is present.
+export const squareLocationAddressDtoSchema = z.object({
+  line1: z.string().nullable(),
+  line2: z.string().nullable(),
+  city: z.string().nullable(),
+  state: z.string().nullable(),
+  postalCode: z.string().nullable(),
+  country: z.string().nullable(),
+})
+export type SquareLocationAddressDto = z.infer<typeof squareLocationAddressDtoSchema>
 
 /// Family-level ("what the cashier taps") sellable unit. StockLevel.variationId
 /// points at rows of this shape. `categoryPath` is the ancestor chain of the
@@ -134,6 +309,10 @@ export type ColourFamilyDto = z.infer<typeof colourFamilySchema>
 export const categorySchema = z.object({
   id: z.string(),
   name: z.string(),
+  /// `null` marks a top-level (root) category. Anything else points at the
+  /// parent id — the tree is walked from the client for pickers that
+  /// present roots-only or nested selects.
+  parentId: z.string().nullable(),
 })
 export type CategoryDto = z.infer<typeof categorySchema>
 

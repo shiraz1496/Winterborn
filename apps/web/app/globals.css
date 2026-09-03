@@ -1638,7 +1638,7 @@ textarea {
   backdrop-filter: blur(2px);
   z-index: 60;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: max(24px, env(safe-area-inset-top)) 16px 24px;
   overflow-y: auto;
@@ -1652,7 +1652,19 @@ textarea {
   max-width: 480px;
   padding: 20px;
   box-shadow: 0 20px 60px rgba(20, 24, 26, 0.18);
-  margin-top: min(6vh, 60px);
+  /* Site-wide cap: no modal ever exceeds 85% of the viewport, and its
+     own content scrolls when it would. Combined with useBodyScrollLock
+     this means the page behind the modal never scrolls and the modal
+     never runs off-screen on short viewports. */
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+/* Utility for inline-styled modal cards to opt into the same 85vh cap.
+   Apply next to whatever positioning styles the modal already carries. */
+.modal-card-scroll {
+  max-height: 85vh;
+  overflow-y: auto;
 }
 
 .modal-head {
@@ -1885,26 +1897,14 @@ textarea {
    `grid-template-rows: masonry` which is still experimental. Cards flow
    top-to-bottom per column, then wrap to the next column. */
 .request-grid {
-  column-count: 1;
+  /* `column-width` (not `column-count`) so the browser picks the number
+     of columns from the ACTUAL available width — the 240px sidebar
+     shrinks the content area well below the viewport width, and a
+     viewport-width breakpoint would give too many columns and clip the
+     last one off-screen on 13" laptops / iPads. Each column targets
+     ~260px minimum; a narrower container gets fewer, wider columns. */
+  column-width: 260px;
   column-gap: 8px;
-}
-
-@media (min-width: 640px) {
-  .request-grid {
-    column-count: 2;
-  }
-}
-
-@media (min-width: 960px) {
-  .request-grid {
-    column-count: 3;
-  }
-}
-
-@media (min-width: 1280px) {
-  .request-grid {
-    column-count: 4;
-  }
 }
 
 .request-card {
