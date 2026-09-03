@@ -29,10 +29,13 @@ function chipClassFor(state: RestockRequestDto['state']): string {
 
 function RequestsBody() {
   const { user } = useAuth()
-  // Only requesters can file a new restock: the market's own MM, or
-  // OWNER on their behalf. Warehouse roles (WM/WO) pack what markets
-  // ask for — they don't invent demand — and SALES is read-only.
-  const canCreate = user?.role === 'MARKET_MANAGER' || user?.role === 'OWNER'
+  // Requesters: the market's own MM, plus OWNER and WAREHOUSE_MANAGER
+  // (both can file for any market on the market's behalf). WO doesn't
+  // invent demand; SALES is read-only.
+  const canCreate =
+    user?.role === 'MARKET_MANAGER' ||
+    user?.role === 'OWNER' ||
+    user?.role === 'WAREHOUSE_MANAGER'
   /// Market managers see only their own market's requests server-side,
   /// so the picker adds no value for them. Everyone else gets an
   /// "All markets" default plus a per-market filter.

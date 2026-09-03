@@ -62,7 +62,7 @@ export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly Request
 // handled at the lookup site (see `if (!allowedRoles)` below). Without
 // Partial, TS demands all State×State combinations be present.
 const TRANSITION_ROLES: Readonly<Partial<Record<`${RequestState}->${RequestState}`, readonly CurrentUserPayload['role'][]>>> = {
-  'DRAFT->OPEN': ['MARKET_MANAGER', 'OWNER'],
+  'DRAFT->OPEN': ['MARKET_MANAGER', 'OWNER', 'WAREHOUSE_MANAGER'],
   'OPEN->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKING->PACKED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKED->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
@@ -155,13 +155,16 @@ export class RequestsService {
     const where: Prisma.RestockRequestWhereInput =
       actor.role === 'MARKET_MANAGER' ? { locationId: actor.locationId ?? '__none__' } : {}
 
-    // DRAFTs are visible only to their author's side of the workflow —
-    // the Market Manager who owns the market and the Owner who oversees
-    // everything. Warehouse Manager / Operator have no reason to see a
-    // half-composed request (they can't act on it until it's submitted),
-    // and showing DRAFTs to them created the confusing UX where a WM
-    // could see the row but hitting "Submit" would 403 server-side.
-    if (actor.role !== 'MARKET_MANAGER' && actor.role !== 'OWNER') {
+    // DRAFTs are visible to everyone allowed to file a request:
+    // Market Manager (their market), Owner, and Warehouse Manager (WM
+    // can now file on the market's behalf, so they need to see and
+    // submit their own drafts too). Warehouse Operator and Sales still
+    // can't see half-composed requests they can't act on.
+    if (
+      actor.role !== 'MARKET_MANAGER' &&
+      actor.role !== 'OWNER' &&
+      actor.role !== 'WAREHOUSE_MANAGER'
+    ) {
       where.state = { not: 'DRAFT' }
     }
 
@@ -171,13 +174,14 @@ export class RequestsService {
   async get(id: string, actor: CurrentUserPayload) {
     const request = await this.prisma.restockRequest.findUniqueOrThrow({ where: { id }, include: { lines: true } })
     this.assertLocationAccess(actor, request.locationId)
-    // Match the list filter: a DRAFT is only visible to its author's side
-    // (MM/Owner). Warehouse-side roles landing on the URL directly get a
-    // 403 instead of a rendered but unactionable page.
+    // Match the list filter: only DRAFT-eligible roles (MM/Owner/WM)
+    // can open a draft directly. WO/Sales landing on the URL get a 403
+    // instead of a rendered but unactionable page.
     if (
       request.state === 'DRAFT' &&
       actor.role !== 'MARKET_MANAGER' &&
-      actor.role !== 'OWNER'
+      actor.role !== 'OWNER' &&
+      actor.role !== 'WAREHOUSE_MANAGER'
     ) {
       throw new ForbiddenException('this request is still a draft — the market has not submitted it yet')
     }
@@ -381,10 +385,12 @@ export class RequestsService {
     }
   }
 
-  /// Lines belong to the requester. Only the market's own MM or OWNER
-  /// can add/change what was asked for; warehouse never edits demand.
+  /// Lines belong to the requester. Owner and Warehouse Manager can
+  /// file requests for any market; the market's own MM can file for
+  /// their own. Warehouse Operator + Sales never edit demand.
   private assertCanEditLines(actor: CurrentUserPayload, locationId: string): void {
     if (actor.role === 'OWNER') return
+    if (actor.role === 'WAREHOUSE_MANAGER') return
     if (actor.role === 'MARKET_MANAGER' && actor.locationId === locationId) return
     throw new ForbiddenException(`${actor.role} may not edit request lines`)
   }
