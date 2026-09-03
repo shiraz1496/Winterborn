@@ -60,7 +60,7 @@ type AppRole = 'OWNER' | 'WAREHOUSE_MANAGER' | 'WAREHOUSE_OPERATOR' | 'MARKET_MA
 /// truth on the UI side — matched by server-side guards in
 /// RequestsService.transition/reportMissing.
 const NEXT_TRANSITION: Partial<Record<RequestState, { to: RequestState; label: string; allowed: AppRole[] }>> = {
-  DRAFT: { to: 'OPEN', label: 'Submit request', allowed: ['MARKET_MANAGER', 'OWNER'] },
+  DRAFT: { to: 'OPEN', label: 'Submit request', allowed: ['MARKET_MANAGER', 'OWNER', 'WAREHOUSE_MANAGER'] },
   OPEN: { to: 'PACKING', label: 'Start packing', allowed: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'] },
   PACKING: { to: 'DISPATCHED', label: 'Mark dispatched', allowed: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'] },
   /// PACKED is the auto-set "fully packed, waiting to ship" state — the
@@ -362,11 +362,13 @@ function RequestDetailBody() {
   //   1. State allows it (DRAFT or OPEN — after packing starts, the
   //      manifest is what's real; lines are history).
   //   2. Role owns the request. The requester (MM of this location) or
-  //      the OWNER may edit. Warehouse never modifies what the market
-  //      asked for; WO/SALES never edit anything.
+  //      the OWNER or WAREHOUSE_MANAGER may edit any market's demand
+  //      (they can also file requests on the market's behalf). WO/SALES
+  //      never edit anything.
   const stateAllowsEdit = EDITABLE_STATES.includes(request.state)
   const roleCanEdit =
     user?.role === 'OWNER' ||
+    user?.role === 'WAREHOUSE_MANAGER' ||
     (user?.role === 'MARKET_MANAGER' && user.locationId === request.locationId)
   const editable = stateAllowsEdit && roleCanEdit
   const next = NEXT_TRANSITION[request.state]

@@ -593,7 +593,7 @@ function NewRequestBody() {
 
 export default function NewRequestPage() {
   return (
-    <RequireAuth roles={['MARKET_MANAGER', 'OWNER']}>
+    <RequireAuth roles={['MARKET_MANAGER', 'OWNER', 'WAREHOUSE_MANAGER']}>
       <NewRequestBody />
     </RequireAuth>
   )
