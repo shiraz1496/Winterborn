@@ -226,6 +226,42 @@ export class PackingListSuggestionService {
       competingByFamily.set(line.variationId, (competingByFamily.get(line.variationId) ?? 0) + line.qtyRequested)
     }
 
+    // ---- Cross-market fair-share -------------------------------------
+    // Per-family sales at OTHER markets in the same window. Used to
+    // compute this market's fair share of warehouse stock: a product
+    // that sells everywhere shouldn't have the first market to generate
+    // drain the warehouse. Instead each market's demand competes for a
+    // slice of on-hand proportional to its own demand.
+    //
+    // Skipped in the cross-market-inference case (usedCrossMarket=true):
+    // this market has no local sales by definition, so its "fair share"
+    // would collapse to 0. Leave the allocation alone — the whole line
+    // is already marked LOW confidence.
+    const otherMarketDemandByFamily = new Map<string, number>()
+    // Per-COLOUR sales at other markets, same window — lets the per-SKU
+    // cap below use a real per-colour fair share instead of applying the
+    // family-wide average to every colour uniformly. Without this, a
+    // colour that ONLY this market ever sells would be needlessly
+    // throttled by a family average dragged down by other colours that
+    // are popular elsewhere; conversely a colour that's a bestseller at
+    // every market wouldn't be restrained enough by the family average
+    // alone. See the per-colour cap below for how this is used.
+    const otherMarketDemandByColour = new Map<string, Map<string, number>>()
+    if (!usedCrossMarket && variationIds.length > 0) {
+      const otherMarketSales = await this.groupSalesByVariation(
+        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
+      )
+      for (const [vId, sold] of otherMarketSales.entries()) {
+        if (sold > 0) otherMarketDemandByFamily.set(vId, sold)
+      }
+      const otherMarketColourSales = await this.groupSalesByVariantColour(
+        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
+      )
+      for (const [vId, colourMap] of otherMarketColourSales.entries()) {
+        otherMarketDemandByColour.set(vId, colourMap)
+      }
+    }
+
     // Price lookup for CUSTOM_REVENUE. Uses `WarehouseVariant.unitCostCents`
     // from our own catalog — no Square dependency, no reliance on a
     // Square mapping being in place. Family-level price = average of the
@@ -357,12 +393,33 @@ export class PackingListSuggestionService {
         0,
       )
       const competing = competingByFamily.get(variationId) ?? 0
-      const availableForThisLocation = Math.max(0, totalWarehouseOnHandForFamily - competing)
+
+      // Cross-market fair share: this market's slice of warehouse stock
+      // is proportional to its share of demand across every market that
+      // sold this family last season. If a product is popular
+      // everywhere, no one market drains the warehouse — each gets a
+      // proportional cut and there is still stock left when the next
+      // market runs Generate. When this is the only market with demand
+      // (or cross-market inference is active), the share is 1 and
+      // behavior falls back to the existing "cap at what warehouse has"
+      // logic.
+      const thisMarketDemand = demandByVariation.get(variationId) ?? 0
+      const otherMarketDemand = otherMarketDemandByFamily.get(variationId) ?? 0
+      const totalMarketDemand = thisMarketDemand + otherMarketDemand
+      const fairShare = totalMarketDemand > 0 && !usedCrossMarket
+        ? thisMarketDemand / totalMarketDemand
+        : 1
+      const fairAllocation = Math.floor(totalWarehouseOnHandForFamily * fairShare)
+      const availableForThisLocation = Math.max(0, fairAllocation - competing)
       const scaleFactor = familyTarget === 0 ? 0 : Math.min(1, availableForThisLocation / familyTarget)
       const scaledTarget = Math.floor(familyTarget * scaleFactor)
       if (scaledTarget === 0) continue
 
       const perColourRaw = new Map<string, number>()
+      // Aspirational per-colour target before warehouse/competing caps —
+      // only populated in the direct-colour path so buildRationale can
+      // show "growth target X, capped by warehouse stock" when relevant.
+      const perColourGrownTarget = new Map<string, number>()
       // MATCH_LAST_YEAR and GROW_PCT compute at the colour level DIRECTLY
       // when per-colour SALES exist, instead of "family target × colour
       // mix". Direct per-colour math matches the operator's mental model:
@@ -391,6 +448,7 @@ export class PackingListSuggestionService {
             colourTarget = Math.min(raw, Math.round(colourSold * SANITY_MULTIPLIER))
           }
           perColourRaw.set(wv.id, colourTarget * scaleFactor)
+          perColourGrownTarget.set(wv.id, colourTarget)
         }
       } else if (mixTotal > 0) {
         // Budget-mode path: distribute the family scaledTarget across
@@ -409,10 +467,45 @@ export class PackingListSuggestionService {
       for (const wv of wvList) {
         const raw = perColourRaw.get(wv.id) ?? 0
         const onHand = onHandByWarehouseVariant.get(wv.id) ?? 0
-        const qty = Math.round(Math.min(raw, onHand))
+        const lastYearSoldForColour = colourMix.get(wv.id) ?? 0
+
+        // Per-colour fair-share cap: this market's slice of THIS SPECIFIC
+        // colour's on-hand, not just the family aggregate. Without this, a
+        // market whose family-level ask already fits under its fair share
+        // (scaleFactor === 1, i.e. no family-level discount applied) could
+        // still claim 100% of one popular colour's physical stock — fully
+        // draining that SKU for every other market even though the family
+        // rationale claims only a modest fair share.
+        //
+        // Prefer a REAL per-colour ratio (this market's colour sales vs.
+        // every other market's colour sales for the same SKU) over the
+        // family-wide average whenever we actually have that signal
+        // (mixTotal > 0, i.e. local per-colour SALE data exists). This
+        // matters in both directions: a colour that ONLY this market
+        // ever sells shouldn't be throttled by a family average dragged
+        // down by sibling colours that are popular elsewhere (nobody
+        // else needs it, so there's nothing to protect); a colour that's
+        // a bestseller at every market shouldn't be under-restrained
+        // just because the family average looks generous. Falls back to
+        // the family-level ratio when there's no colour-level signal to
+        // trust (mixTotal === 0, or no cross-market data for this SKU).
+        let colourFairShare = fairShare
+        if (mixTotal > 0 && fairShare < 1) {
+          const otherColourSold = otherMarketDemandByColour.get(variationId)?.get(wv.id) ?? 0
+          const colourTotalDemand = lastYearSoldForColour + otherColourSold
+          if (colourTotalDemand > 0) {
+            colourFairShare = lastYearSoldForColour / colourTotalDemand
+          }
+        }
+        // Floored at 1 unit (when there's real demand and real stock) so
+        // a low fair-share percentage doesn't round a genuinely-selling
+        // colour down to zero.
+        const perColourFairCap = colourFairShare < 1
+          ? Math.min(onHand, Math.max(raw > 0 && onHand > 0 ? 1 : 0, Math.floor(onHand * colourFairShare)))
+          : onHand
+        const qty = Math.round(Math.min(raw, perColourFairCap))
         if (qty <= 0) continue
 
-        const lastYearSoldForColour = colourMix.get(wv.id) ?? 0
         const confidence = decideConfidence({
           usedCrossMarket,
           observed: demandByVariation.get(variationId) ?? 0,
@@ -440,6 +533,13 @@ export class PackingListSuggestionService {
             growthPct: input.growthPct,
             wasCrossMarket: usedCrossMarket,
             marketName: location.name,
+            fairSharePct: fairShare < 1 ? Math.round(fairShare * 100) : null,
+            fairAllocation: fairShare < 1 ? fairAllocation : null,
+            totalWarehouseOnHandForFamily,
+            grownTargetQty: perColourGrownTarget.get(wv.id),
+            recommendedQty: qty,
+            colourFairCap: colourFairShare < 1 && perColourFairCap < onHand ? perColourFairCap : null,
+            colourFairSharePct: colourFairShare < 1 ? Math.round(colourFairShare * 100) : null,
           }),
           confidence,
         })
@@ -556,7 +656,11 @@ export class PackingListSuggestionService {
           ? { variationId: { in: [...args.allowedVariationIds] } }
           : {}),
         ...(args.kind
-          ? { location: { kind: args.kind } }
+          // isActive: true — a closed/retired market's historical sales
+          // must not keep depressing every remaining market's fair share
+          // forever. Matches the isActive filter in countOtherMarkets so
+          // the fair-share numerator and denominator stay consistent.
+          ? { location: { kind: args.kind, isActive: true } }
           : {}),
       },
     })
@@ -588,7 +692,7 @@ export class PackingListSuggestionService {
         ...(args.allowedVariationIds
           ? { variationId: { in: [...args.allowedVariationIds] } }
           : {}),
-        ...(args.kind ? { location: { kind: args.kind } } : {}),
+        ...(args.kind ? { location: { kind: args.kind, isActive: true } } : {}),
       },
     })
     const out = new Map<string, Map<string, number>>()
@@ -679,6 +783,31 @@ function buildRationale(args: {
   growthPct?: number
   wasCrossMarket: boolean
   marketName: string
+  /** Percent of family warehouse stock allocated to this market, or null
+   *  when this market has ~all the demand (fairShare = 1). */
+  fairSharePct: number | null
+  /** Absolute floor of the fair-share allocation (units the market can pull
+   *  from warehouse for this family), or null when the share is 100%. */
+  fairAllocation: number | null
+  /** Warehouse-side family total (across all colours) — the number the
+   *  fair-share percentage is applied to. */
+  totalWarehouseOnHandForFamily: number
+  /** Aspirational per-colour target before any warehouse/competing caps.
+   *  Only present for MATCH_LAST_YEAR / GROW_PCT with local per-colour sales. */
+  grownTargetQty?: number
+  /** Final recommended quantity after all caps — used to detect when the
+   *  warehouse is suppressing the growth target. */
+  recommendedQty?: number
+  /** This colour's fair-share cap (colourFairShare × this colour's
+   *  on-hand), set only when it's below on-hand and therefore the actual
+   *  binding constraint — i.e. the recommendation stopped short of fully
+   *  draining this SKU so other markets still have some to claim. */
+  colourFairCap: number | null
+  /** The real per-colour fair-share percentage actually used for
+   *  colourFairCap — may differ from fairSharePct (the family average)
+   *  when other markets' colour-level sales data lets us be precise
+   *  about THIS specific SKU rather than the family as a whole. */
+  colourFairSharePct: number | null
 }): string {
   const parts: string[] = []
   if (args.wasCrossMarket) {
@@ -699,7 +828,15 @@ function buildRationale(args: {
     const label = args.growthPct >= 0
       ? `growing target by ${args.growthPct}%`
       : `shrinking target by ${Math.abs(args.growthPct)}%`
-    parts.push(label)
+    const isCapped =
+      args.grownTargetQty !== undefined &&
+      args.recommendedQty !== undefined &&
+      args.grownTargetQty > args.recommendedQty
+    parts.push(
+      isCapped
+        ? `${label} — warehouse has enough for ${args.recommendedQty} units (growth target is ${args.grownTargetQty}; add stock to ship the full amount)`
+        : label,
+    )
   }
   if (args.targetMode === 'CUSTOM_UNITS') {
     parts.push('scaled to fit your custom unit budget')
@@ -711,8 +848,28 @@ function buildRationale(args: {
     parts.push('sized as a share of current warehouse stock (initial shipment)')
   }
   if (args.competing > 0) {
-    parts.push(`${args.competing} units also requested by other markets`)
+    parts.push(`${args.competing} units already requested by other markets`)
   }
-  parts.push(`warehouse has ${args.onHand} available`)
+  if (args.fairSharePct != null && args.fairAllocation != null) {
+    parts.push(
+      `capped to ${args.marketName}'s fair share of warehouse stock (${args.fairSharePct}% × ${args.totalWarehouseOnHandForFamily} = ${args.fairAllocation}) so other markets aren't starved`,
+    )
+  }
+  if (args.colourFairCap != null) {
+    // This is the SKU-level guardrail: even when the family-level fair
+    // share above has headroom, this market can't claim more than its
+    // fair-share slice of THIS specific colour's stock either — otherwise
+    // one market could fully drain a popular colour while the family
+    // numbers still looked fine. Uses the real per-colour percentage
+    // (based on what other markets actually sold of this exact colour)
+    // when available, which can differ from the family-wide percentage
+    // above — e.g. a colour only this market sells gets a much higher
+    // share than the family average, since nobody else needs it.
+    parts.push(
+      `kept to ${args.colourFairSharePct}% of this colour's ${args.onHand}-unit stock (${args.colourFairCap} units) so it isn't fully drained`,
+    )
+  } else {
+    parts.push(`warehouse has ${args.onHand} of this item available`)
+  }
   return parts.join('; ') + '.'
 }

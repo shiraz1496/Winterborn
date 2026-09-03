@@ -41,6 +41,10 @@ interface SuggestFamily {
   categoryPath: string[]
   variants: WarehouseVariantSummary[]
   qtyByVariant: Record<string, number>
+  /// Engine's original recommendation, kept immutable so clicking
+  /// "Recommended: N" can always reset the stepper to the right value
+  /// even after the user has edited the qty.
+  recommendedQtyByVariant: Record<string, number>
   metaByVariant: Record<string, { rationale: string; confidence: SuggestionConfidence }>
   /// Family-level total sold at this market last season. Drives the sort
   /// order — highest-demand products lead, matching the backend's own
@@ -218,7 +222,7 @@ function SuggestBody() {
       })
       setNotes(result.notes)
       setTotals(result.totals)
-      setFamilies(hydrateFamilies(result.lines, variationById, variantsByVariation))
+      setFamilies(hydrateFamilies(result.lines, variationById, variantsByVariation, mode, growthPct))
       setOpenId(null)
       if (result.lines.length === 0) {
         toast.info(result.notes[0] ?? 'No lines suggested for this market.')
@@ -615,9 +619,11 @@ function SuggestBody() {
                       ) : (
                         f.variants.map((v) => {
                           const qty = f.qtyByVariant[v.id] ?? 0
+                          const recommended = f.recommendedQtyByVariant[v.id]
                           const onHand = onHandByVariantId.get(v.id) ?? 0
                           const onHandWh = onHandByVariantAtWarehouse.get(v.id) ?? 0
                           const meta = f.metaByVariant[v.id]
+                          const isAtRecommended = recommended === undefined || qty === recommended
                           return (
                             <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)', alignItems: 'flex-start' }}>
                               <ProductThumb
@@ -661,8 +667,32 @@ function SuggestBody() {
                                     </span>
                                   )}
                                 </div>
+                                {recommended !== undefined && (
+                                  <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                    <button
+                                      type="button"
+                                      className={`chip${qty > recommended ? ' chip-signal' : ''}`}
+                                      style={{ cursor: qty !== recommended ? 'pointer' : 'default', fontSize: '0.75rem' }}
+                                      onClick={() => qty !== recommended && setVariantQty(f.variationId, v.id, recommended)}
+                                      title={
+                                        qty > recommended
+                                          ? `Warehouse can safely send ${recommended}. Click to use this amount.`
+                                          : qty < recommended
+                                            ? `You've set this lower than the recommendation (${recommended}). Click to restore.`
+                                            : `Send ${recommended} — warehouse-safe, accounting for other markets`
+                                      }
+                                    >
+                                      Recommended: {recommended}
+                                    </button>
+                                    {qty > recommended && (
+                                      <span style={{ fontSize: '0.75rem', color: 'var(--signal)' }}>
+                                        sending {qty - recommended} above safe limit
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                                 {meta && (
-                                  <div style={{ marginTop: 6, fontSize: '0.78rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                                  <div style={{ marginTop: 4, fontSize: '0.78rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
                                     {meta.rationale}
                                   </div>
                                 )}
@@ -730,6 +760,36 @@ function SuggestBody() {
   )
 }
 
+/// Compute the uncapped demand target for a line — what the market
+/// actually needs based on the chosen mode, before warehouse and
+/// competing-demand caps are applied. The input field starts here;
+/// the "Recommended" chip shows the capped (warehouse-safe) value.
+function demandTargetForLine(
+  line: SuggestionLine,
+  mode: SuggestionTargetMode,
+  growthPct: number,
+): number {
+  // Must match SANITY_MULTIPLIER in the backend service.
+  const SANITY_MULTIPLIER = 3
+  let demand: number
+  if (mode === 'MATCH_LAST_YEAR' && line.lastYearSold > 0) {
+    demand = line.lastYearSold
+  } else if (mode === 'GROW_PCT' && line.lastYearSold > 0) {
+    const raw = Math.round(line.lastYearSold * (1 + growthPct / 100))
+    demand = Math.min(raw, Math.round(line.lastYearSold * SANITY_MULTIPLIER))
+  } else {
+    // Budget modes or cross-market inference: use recommended directly
+    // (no meaningful uncapped demand to recover client-side).
+    demand = line.qtyRecommended
+  }
+  // Hard cap: can never request more than the warehouse physically has.
+  // When demand ≤ warehouseOnHand, input shows real demand so the
+  // operator can see the "fair-share gap" vs the Recommended chip.
+  // When demand > warehouseOnHand, cap to on-hand — requesting beyond
+  // stock would just create an unfulfillable line.
+  return Math.min(demand, line.warehouseOnHand)
+}
+
 /// Group flat suggestion lines by variationId into the family-shaped
 /// structure the /requests/new UI pattern consumes. Skips lines whose
 /// referenced variation or variant we can't find locally — the engine
@@ -739,6 +799,8 @@ function hydrateFamilies(
   wireLines: SuggestionLine[],
   variationById: Map<string, VariationSummary>,
   variantsByVariation: Map<string, WarehouseVariantSummary[]>,
+  mode: SuggestionTargetMode,
+  growthPct: number,
 ): SuggestFamily[] {
   const familyByVariation = new Map<string, SuggestFamily>()
   for (const line of wireLines) {
@@ -758,12 +820,14 @@ function hydrateFamilies(
         categoryPath: meta.categoryPath,
         variants: allVariantsForFamily,
         qtyByVariant: {},
+        recommendedQtyByVariant: {},
         metaByVariant: {},
         familyLastYearSold: line.familyLastYearSold,
       }
       familyByVariation.set(line.variationId, fam)
     }
-    fam.qtyByVariant[line.warehouseVariantId] = line.qtyRecommended
+    fam.qtyByVariant[line.warehouseVariantId] = demandTargetForLine(line, mode, growthPct)
+    fam.recommendedQtyByVariant[line.warehouseVariantId] = line.qtyRecommended
     fam.metaByVariant[line.warehouseVariantId] = {
       rationale: line.rationale,
       confidence: line.confidence,
