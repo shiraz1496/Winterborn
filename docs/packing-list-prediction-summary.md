@@ -121,9 +121,27 @@ sentence), and `confidenceReason`.
 ## Confidence
 
 Grades the **data behind the number, not the quantity chosen**. It deliberately
-does not move when the operator edits a count, and the UI says so. Cross-market
-estimates are graded rather than blanket-LOW: ≥3 source markets with real volume
-earns MEDIUM.
+does not move when the operator edits a count, and the UI says so.
+
+**On an established market** it is confidence in a measurement: local
+colour-level sales earn HIGH, a thin sample or a family-level colour split earns
+MEDIUM.
+
+**On a new market there is nothing to measure**, so the grade evaluates how well
+the other markets evidence each product, per product, and the badge reads
+**Strong / Fair / Thin evidence** instead of confidence. "High confidence" there
+would wrongly read as a promise that it will sell. The inputs are breadth (how
+many of the other markets sell it), volume, concentration (whether one outlier
+market is carrying the number), and whether colour-level sales exist:
+
+| Grade | Condition |
+|---|---|
+| Strong | Sells at ≥60% of markets, ≥50 units, no market holding >60% of the total, colour-level data present |
+| Fair | Sells at ≥30% of markets and ≥15 units, or strong but concentrated, or strong but the colour split is an even guess |
+| Thin | Anything narrower or smaller, including a big seller confined to one market |
+
+The point is that a new market's list **spreads across all three** instead of
+flattening to one badge. Locked in by `test/packing-list-confidence.spec.ts`.
 
 ## Frontend (Suggest page)
 
