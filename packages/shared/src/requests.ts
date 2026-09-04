@@ -159,6 +159,20 @@ export const suggestionTargetModeSchema = z.enum([
 ])
 export type SuggestionTargetMode = z.infer<typeof suggestionTargetModeSchema>
 
+/// Pack-shape defaults, shared by the API and the UI so the form and the
+/// engine can never disagree about what "no override" means.
+export const DEFAULT_ROUND_TO_NEAREST = 5
+export const DEFAULT_MIN_PACK_QTY = 5
+
+/// Default shelf buffer: none, for every mode. A revenue figure is a
+/// SELL-THROUGH goal, so shipping exactly the units that reach it leaves the
+/// booth bare at the end, but quietly inflating the operator's number for
+/// them is the wrong fix. The control is right there in the form and they
+/// set it themselves.
+export function defaultShelfBufferPct(_mode: SuggestionTargetMode): number {
+  return 0
+}
+
 export const generateSuggestionInputSchema = z
   .object({
     locationId: z.string().min(1),
@@ -189,6 +203,25 @@ export const generateSuggestionInputSchema = z
     /// "high-level products, top category" — the UI presents roots only,
     /// but the backend accepts any category and walks the tree.
     categoryIds: z.array(z.string().min(1)).optional(),
+    /// Shelf buffer: extra stock shipped ON TOP of the units the target
+    /// implies, so the booth still looks full while things sell. The CEO's
+    /// question was "on meeting the revenue, on the booth shelf there
+    /// should be some in stock". A revenue target is a SELL-THROUGH goal,
+    /// so shipping exactly the units that hit it leaves an empty table on
+    /// the last day. Defaults per mode (see `defaultShelfBufferPct`):
+    /// 20% for the goal-shaped modes (revenue), 0% for the modes where
+    /// the operator already typed an explicit number of units.
+    shelfBufferPct: z.number().int().min(0).max(200).optional(),
+    /// Pack rounding. Nobody packs 21 of something, so quantities are
+    /// rounded to a multiple of this (default 5) so the picking list reads
+    /// like a real packing list. Rounding never pushes a line above what
+    /// the warehouse can actually supply.
+    roundToNearest: z.number().int().min(1).max(50).optional(),
+    /// Minimum units per item line (default 5). A single unit of a colour
+    /// is not a pack, it's noise on a picking sheet. Lines that can't
+    /// reach this are either bumped up to it (demand modes) or dropped and
+    /// their budget redistributed (budget modes), never left at 1.
+    minPackQty: z.number().int().min(1).max(100).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.targetMode === 'GROW_PCT' && v.growthPct === undefined) {
@@ -219,6 +252,114 @@ export type GenerateSuggestionInput = z.infer<typeof generateSuggestionInputSche
 export const suggestionConfidenceSchema = z.enum(['HIGH', 'MEDIUM', 'LOW'])
 export type SuggestionConfidence = z.infer<typeof suggestionConfidenceSchema>
 
+/// Where the demand numbers in this run actually came from. Surfaced to
+/// the operator verbatim. The #1 complaint about the old engine was that
+/// it never said which data it used, so a new market's list looked like it
+/// had been invented.
+///   LOCAL_SALES           this market's own sales inside the chosen window
+///   LOCAL_SALES_WIDENED   this market's own sales, window widened to all
+///                         available history because the chosen one was empty
+///   CROSS_MARKET          other markets' sales in the chosen window,
+///                         averaged per market (the "new market" case)
+///   CROSS_MARKET_WIDENED  same, with the window widened to all history
+///   WAREHOUSE_STOCK       nothing has ever sold anywhere in scope, so the
+///                         list is sized from what's in the warehouse and
+///                         the operator still gets a usable starting point
+export const suggestionDemandSourceSchema = z.enum([
+  'LOCAL_SALES',
+  'LOCAL_SALES_WIDENED',
+  'CROSS_MARKET',
+  'CROSS_MARKET_WIDENED',
+  'WAREHOUSE_STOCK',
+])
+export type SuggestionDemandSource = z.infer<typeof suggestionDemandSourceSchema>
+
+/// Which rule actually decided a line's final number. The UI shows this as
+/// a one-word tag so an operator can see at a glance whether a small number
+/// means "it doesn't sell" or "we're out of stock", two very different
+/// problems that used to look identical on screen.
+export const suggestionConstraintSchema = z.enum([
+  'DEMAND',
+  'BUDGET',
+  'WAREHOUSE_STOCK',
+  'FAIR_SHARE',
+  'OTHER_REQUESTS',
+  'PACK_ROUNDING',
+  'MIN_PACK',
+])
+export type SuggestionConstraint = z.infer<typeof suggestionConstraintSchema>
+
+/// One step in a line's arithmetic, in the order it was applied. Rendered
+/// as a "show the math" list under each item so the number is never a
+/// black box: label is the operation, detail is the plain-English result.
+export const suggestionStepSchema = z.object({
+  label: z.string(),
+  detail: z.string(),
+})
+export type SuggestionStep = z.infer<typeof suggestionStepSchema>
+
+/// A market that contributed sales to a cross-market inference, with the
+/// units it contributed. Answers the CEO's "which markets' data did it
+/// use?" directly, by name and by number.
+export const suggestionSourceMarketSchema = z.object({
+  locationId: z.string(),
+  name: z.string(),
+  unitsSold: z.number().int().nonnegative(),
+})
+export type SuggestionSourceMarket = z.infer<typeof suggestionSourceMarketSchema>
+
+/// Run-level explanation of the whole list: what data it used, over what
+/// window, with which settings, and what the resulting totals mean.
+export const suggestionExplainSchema = z.object({
+  demandSource: suggestionDemandSourceSchema,
+  /// One sentence the operator can read and immediately understand.
+  headline: z.string(),
+  /// Ordered plain-English description of the mechanism, one line per stage.
+  /// Secondary detail: the panel keeps this behind a "Full working" toggle
+  /// so the default view stays short.
+  steps: z.array(z.string()),
+  /// One short phrase naming the target that was applied, e.g. "Match last
+  /// season" or "$30,000 revenue goal". Lets the compact summary state the
+  /// target for every mode, not just the budget ones.
+  targetSummary: z.string(),
+  /// The window the operator asked for vs. the one actually used. They
+  /// differ when the requested window contained no sales and the engine
+  /// widened it rather than returning an empty list.
+  windowRequested: z.object({ start: z.coerce.date(), end: z.coerce.date() }),
+  windowUsed: z.object({ start: z.coerce.date(), end: z.coerce.date() }),
+  windowWidened: z.boolean(),
+  /// Populated for the cross-market paths: named markets and their units.
+  sourceMarkets: z.array(suggestionSourceMarketSchema),
+  /// Settings actually in force for this run (after defaults were applied),
+  /// so the panel can state them rather than making the operator guess.
+  settings: z.object({
+    shelfBufferPct: z.number().int().nonnegative(),
+    roundToNearest: z.number().int().positive(),
+    minPackQty: z.number().int().positive(),
+  }),
+  /// Budget-mode accounting: what was asked for, what got allocated, and
+  /// the units that implies. Null for the demand-driven modes.
+  budget: z
+    .object({
+      label: z.string(),
+      /// The goal the operator typed, e.g. "$25,000 sales goal".
+      targetDisplay: z.string(),
+      /// What the engine actually tries to ship: the goal plus the shelf
+      /// buffer. Stated separately because conflating the two is exactly
+      /// what made the buffer hard to understand.
+      sendTargetDisplay: z.string(),
+      /// What it managed to allocate.
+      allocatedDisplay: z.string(),
+      /// Set only when the send target could not be reached, saying why.
+      shortfall: z.string().nullable(),
+    })
+    .nullable(),
+  /// Styles the engine considered but dropped, and why. This is the tail that
+  /// used to silently vanish or show up as a nonsense "1".
+  droppedBelowMinimum: z.number().int().nonnegative(),
+})
+export type SuggestionExplain = z.infer<typeof suggestionExplainSchema>
+
 export const suggestionLineSchema = z.object({
   variationId: z.string(),
   warehouseVariantId: z.string().nullable(),
@@ -240,6 +381,19 @@ export const suggestionLineSchema = z.object({
   /// Confidence in this specific line's number. Surfaced in the UI as a
   /// small badge so a reviewer knows which lines to eyeball more closely.
   confidence: suggestionConfidenceSchema,
+  /// Why the line carries that confidence, in one short sentence. Confidence
+  /// describes the DATA behind the suggestion, not the quantity the operator
+  /// ends up choosing. The UI says so explicitly, because "I changed the
+  /// number and the badge didn't move" was a real point of confusion.
+  confidenceReason: z.string(),
+  /// The unconstrained ask before warehouse stock, fair share and other
+  /// markets' open requests were applied. Shown next to the recommendation
+  /// so a suppressed number is visibly suppressed rather than just small.
+  demandTarget: z.number().int().nonnegative(),
+  /// The rule that actually set the final number.
+  bindingConstraint: suggestionConstraintSchema,
+  /// Ordered arithmetic behind `qtyRecommended`.
+  steps: z.array(suggestionStepSchema),
 })
 export type SuggestionLine = z.infer<typeof suggestionLineSchema>
 
@@ -259,5 +413,7 @@ export const generateSuggestionResultSchema = z.object({
   /// Human-readable caveats surfaced to the operator: which data source
   /// was used, why the answer might be low-confidence, etc.
   notes: z.array(z.string()),
+  /// Structured "why did it do this" payload backing the explanation panel.
+  explain: suggestionExplainSchema,
 })
 export type GenerateSuggestionResult = z.infer<typeof generateSuggestionResultSchema>

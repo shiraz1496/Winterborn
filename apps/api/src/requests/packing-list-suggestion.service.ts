@@ -1,17 +1,24 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import {
+  DEFAULT_MIN_PACK_QTY,
+  DEFAULT_ROUND_TO_NEAREST,
+  defaultShelfBufferPct,
+} from '@winterborn/shared'
 import type {
   GenerateSuggestionInput,
   GenerateSuggestionResult,
   SuggestionConfidence,
+  SuggestionConstraint,
+  SuggestionDemandSource,
+  SuggestionExplain,
   SuggestionLine,
+  SuggestionSourceMarket,
+  SuggestionStep,
 } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 
 /**
- * Generates a full draft packing list for one market location, given a
- * target mode. Answers the CEO's ask from voice notes on 2026-09-01 (and
- * the extension on 2026-09-03 covering category filter + new-market
- * inference + reliability guardrails).
+ * Generates a full draft packing list for one market location.
  *
  * This is a sibling of `RequestAnalysisService`, not a replacement:
  *   - `RequestAnalysisService` answers "how many of this line should I ask
@@ -19,44 +26,59 @@ import { PrismaService } from '../prisma/prisma.service.js'
  *   - This service answers "what should the whole request look like?"
  *     starting from an empty draft.
  *
- * Algorithm — three layered demand paths, tried in order:
- *   A. LOCAL SALES         (highest confidence)
- *      Aggregate Square SALE events at the selected market in the window.
- *   B. LOCAL DISPATCHES    (medium confidence — proxy for what sold)
- *      When SALE data is thin, fall back to what we shipped to this market
- *      in the same window. Markets order what they can sell, so dispatch
- *      history is a fair proxy — noisier, but honest.
- *   C. CROSS-MARKET AGGREGATE (low confidence — the "new market" case)
- *      When A and B are both empty (fresh market, or the market opened
- *      after our data starts), aggregate demand across every OTHER market
- *      in the window. Every line's rationale calls this out explicitly so
- *      nobody mistakes the guess for measured local data.
+ * ## Demand ladder
  *
- * Then:
- *   4. Query current warehouse on-hand per warehouseVariant. Hard cap.
- *   5. Query competing demand: DRAFT + OPEN request lines at OTHER
- *      locations, grouped by variation.
- *   6. Compute per-variation target qty per mode.
- *   7. Split each variation's qty across colours in proportion to the
- *      dispatch mix at this market (or all markets if we're inferring).
- *   8. Cap each colour at its warehouseVariant on-hand.
- *   9. Discount for cross-location competing demand (proportional).
- *   10. Emit per-line confidence flag so a reviewer sees which lines to
- *       eyeball more carefully.
+ * The engine never dead-ends. It walks down a ladder of demand signals and
+ * uses the first rung that produces anything, recording which rung it landed
+ * on so the UI can say so out loud:
  *
- * Optional category filter:
- *   The operator can pass `categoryIds` to restrict the suggestion to
- *   variations whose ItemGroup is in one of those categories OR any
- *   descendant (the tree is walked top-down). Filter applies before the
- *   target math so a filtered rerun is cheap.
+ *   1. LOCAL_SALES          this market's sales inside the chosen window
+ *   2. LOCAL_SALES_WIDENED  same, over all available history (the chosen
+ *                           window was outside the season / before backfill)
+ *   3. CROSS_MARKET         other active markets' sales in the window,
+ *                           averaged per market (the "new market" case)
+ *   4. CROSS_MARKET_WIDENED same, over all available history
+ *   5. WAREHOUSE_STOCK      nothing has ever sold in scope; size the list
+ *                           from what is physically in the warehouse
  *
- * Reliability guardrails:
- *   - Sanity cap: qty per line never exceeds 3× the local baseline unless
- *     the operator explicitly asked for it via CUSTOM_UNITS.
- *   - Confidence per line: HIGH / MEDIUM / LOW based on which demand path
- *     produced the number.
- *   - Never returns 0 — a line either has a positive qty or is omitted
- *     entirely. The UI only shows things the engine believes in.
+ * A date range with no sales in it therefore produces a list plus an
+ * explanation, never an empty screen.
+ *
+ * ## Pack shape
+ *
+ * Raw arithmetic produces numbers like 21 and 1. Neither is a pack. Every
+ * final quantity is rounded to a multiple of `roundToNearest` (default 5)
+ * and must clear `minPackQty` (default 5):
+ *   - real-but-short demand (it rounds up to at least one pack) is raised
+ *     to the minimum when stock allows;
+ *   - demand too small to round up to a pack at all is dropped, never
+ *     bumped. Otherwise a style selling 3 units across 10 colours would
+ *     ship 10 minimum packs;
+ *   - budget modes drop the whole sub-minimum tail and redistribute its
+ *     budget across the survivors, so the dollar/unit target stays honest;
+ *   - a line the warehouse cannot fill to the minimum is dropped and
+ *     counted, rather than shipped as a token single unit.
+ *
+ * ## Shelf buffer
+ *
+ * A revenue target is a sell-through goal. Shipping exactly the units that
+ * reach it leaves an empty table on the last day of the market, so the
+ * target is multiplied by `1 + shelfBufferPct/100` before allocation
+ * (default 20% on revenue mode, 0 where the operator typed explicit units).
+ *
+ * ## Warehouse safety
+ *
+ *   - Hard cap at physical on-hand, per SKU.
+ *   - Cross-market fair share: a market's slice of a product's stock is
+ *     proportional to its slice of that product's demand, at both family
+ *     and colour grain, so the first market to hit Generate can't drain the
+ *     warehouse.
+ *   - Other markets' DRAFT/OPEN request lines are subtracted first.
+ *
+ * Every line carries `steps` (the arithmetic in order), `bindingConstraint`
+ * (which rule actually set the number) and `confidenceReason`, and the run
+ * carries an `explain` block naming the data source, the window actually
+ * used, and the specific markets that contributed.
  */
 @Injectable()
 export class PackingListSuggestionService {
@@ -78,107 +100,80 @@ export class PackingListSuggestionService {
     })
     if (!warehouse) throw new NotFoundException('no WAREHOUSE location configured')
 
-    const window = resolveLastYearWindow(input, location.seasonStart, location.seasonEnd)
+    const shelfBufferPct = input.shelfBufferPct ?? defaultShelfBufferPct(input.targetMode)
+    const roundToNearest = input.roundToNearest ?? DEFAULT_ROUND_TO_NEAREST
+    const minPackQty = input.minPackQty ?? DEFAULT_MIN_PACK_QTY
+    const isBudgetMode =
+      input.targetMode === 'CUSTOM_UNITS' ||
+      input.targetMode === 'CUSTOM_REVENUE' ||
+      input.targetMode === 'INITIAL_SHIPMENT'
+
+    const windowRequested = resolveLastYearWindow(input, location.seasonStart, location.seasonEnd)
     const notes: string[] = []
 
-    // Optional category filter — walk the tree down from the chosen roots
+    // Optional category filter. Walk the tree down from the chosen roots
     // and collect every descendant category. Variations whose ItemGroup is
     // in that descendant set survive; everything else is skipped before we
     // do any target math.
     const allowedVariationIds = await this.resolveCategoryFilter(input.categoryIds)
     if (allowedVariationIds && allowedVariationIds.size === 0) {
-      notes.push('No variations match the selected categories.')
-      return emptyResult(input, window, notes)
+      notes.push('No products match the categories you picked, so there is nothing to suggest. Clear the category filter or pick a different group.')
+      return emptyResult(input, windowRequested, notes, {
+        demandSource: 'WAREHOUSE_STOCK',
+        headline: 'No products matched the selected categories.',
+        steps: ['The category filter excluded every product in the catalog.'],
+        targetSummary: 'No products in scope',
+        windowRequested,
+        windowUsed: windowRequested,
+        windowWidened: false,
+        sourceMarkets: [],
+        settings: { shelfBufferPct, roundToNearest, minPackQty },
+        budget: null,
+        droppedBelowMinimum: 0,
+      })
     }
     if (allowedVariationIds && input.categoryIds) {
       notes.push(
-        `Filtered to ${allowedVariationIds.size} variation(s) inside the selected ${input.categoryIds.length} categor${input.categoryIds.length === 1 ? 'y' : 'ies'} (walking the tree down to children).`,
+        `Filtered to ${allowedVariationIds.size} product${allowedVariationIds.size === 1 ? '' : 's'} inside the selected ${input.categoryIds.length} categor${input.categoryIds.length === 1 ? 'y' : 'ies'} (including everything nested underneath).`,
       )
     }
 
-    // ---- LOCAL SALES — the ONLY demand signal ------------------------
-    // Family-level SALEs at this location. Sales are stored as negative
-    // quantity (a sale removes stock); we flip sign to expose units sold.
-    const localSalesByVariation = await this.groupSalesByVariation(
-      { locationId: input.locationId, window, allowedVariationIds },
-    )
+    // ---- Demand ladder ------------------------------------------------
+    const demand = await this.resolveDemand({
+      locationId: input.locationId,
+      warehouseId: warehouse.id,
+      windowRequested,
+      allowedVariationIds,
+    })
+    const {
+      source,
+      windowUsed,
+      demandByVariation,
+      colourSplitByVariation,
+      sourceMarkets,
+      marketCount,
+    } = demand
+    const usedCrossMarket = source === 'CROSS_MARKET' || source === 'CROSS_MARKET_WIDENED'
+    const windowWidened =
+      windowUsed.start.getTime() !== windowRequested.start.getTime() ||
+      windowUsed.end.getTime() !== windowRequested.end.getTime()
 
-    // Per-colour SALEs — used to split family targets across colours.
-    // Only picks up SALE rows that carry `warehouseVariantId`, i.e.
-    // Square catalog mapped per-SKU. Families mapped at family level
-    // only have no per-colour signal and fall back to even split.
-    const localSalesByColour = await this.groupSalesByVariantColour(
-      { locationId: input.locationId, window, allowedVariationIds },
-    )
-
-    // Family-level demand map — SALES ONLY. No dispatch fallback. A
-    // variation that never sold at this market gets no line (or picks
-    // up cross-market inference below if the WHOLE market is empty).
-    const demandByVariation = new Map<string, number>()
-    for (const [vId, sold] of localSalesByVariation.entries()) {
-      if (sold > 0) demandByVariation.set(vId, sold)
-    }
-
-    // ---- CROSS-MARKET INFERENCE (the "new market" case) --------------
-    // Kicks in ONLY when this market has no local SALES for anything.
-    // Uses sales from other markets — no dispatch fallback. Undershoots
-    // by dividing by market count so a new market gets a cautious
-    // opening list, not the sum of every other market's demand.
-    let usedCrossMarket = false
-    let crossMarketSalesByColour: Map<string, Map<string, number>> = new Map()
-    if (demandByVariation.size === 0) {
-      const crossSales = await this.groupSalesByVariation(
-        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
-      )
-      crossMarketSalesByColour = await this.groupSalesByVariantColour(
-        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
-      )
-      if (crossSales.size > 0) {
-        const marketCount = await this.countOtherMarkets(input.locationId)
-        for (const [vId, sold] of crossSales.entries()) {
-          if (sold <= 0) continue
-          const perMarket = Math.max(1, Math.round(sold / Math.max(1, marketCount)))
-          demandByVariation.set(vId, perMarket)
-        }
-      }
-      usedCrossMarket = demandByVariation.size > 0
-      if (usedCrossMarket) {
-        notes.push(
-          `${location.name} has no local sales in this window. Estimated demand from other markets' average — treat every line as a starting point, not a prediction. Every line is marked LOW confidence.`,
-        )
-      }
-    }
 
     if (demandByVariation.size === 0) {
-      notes.push(
-        `No sales data anywhere in the window ${window.start.toISOString().slice(0, 10)} → ${window.end.toISOString().slice(0, 10)}. If Square history has not been backfilled, run the backfill CLI first.`,
-      )
-      return emptyResult(input, window, notes)
-    }
-
-    // Colour split source — sales only, priority chain per family:
-    //   1. Local per-colour SALES     (best — what customers bought)
-    //   2. Cross-market per-colour SALES (new-market case only)
-    //   3. Even split across colours (in the line-build loop below)
-    //
-    // No dispatch fallback anywhere — the operator asked for a pure
-    // sales-based recommendation. Families whose Square catalog is
-    // mapped at family level (no per-colour SALE granularity) fall to
-    // even split, which is honest about the missing data.
-    const colourSplitSourceByVariation = new Map<string, Map<string, number>>()
-    const colourSplitProvenance = new Map<string, 'LOCAL_SALES' | 'CROSS_SALES'>()
-    const variationIdsForSplit = new Set<string>([
-      ...localSalesByColour.keys(),
-      ...(usedCrossMarket ? crossMarketSalesByColour.keys() : []),
-    ])
-    for (const vId of variationIdsForSplit) {
-      if (!usedCrossMarket && localSalesByColour.has(vId)) {
-        colourSplitSourceByVariation.set(vId, localSalesByColour.get(vId)!)
-        colourSplitProvenance.set(vId, 'LOCAL_SALES')
-      } else if (usedCrossMarket && crossMarketSalesByColour.has(vId)) {
-        colourSplitSourceByVariation.set(vId, crossMarketSalesByColour.get(vId)!)
-        colourSplitProvenance.set(vId, 'CROSS_SALES')
-      }
+      notes.push('There is no sales history and no warehouse stock for the selected products, so there is nothing to pack.')
+      return emptyResult(input, windowRequested, notes, {
+        demandSource: source,
+        headline: 'No sales history and no warehouse stock, so there is nothing to suggest.',
+        steps: ['Checked this market’s sales, every other market’s sales, and warehouse stock. All three came back empty.'],
+        targetSummary: 'Nothing to allocate',
+        windowRequested,
+        windowUsed,
+        windowWidened,
+        sourceMarkets,
+        settings: { shelfBufferPct, roundToNearest, minPackQty },
+        budget: null,
+        droppedBelowMinimum: 0,
+      })
     }
 
     // ---- Warehouse cap + competing demand -----------------------------
@@ -226,53 +221,36 @@ export class PackingListSuggestionService {
       competingByFamily.set(line.variationId, (competingByFamily.get(line.variationId) ?? 0) + line.qtyRequested)
     }
 
-    // ---- Cross-market fair-share -------------------------------------
-    // Per-family sales at OTHER markets in the same window. Used to
-    // compute this market's fair share of warehouse stock: a product
-    // that sells everywhere shouldn't have the first market to generate
-    // drain the warehouse. Instead each market's demand competes for a
-    // slice of on-hand proportional to its own demand.
+    // ---- Cross-market fair share --------------------------------------
+    // A product that sells everywhere shouldn't be drained by whichever
+    // market happens to hit Generate first. Each market competes for a
+    // slice of on-hand proportional to its own share of demand, computed
+    // at both family and colour grain.
     //
-    // Skipped in the cross-market-inference case (usedCrossMarket=true):
-    // this market has no local sales by definition, so its "fair share"
-    // would collapse to 0. Leave the allocation alone — the whole line
-    // is already marked LOW confidence.
+    // Skipped when demand itself came from other markets: this market has
+    // no local sales by definition, so its "fair share" would collapse to
+    // zero and suppress the whole list.
     const otherMarketDemandByFamily = new Map<string, number>()
-    // Per-COLOUR sales at other markets, same window — lets the per-SKU
-    // cap below use a real per-colour fair share instead of applying the
-    // family-wide average to every colour uniformly. Without this, a
-    // colour that ONLY this market ever sells would be needlessly
-    // throttled by a family average dragged down by other colours that
-    // are popular elsewhere; conversely a colour that's a bestseller at
-    // every market wouldn't be restrained enough by the family average
-    // alone. See the per-colour cap below for how this is used.
     const otherMarketDemandByColour = new Map<string, Map<string, number>>()
-    if (!usedCrossMarket && variationIds.length > 0) {
+    if (!usedCrossMarket && source !== 'WAREHOUSE_STOCK' && variationIds.length > 0) {
       const otherMarketSales = await this.groupSalesByVariation(
-        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
+        { locationIdNot: input.locationId, kind: 'MARKET', window: windowUsed, allowedVariationIds },
       )
       for (const [vId, sold] of otherMarketSales.entries()) {
         if (sold > 0) otherMarketDemandByFamily.set(vId, sold)
       }
       const otherMarketColourSales = await this.groupSalesByVariantColour(
-        { locationIdNot: input.locationId, kind: 'MARKET', window, allowedVariationIds },
+        { locationIdNot: input.locationId, kind: 'MARKET', window: windowUsed, allowedVariationIds },
       )
       for (const [vId, colourMap] of otherMarketColourSales.entries()) {
         otherMarketDemandByColour.set(vId, colourMap)
       }
     }
 
-    // Price lookup for CUSTOM_REVENUE. Uses `WarehouseVariant.unitCostCents`
-    // from our own catalog — no Square dependency, no reliance on a
-    // Square mapping being in place. Family-level price = average of the
-    // family's warehouse variants that have a price set (colours in the
-    // same family typically share the same cost, but averaging tolerates
-    // per-colour price differences without any one colour dominating).
+    // Price lookup for CUSTOM_REVENUE, from our own catalog, with no
+    // Square dependency. Family-level price = mean of the family's priced SKUs.
     const priceCentsByVariation = new Map<string, number>()
     if (input.targetMode === 'CUSTOM_REVENUE') {
-      // We already loaded warehouseVariantsForFamilies for the on-hand
-      // + cap logic below. Reuse the same result to derive prices —
-      // saves an extra round-trip.
       const wvPriced = await this.prisma.warehouseVariant.findMany({
         where: { variationId: { in: variationIds }, unitCostCents: { not: null } },
         select: { variationId: true, unitCostCents: true },
@@ -290,30 +268,21 @@ export class PackingListSuggestionService {
       }
     }
 
-    // Total warehouse stock across candidate variations — used by
-    // INITIAL_SHIPMENT to size the "80–90% of stock" budget.
     const totalWarehouseCandidateStock = [...onHandByWarehouseVariant.values()].reduce((a, b) => a + b, 0)
     const initialShipmentPct = input.initialShipmentPct ?? 85
     const initialShipmentBudget = Math.floor(totalWarehouseCandidateStock * initialShipmentPct / 100)
 
-    // ---- Target math -----------------------------------------------------
-    // CUSTOM_UNITS shares the budget across variations in proportion to
-    // their observed mix — a small item does not steal the whole packing
-    // list from a bestseller.
+    // ---- Target math --------------------------------------------------
     const totalObserved = [...demandByVariation.values()].reduce((a, b) => a + b, 0)
-    // Revenue-mix total in cents = Σ (observed × price). Used by
-    // CUSTOM_REVENUE to allocate dollars proportionally to what actually
-    // drove revenue last year (bestselling low-priced items don't dominate).
     let totalObservedRevenueCents = 0
     for (const [vId, observed] of demandByVariation.entries()) {
-      const price = priceCentsByVariation.get(vId) ?? 0
-      totalObservedRevenueCents += observed * price
+      totalObservedRevenueCents += observed * (priceCentsByVariation.get(vId) ?? 0)
     }
+    const bufferMultiplier = 1 + shelfBufferPct / 100
     const targetByVariation = new Map<string, number>()
-    // Sanity cap: never recommend more than SANITY_MULTIPLIER × observed
-    // baseline unless the operator explicitly asked for a custom budget.
-    // Protects against edge cases where growthPct=500 combines with a
-    // spike that would produce nonsense.
+    // Never recommend more than SANITY_MULTIPLIER × the observed baseline
+    // on a growth extrapolation. Guards against "+500%" on a product that
+    // sold once.
     const SANITY_MULTIPLIER = 3
     for (const [vId, observed] of demandByVariation.entries()) {
       let target = 0
@@ -322,71 +291,62 @@ export class PackingListSuggestionService {
           target = observed
           break
         case 'GROW_PCT': {
-          const raw = Math.round(observed * (1 + (input.growthPct ?? 0) / 100))
-          target = Math.min(raw, Math.round(observed * SANITY_MULTIPLIER))
+          const raw = observed * (1 + (input.growthPct ?? 0) / 100)
+          target = Math.min(raw, observed * SANITY_MULTIPLIER)
           break
         }
         case 'CUSTOM_UNITS': {
           const share = totalObserved > 0 ? observed / totalObserved : 0
-          target = Math.round((input.targetUnits ?? 0) * share)
+          target = (input.targetUnits ?? 0) * share
           break
         }
         case 'CUSTOM_REVENUE': {
-          // Distribute dollars proportionally to last year's revenue mix
-          // (units × price). Then convert this variation's dollar share
-          // back to units using its own price.
+          // Distribute dollars in proportion to last season's revenue mix
+          // (units × price), then convert this product's dollar slice back
+          // to units at its own price.
           const price = priceCentsByVariation.get(vId) ?? 0
-          if (price === 0 || totalObservedRevenueCents === 0) {
-            target = 0
-            break
-          }
+          if (price === 0 || totalObservedRevenueCents === 0) break
           const revenueShare = (observed * price) / totalObservedRevenueCents
           const targetRevenueCents = (input.targetRevenueDollars ?? 0) * 100
-          const dollarsForThis = targetRevenueCents * revenueShare
-          target = Math.round(dollarsForThis / price)
+          target = (targetRevenueCents * revenueShare) / price
           break
         }
         case 'INITIAL_SHIPMENT': {
-          // Distribute the budget by last year's mix. If a market has no
-          // history for a variation but the variation has warehouse stock,
-          // it still gets a share via the cross-market inference tier
-          // that already populated demandByVariation.
           const share = totalObserved > 0 ? observed / totalObserved : 0
-          target = Math.round(initialShipmentBudget * share)
+          target = initialShipmentBudget * share
           break
         }
       }
+      target *= bufferMultiplier
       if (target > 0) targetByVariation.set(vId, target)
     }
 
-    // Surface caveats when a mode ran into missing data.
     if (input.targetMode === 'CUSTOM_REVENUE') {
       const withPriceCount = [...demandByVariation.keys()].filter((id) => priceCentsByVariation.has(id)).length
       const missing = demandByVariation.size - withPriceCount
       if (missing > 0) {
         notes.push(
-          `${missing} variation(s) had no unit price set on their warehouse SKUs and were excluded from the revenue calculation. Fill in "unit cost" on those SKUs in the catalog to include them.`,
+          `${missing} product${missing === 1 ? '' : 's'} had no unit price in the catalog, so they could not be converted from dollars into units and were left out. Set a unit cost on those SKUs to include them.`,
         )
       }
       if (withPriceCount === 0) {
         notes.push(
-          `No unit prices set in the catalog — revenue-target mode cannot allocate. Set unitCostCents on your warehouse variants first.`,
+          'No unit prices are set in the catalog, so a revenue target cannot be converted into units. Set unit costs on your warehouse SKUs first, or use Custom units instead.',
         )
       }
     }
     if (input.targetMode === 'INITIAL_SHIPMENT' && totalWarehouseCandidateStock === 0) {
-      notes.push('No warehouse stock available for the selected categories — nothing to ship.')
+      notes.push('There is no warehouse stock for the selected categories, so an initial shipment cannot be sized.')
     }
 
-    // ---- Build lines -----------------------------------------------------
-    const lines: SuggestionLine[] = []
+    // ---- Candidate lines (unrounded) ----------------------------------
+    const candidates: Candidate[] = []
     for (const [variationId, familyTarget] of targetByVariation.entries()) {
       const wvList = warehouseVariantsByFamily.get(variationId) ?? []
-      if (wvList.length === 0) continue // family with no live SKUs — skip
+      if (wvList.length === 0) continue // family with no live SKUs
 
-      const colourMix = colourSplitSourceByVariation.get(variationId) ?? new Map<string, number>()
+      const colourMix = colourSplitByVariation.get(variationId) ?? new Map<string, number>()
       const mixTotal = [...colourMix.values()].reduce((a, b) => a + b, 0)
-      const colourProv = colourSplitProvenance.get(variationId)
 
       const totalWarehouseOnHandForFamily = wvList.reduce(
         (sum, wv) => sum + (onHandByWarehouseVariant.get(wv.id) ?? 0),
@@ -394,165 +354,201 @@ export class PackingListSuggestionService {
       )
       const competing = competingByFamily.get(variationId) ?? 0
 
-      // Cross-market fair share: this market's slice of warehouse stock
-      // is proportional to its share of demand across every market that
-      // sold this family last season. If a product is popular
-      // everywhere, no one market drains the warehouse — each gets a
-      // proportional cut and there is still stock left when the next
-      // market runs Generate. When this is the only market with demand
-      // (or cross-market inference is active), the share is 1 and
-      // behavior falls back to the existing "cap at what warehouse has"
-      // logic.
       const thisMarketDemand = demandByVariation.get(variationId) ?? 0
       const otherMarketDemand = otherMarketDemandByFamily.get(variationId) ?? 0
       const totalMarketDemand = thisMarketDemand + otherMarketDemand
-      const fairShare = totalMarketDemand > 0 && !usedCrossMarket
+      const fairShare = totalMarketDemand > 0 && otherMarketDemand > 0
         ? thisMarketDemand / totalMarketDemand
         : 1
       const fairAllocation = Math.floor(totalWarehouseOnHandForFamily * fairShare)
       const availableForThisLocation = Math.max(0, fairAllocation - competing)
       const scaleFactor = familyTarget === 0 ? 0 : Math.min(1, availableForThisLocation / familyTarget)
-      const scaledTarget = Math.floor(familyTarget * scaleFactor)
-      if (scaledTarget === 0) continue
 
+      // Split the family target across colours. When we have a real colour
+      // signal (per-SKU sales, or per-SKU stock in the warehouse-only case)
+      // use it; otherwise split evenly and say so.
       const perColourRaw = new Map<string, number>()
-      // Aspirational per-colour target before warehouse/competing caps —
-      // only populated in the direct-colour path so buildRationale can
-      // show "growth target X, capped by warehouse stock" when relevant.
-      const perColourGrownTarget = new Map<string, number>()
-      // MATCH_LAST_YEAR and GROW_PCT compute at the colour level DIRECTLY
-      // when per-colour SALES exist, instead of "family target × colour
-      // mix". Direct per-colour math matches the operator's mental model:
-      // "Black sold 8 last season → suggest 8 Black". The family-then-
-      // split indirection stays for the budget modes (Custom units,
-      // Custom revenue, Initial shipment) where a total pot has to be
-      // distributed proportionally.
-      const useDirectColourSales =
-        (input.targetMode === 'MATCH_LAST_YEAR' || input.targetMode === 'GROW_PCT') &&
-        colourProv === 'LOCAL_SALES' &&
-        mixTotal > 0
-      if (useDirectColourSales) {
-        // Family-wide scaleFactor still applies here — if the warehouse
-        // can't cover the family's total demand for this line's variants,
-        // each colour's raw ask gets scaled down proportionally.
-        for (const wv of wvList) {
-          const colourSold = colourMix.get(wv.id) ?? 0
-          let colourTarget = 0
-          if (input.targetMode === 'MATCH_LAST_YEAR') {
-            colourTarget = colourSold
-          } else {
-            // GROW_PCT — apply growth to each colour's own baseline;
-            // sanity cap at 3× that colour's baseline to catch runaway
-            // "+500%" inputs on a colour that only sold once.
-            const raw = Math.round(colourSold * (1 + (input.growthPct ?? 0) / 100))
-            colourTarget = Math.min(raw, Math.round(colourSold * SANITY_MULTIPLIER))
-          }
-          perColourRaw.set(wv.id, colourTarget * scaleFactor)
-          perColourGrownTarget.set(wv.id, colourTarget)
-        }
-      } else if (mixTotal > 0) {
-        // Budget-mode path: distribute the family scaledTarget across
-        // colours proportionally to the per-colour sales mix (local, or
-        // cross-market when this is a new-market call).
+      const perColourUncapped = new Map<string, number>()
+      if (mixTotal > 0) {
         for (const wv of wvList) {
           const mixQty = colourMix.get(wv.id) ?? 0
-          perColourRaw.set(wv.id, scaledTarget * (mixQty / mixTotal))
+          perColourUncapped.set(wv.id, familyTarget * (mixQty / mixTotal))
+          perColourRaw.set(wv.id, familyTarget * scaleFactor * (mixQty / mixTotal))
         }
       } else {
-        // No colour signal at all — split evenly.
-        const even = scaledTarget / wvList.length
-        for (const wv of wvList) perColourRaw.set(wv.id, even)
+        for (const wv of wvList) {
+          perColourUncapped.set(wv.id, familyTarget / wvList.length)
+          perColourRaw.set(wv.id, (familyTarget * scaleFactor) / wvList.length)
+        }
       }
 
       for (const wv of wvList) {
         const raw = perColourRaw.get(wv.id) ?? 0
+        const uncapped = perColourUncapped.get(wv.id) ?? 0
+        if (uncapped <= 0) continue
         const onHand = onHandByWarehouseVariant.get(wv.id) ?? 0
-        const lastYearSoldForColour = colourMix.get(wv.id) ?? 0
+        const lastYearSoldForColour = Math.round(colourMix.get(wv.id) ?? 0)
 
-        // Per-colour fair-share cap: this market's slice of THIS SPECIFIC
-        // colour's on-hand, not just the family aggregate. Without this, a
-        // market whose family-level ask already fits under its fair share
-        // (scaleFactor === 1, i.e. no family-level discount applied) could
-        // still claim 100% of one popular colour's physical stock — fully
-        // draining that SKU for every other market even though the family
-        // rationale claims only a modest fair share.
-        //
-        // Prefer a REAL per-colour ratio (this market's colour sales vs.
-        // every other market's colour sales for the same SKU) over the
-        // family-wide average whenever we actually have that signal
-        // (mixTotal > 0, i.e. local per-colour SALE data exists). This
-        // matters in both directions: a colour that ONLY this market
-        // ever sells shouldn't be throttled by a family average dragged
-        // down by sibling colours that are popular elsewhere (nobody
-        // else needs it, so there's nothing to protect); a colour that's
-        // a bestseller at every market shouldn't be under-restrained
-        // just because the family average looks generous. Falls back to
-        // the family-level ratio when there's no colour-level signal to
-        // trust (mixTotal === 0, or no cross-market data for this SKU).
+        // Per-colour fair share: even when the family total has headroom,
+        // one market must not claim 100% of a single popular colour. Use
+        // the real per-colour ratio where we have colour-level sales from
+        // other markets, so a colour only this market sells isn't
+        // throttled by a family average dragged down by its siblings.
         let colourFairShare = fairShare
         if (mixTotal > 0 && fairShare < 1) {
           const otherColourSold = otherMarketDemandByColour.get(variationId)?.get(wv.id) ?? 0
           const colourTotalDemand = lastYearSoldForColour + otherColourSold
-          if (colourTotalDemand > 0) {
-            colourFairShare = lastYearSoldForColour / colourTotalDemand
-          }
+          if (colourTotalDemand > 0) colourFairShare = lastYearSoldForColour / colourTotalDemand
         }
-        // Floored at 1 unit (when there's real demand and real stock) so
-        // a low fair-share percentage doesn't round a genuinely-selling
-        // colour down to zero.
-        const perColourFairCap = colourFairShare < 1
-          ? Math.min(onHand, Math.max(raw > 0 && onHand > 0 ? 1 : 0, Math.floor(onHand * colourFairShare)))
+        const colourCap = colourFairShare < 1
+          ? Math.min(onHand, Math.floor(onHand * colourFairShare))
           : onHand
-        const qty = Math.round(Math.min(raw, perColourFairCap))
-        if (qty <= 0) continue
 
-        const confidence = decideConfidence({
-          usedCrossMarket,
-          observed: demandByVariation.get(variationId) ?? 0,
-          hasColourMix: mixTotal > 0,
-          targetMode: input.targetMode,
-          growthPct: input.growthPct,
-        })
-
-        lines.push({
+        candidates.push({
           variationId,
           warehouseVariantId: wv.id,
-          qtyRecommended: qty,
-          lastYearSold: lastYearSoldForColour || Math.round(demandByVariation.get(variationId) ?? 0),
-          familyLastYearSold: Math.round(demandByVariation.get(variationId) ?? 0),
-          warehouseOnHand: onHand,
-          otherLocationDemand: competing,
-          rationale: buildRationale({
-            lastYearSoldForColour,
-            colourSharePct: mixTotal > 0 ? Math.round((lastYearSoldForColour / mixTotal) * 100) : null,
-            colourSource: colourProv ?? null,
-            familyObserved: demandByVariation.get(variationId) ?? 0,
-            onHand,
-            competing,
-            targetMode: input.targetMode,
-            growthPct: input.growthPct,
-            wasCrossMarket: usedCrossMarket,
-            marketName: location.name,
-            fairSharePct: fairShare < 1 ? Math.round(fairShare * 100) : null,
-            fairAllocation: fairShare < 1 ? fairAllocation : null,
-            totalWarehouseOnHandForFamily,
-            grownTargetQty: perColourGrownTarget.get(wv.id),
-            recommendedQty: qty,
-            colourFairCap: colourFairShare < 1 && perColourFairCap < onHand ? perColourFairCap : null,
-            colourFairSharePct: colourFairShare < 1 ? Math.round(colourFairShare * 100) : null,
-          }),
-          confidence,
+          natural: raw,
+          uncapped,
+          cap: colourCap,
+          onHand,
+          competing,
+          fairShare,
+          fairAllocation,
+          colourFairShare,
+          totalWarehouseOnHandForFamily,
+          familyObserved: thisMarketDemand,
+          lastYearSoldForColour,
+          colourSharePct: mixTotal > 0 ? Math.round((lastYearSoldForColour / mixTotal) * 100) : null,
+          hasColourMix: mixTotal > 0,
+          priceCents: priceCentsByVariation.get(variationId) ?? null,
         })
       }
     }
 
-    // Sort by real market demand first — highest-selling PRODUCTS lead
-    // regardless of target mode. Then by recommended qty as a tie-breaker
-    // (Custom-revenue can flip qty ordering relative to demand when
-    // prices differ; family demand is the honest priority). Finally by
-    // colour qty within a family, so the UI shows a family's bestselling
-    // colours near the top when expanded. Includes variationId as the
-    // final tiebreaker for deterministic ordering across identical inputs.
+    // ---- Pack shaping: minimum, budget fill, rounding ------------------
+    // A budget mode has to actually hit its budget. The first version scaled
+    // the survivors up by one flat factor and then re-capped them, which lost
+    // the shortfall twice over: once because the factor was measured in units
+    // even when the budget was in dollars, and again because every line that
+    // hit its stock cap silently dropped its share with no second pass. A
+    // $25,000 goal came out at $18,481. This does a proper water fill
+    // instead, so capped lines stay put and the remainder keeps flowing to
+    // the lines that still have room.
+    const unitValueCents = (c: Candidate): number =>
+      input.targetMode === 'CUSTOM_REVENUE' ? (c.priceCents ?? 0) : 1
+
+    // The budget, in whatever unit the fill measures, with the shelf buffer
+    // already applied. This is the value we are trying to reach.
+    const budgetValue = !isBudgetMode
+      ? 0
+      : input.targetMode === 'CUSTOM_REVENUE'
+        ? (input.targetRevenueDollars ?? 0) * 100 * bufferMultiplier
+        : input.targetMode === 'CUSTOM_UNITS'
+          ? (input.targetUnits ?? 0) * bufferMultiplier
+          : initialShipmentBudget * bufferMultiplier
+
+    // Anything the warehouse cannot fill to a whole minimum pack is out
+    // before we start. A picking sheet line for 1 or 2 units is not a pack.
+    const consideredCount = candidates.filter((c) => c.uncapped > 0).length
+    let survivors = candidates.filter((c) => c.uncapped > 0 && c.cap >= minPackQty)
+
+    let allocation = new Map<string, number>()
+    if (isBudgetMode) {
+      // Fill, drop whatever still lands under the minimum, then fill again so
+      // the dropped tail's budget genuinely reaches the lines that remain.
+      for (let round = 0; round < 3; round++) {
+        allocation = fillToBudget(survivors, budgetValue, unitValueCents)
+        const kept = survivors.filter((c) => (allocation.get(c.warehouseVariantId) ?? 0) >= minPackQty)
+        if (kept.length === 0 || kept.length === survivors.length) break
+        survivors = kept
+      }
+    } else {
+      for (const c of survivors) {
+        allocation.set(c.warehouseVariantId, Math.min(c.natural, c.cap))
+      }
+    }
+
+    // Round to pack sizes, then close the gap rounding just opened.
+    const qtyByVariant = new Map<string, number>()
+    for (const c of survivors) {
+      const qty = roundPack(allocation.get(c.warehouseVariantId) ?? 0, c.cap, roundToNearest, minPackQty)
+      if (qty > 0) qtyByVariant.set(c.warehouseVariantId, qty)
+    }
+    const finalSurvivors = survivors.filter((c) => qtyByVariant.has(c.warehouseVariantId))
+    if (isBudgetMode && budgetValue > 0 && finalSurvivors.length > 0) {
+      balanceToBudget({
+        list: finalSurvivors,
+        qtyByVariant,
+        budgetValue,
+        unitValue: unitValueCents,
+        step: roundToNearest,
+        minQty: minPackQty,
+      })
+    }
+
+    const lines: SuggestionLine[] = []
+    for (const c of finalSurvivors) {
+      const qty = qtyByVariant.get(c.warehouseVariantId) ?? 0
+      if (qty <= 0) continue
+      const beforeRounding = allocation.get(c.warehouseVariantId) ?? 0
+
+      const bindingConstraint = decideConstraint({
+        candidate: c,
+        beforeRounding,
+        finalQty: qty,
+        isBudgetMode,
+        minPackQty,
+      })
+      const { level, reason } = decideConfidence({
+        source,
+        observed: c.familyObserved,
+        hasColourMix: c.hasColourMix,
+        sourceMarketCount: sourceMarkets.length,
+        targetMode: input.targetMode,
+        growthPct: input.growthPct,
+        marketName: location.name,
+      })
+
+      lines.push({
+        variationId: c.variationId,
+        warehouseVariantId: c.warehouseVariantId,
+        qtyRecommended: qty,
+        lastYearSold: c.lastYearSoldForColour || Math.round(c.familyObserved),
+        familyLastYearSold: Math.round(c.familyObserved),
+        warehouseOnHand: c.onHand,
+        otherLocationDemand: c.competing,
+        demandTarget: Math.round(c.uncapped),
+        bindingConstraint,
+        steps: buildSteps({
+          candidate: c,
+          source,
+          marketName: location.name,
+          marketCount,
+          sourceMarketCount: sourceMarkets.length,
+          targetMode: input.targetMode,
+          growthPct: input.growthPct,
+          shelfBufferPct,
+          beforeRounding,
+          finalQty: qty,
+          roundToNearest,
+          minPackQty,
+          targetRevenueDollars: input.targetRevenueDollars,
+        }),
+        rationale: buildRationale({
+          candidate: c,
+          source,
+          marketName: location.name,
+          finalQty: qty,
+          bindingConstraint,
+        }),
+        confidence: level,
+        confidenceReason: reason,
+      })
+    }
+
+    // Highest-demand products lead, then recommended qty, then the
+    // bestselling colour inside a family. variationId is the final
+    // tiebreaker so identical inputs always produce identical ordering.
     lines.sort((a, b) => {
       if (b.familyLastYearSold !== a.familyLastYearSold) return b.familyLastYearSold - a.familyLastYearSold
       if (b.qtyRecommended !== a.qtyRecommended) return b.qtyRecommended - a.qtyRecommended
@@ -561,42 +557,322 @@ export class PackingListSuggestionService {
     })
 
     const totalRecommended = lines.reduce((sum, l) => sum + l.qtyRecommended, 0)
-    if (input.targetMode === 'CUSTOM_UNITS' && input.targetUnits && totalRecommended < input.targetUnits) {
+    const droppedBelowMinimum = Math.max(0, consideredCount - lines.length)
+
+
+    // What the run actually managed to allocate, in the budget's own
+    // currency, so the panel can state the goal, the amount we set out to
+    // ship, and the amount we reached as three separate numbers. Reporting
+    // only the first and last is what made the shelf buffer confusing.
+    let allocatedValue = 0
+    for (const l of lines) {
+      allocatedValue += l.qtyRecommended *
+        (input.targetMode === 'CUSTOM_REVENUE' ? (priceCentsByVariation.get(l.variationId) ?? 0) : 1)
+    }
+    const bufferSuffix = shelfBufferPct > 0 ? ` (goal + ${shelfBufferPct}% shelf buffer)` : ''
+    const shortfallReason = (short: string) =>
+      `${short} short. Every remaining item is already at the most the warehouse can spare for this market, so the only way to close the gap is more stock.`
+
+    let budget: SuggestionExplain['budget'] = null
+    if (input.targetMode === 'CUSTOM_REVENUE' && input.targetRevenueDollars) {
+      const sendCents = input.targetRevenueDollars * 100 * bufferMultiplier
+      const gapCents = sendCents - allocatedValue
+      budget = {
+        label: 'Revenue target',
+        targetDisplay: `$${input.targetRevenueDollars.toLocaleString('en-US')} sales goal`,
+        sendTargetDisplay: `$${Math.round(sendCents / 100).toLocaleString('en-US')} of stock to send${bufferSuffix}`,
+        allocatedDisplay: `$${Math.round(allocatedValue / 100).toLocaleString('en-US')} (${totalRecommended.toLocaleString('en-US')} units)`,
+        shortfall: gapCents > sendCents * 0.01
+          ? shortfallReason(`$${Math.round(gapCents / 100).toLocaleString('en-US')}`)
+          : null,
+      }
       notes.push(
-        `Target was ${input.targetUnits} units but only ${totalRecommended} could be allocated — warehouse stock is the bottleneck.`,
+        'This is the stock the market needs on hand to sell that much, not a promise that it will.',
       )
+    }
+    if (input.targetMode === 'CUSTOM_UNITS' && input.targetUnits) {
+      const sendUnits = Math.round(input.targetUnits * bufferMultiplier)
+      const gap = sendUnits - totalRecommended
+      budget = {
+        label: 'Unit target',
+        targetDisplay: `${input.targetUnits.toLocaleString('en-US')} units`,
+        sendTargetDisplay: `${sendUnits.toLocaleString('en-US')} units to send${bufferSuffix}`,
+        allocatedDisplay: `${totalRecommended.toLocaleString('en-US')} units`,
+        shortfall: gap > Math.max(roundToNearest, sendUnits * 0.01)
+          ? shortfallReason(`${gap.toLocaleString('en-US')} units`)
+          : null,
+      }
     }
     if (input.targetMode === 'INITIAL_SHIPMENT') {
-      notes.push(
-        `Initial shipment sized as ${initialShipmentPct}% of warehouse stock (${initialShipmentBudget} of ${totalWarehouseCandidateStock} units). Ships ${totalRecommended} units after applying cross-market allocation and stock caps.`,
-      )
-    }
-    if (input.targetMode === 'CUSTOM_REVENUE' && input.targetRevenueDollars) {
-      // Compute recovered revenue so the operator can see how close we
-      // got to their dollar target.
-      let recoveredCents = 0
-      for (const l of lines) {
-        const price = priceCentsByVariation.get(l.variationId) ?? 0
-        recoveredCents += l.qtyRecommended * price
+      const sendUnits = Math.round(initialShipmentBudget * bufferMultiplier)
+      const gap = sendUnits - totalRecommended
+      budget = {
+        label: 'Initial shipment',
+        targetDisplay: `${initialShipmentPct}% of ${totalWarehouseCandidateStock.toLocaleString('en-US')} units in stock`,
+        sendTargetDisplay: `${sendUnits.toLocaleString('en-US')} units to send${bufferSuffix}`,
+        allocatedDisplay: `${totalRecommended.toLocaleString('en-US')} units`,
+        shortfall: gap > Math.max(roundToNearest, sendUnits * 0.01)
+          ? shortfallReason(`${gap.toLocaleString('en-US')} units`)
+          : null,
       }
-      const recoveredDollars = Math.round(recoveredCents / 100)
-      notes.push(
-        `Revenue target $${input.targetRevenueDollars} → allocated approximately $${recoveredDollars} at your catalog unit prices.`,
-      )
+    }
+
+    const explain: SuggestionExplain = {
+      demandSource: source,
+      headline: buildHeadline({
+        source,
+        marketName: location.name,
+        sourceMarketCount: sourceMarkets.length,
+        windowUsed,
+        totalRecommended,
+        styleCount: new Set(lines.map((l) => l.variationId)).size,
+      }),
+      steps: buildRunSteps({
+        source,
+        marketName: location.name,
+        marketCount,
+        sourceMarkets,
+        windowRequested,
+        windowUsed,
+        windowWidened,
+        targetMode: input.targetMode,
+        growthPct: input.growthPct,
+        targetRevenueDollars: input.targetRevenueDollars,
+        shelfBufferPct,
+        roundToNearest,
+        minPackQty,
+        isBudgetMode,
+        droppedBelowMinimum,
+        totalRecommended,
+      }),
+      targetSummary: buildTargetSummary({
+        targetMode: input.targetMode,
+        growthPct: input.growthPct,
+        targetUnits: input.targetUnits,
+        targetRevenueDollars: input.targetRevenueDollars,
+        initialShipmentPct,
+      }),
+      windowRequested,
+      windowUsed,
+      windowWidened,
+      sourceMarkets,
+      settings: { shelfBufferPct, roundToNearest, minPackQty },
+      budget,
+      droppedBelowMinimum,
     }
 
     return {
       locationId: input.locationId,
       targetMode: input.targetMode,
-      window,
+      window: windowUsed,
       lines,
       totals: {
         variationsCovered: new Set(lines.map((l) => l.variationId)).size,
         totalRecommendedUnits: totalRecommended,
-        totalLastYearUnits: totalObserved,
+        totalLastYearUnits: Math.round(totalObserved),
       },
       notes,
+      explain,
     }
+  }
+
+  /// Walks down the demand ladder and returns the first rung that produces
+  /// anything, along with everything the caller needs to explain it.
+  private async resolveDemand(args: {
+    locationId: string
+    warehouseId: string
+    windowRequested: { start: Date; end: Date }
+    allowedVariationIds?: Set<string>
+  }): Promise<{
+    source: SuggestionDemandSource
+    windowUsed: { start: Date; end: Date }
+    demandByVariation: Map<string, number>
+    colourSplitByVariation: Map<string, Map<string, number>>
+    sourceMarkets: SuggestionSourceMarket[]
+    marketCount: number
+  }> {
+    const { locationId, windowRequested, allowedVariationIds } = args
+    const marketCount = await this.countOtherMarkets(locationId)
+
+    const localIn = async (window: { start: Date; end: Date }) => {
+      const family = await this.groupSalesByVariation({ locationId, window, allowedVariationIds })
+      const positive = new Map<string, number>()
+      for (const [vId, sold] of family.entries()) if (sold > 0) positive.set(vId, sold)
+      return positive
+    }
+
+    // Rung 1: this market's own sales, in the window asked for.
+    const local = await localIn(windowRequested)
+    if (local.size > 0) {
+      return {
+        source: 'LOCAL_SALES',
+        windowUsed: windowRequested,
+        demandByVariation: local,
+        colourSplitByVariation: await this.groupSalesByVariantColour({ locationId, window: windowRequested, allowedVariationIds }),
+        sourceMarkets: [],
+        marketCount,
+      }
+    }
+
+    // The window the operator picked had nothing in it. Rather than
+    // reporting "no sales data found" and stopping, widen to every sale we
+    // hold and try the whole ladder again against that.
+    const fullWindow = await this.fullHistoryWindow(windowRequested)
+
+    // Rung 2: this market's own sales, over all history.
+    if (fullWindow) {
+      const localWide = await localIn(fullWindow)
+      if (localWide.size > 0) {
+        return {
+          source: 'LOCAL_SALES_WIDENED',
+          windowUsed: fullWindow,
+          demandByVariation: localWide,
+          colourSplitByVariation: await this.groupSalesByVariantColour({ locationId, window: fullWindow, allowedVariationIds }),
+          sourceMarkets: [],
+          marketCount,
+        }
+      }
+    }
+
+    // Rungs 3 and 4: other markets' sales, first in the chosen window,
+    // then over all history. Divided by the market count so a brand-new
+    // market gets a cautious opening list rather than the sum of everyone.
+    const crossAttempts: Array<{ window: { start: Date; end: Date }; source: SuggestionDemandSource }> = [
+      { window: windowRequested, source: 'CROSS_MARKET' },
+      ...(fullWindow ? [{ window: fullWindow, source: 'CROSS_MARKET_WIDENED' as const }] : []),
+    ]
+    for (const attempt of crossAttempts) {
+      const crossSales = await this.groupSalesByVariation({
+        locationIdNot: locationId, kind: 'MARKET', window: attempt.window, allowedVariationIds,
+      })
+      const demandByVariation = new Map<string, number>()
+      for (const [vId, sold] of crossSales.entries()) {
+        if (sold <= 0) continue
+        demandByVariation.set(vId, Math.max(1, sold / Math.max(1, marketCount)))
+      }
+      if (demandByVariation.size === 0) continue
+
+      const colourRaw = await this.groupSalesByVariantColour({
+        locationIdNot: locationId, kind: 'MARKET', window: attempt.window, allowedVariationIds,
+      })
+      // Scale the colour mix by the same per-market divisor so the family
+      // total and the colour split describe the same list.
+      const colourSplitByVariation = new Map<string, Map<string, number>>()
+      for (const [vId, mix] of colourRaw.entries()) {
+        const scaled = new Map<string, number>()
+        for (const [wvId, qty] of mix.entries()) scaled.set(wvId, qty / Math.max(1, marketCount))
+        colourSplitByVariation.set(vId, scaled)
+      }
+
+      return {
+        source: attempt.source,
+        windowUsed: attempt.window,
+        demandByVariation,
+        colourSplitByVariation,
+        sourceMarkets: await this.sourceMarketsFor(locationId, attempt.window, allowedVariationIds),
+        marketCount,
+      }
+    }
+
+    // Rung 5: nothing has ever sold in scope. Size the list from physical
+    // warehouse stock so the operator still gets somewhere to start.
+    const stock = await this.warehouseStockAsDemand(args.warehouseId, marketCount, allowedVariationIds)
+    return {
+      source: 'WAREHOUSE_STOCK',
+      windowUsed: fullWindow ?? windowRequested,
+      demandByVariation: stock.byVariation,
+      colourSplitByVariation: stock.byColour,
+      sourceMarkets: [],
+      marketCount,
+    }
+  }
+
+  /// The full span of SALE history we hold, or null when there are no sales
+  /// at all (or the span matches what was already asked for). Used as the
+  /// widened window when the operator's date range turns up empty.
+  private async fullHistoryWindow(
+    requested: { start: Date; end: Date },
+  ): Promise<{ start: Date; end: Date } | null> {
+    const bounds = await this.prisma.ledgerEvent.aggregate({
+      where: { type: 'SALE' },
+      _min: { occurredAt: true },
+      _max: { occurredAt: true },
+    })
+    const min = bounds._min.occurredAt
+    const max = bounds._max.occurredAt
+    if (!min || !max) return null
+    const start = min < requested.start ? min : requested.start
+    const end = max > requested.end ? max : requested.end
+    if (start.getTime() === requested.start.getTime() && end.getTime() === requested.end.getTime()) return null
+    return { start, end }
+  }
+
+  /// Named markets (and their units) behind a cross-market inference.
+  private async sourceMarketsFor(
+    excludeLocationId: string,
+    window: { start: Date; end: Date },
+    allowedVariationIds?: Set<string>,
+  ): Promise<SuggestionSourceMarket[]> {
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['locationId'],
+      _sum: { quantity: true },
+      where: {
+        type: 'SALE',
+        occurredAt: { gte: window.start, lte: window.end },
+        locationId: { not: excludeLocationId },
+        location: { kind: 'MARKET', isActive: true },
+        ...(allowedVariationIds ? { variationId: { in: [...allowedVariationIds] } } : {}),
+      },
+    })
+    const withUnits = rows
+      .map((r) => ({ locationId: r.locationId, unitsSold: Math.max(0, -(r._sum.quantity ?? 0)) }))
+      .filter((r) => r.unitsSold > 0)
+    if (withUnits.length === 0) return []
+    const names = await this.prisma.location.findMany({
+      where: { id: { in: withUnits.map((r) => r.locationId) } },
+      select: { id: true, name: true },
+    })
+    const nameById = new Map(names.map((n) => [n.id, n.name]))
+    return withUnits
+      .map((r) => ({ locationId: r.locationId, name: nameById.get(r.locationId) ?? 'Unknown market', unitsSold: r.unitsSold }))
+      .sort((a, b) => b.unitsSold - a.unitsSold)
+  }
+
+  /// Last-resort demand signal: what is physically in the warehouse, used
+  /// as a proportional weight so a zero-history catalog still produces a
+  /// sensible starting shape instead of an empty screen.
+  private async warehouseStockAsDemand(
+    warehouseId: string,
+    otherMarketCount: number,
+    allowedVariationIds?: Set<string>,
+  ): Promise<{ byVariation: Map<string, number>; byColour: Map<string, Map<string, number>> }> {
+    // Stock is divided evenly between this market and every other active
+    // one. With no sales signal at all there is nothing to say this market
+    // deserves more than an equal share. Without the divisor a
+    // "match last season" run against a zero-history catalog would try to
+    // ship the entire warehouse to whoever generated a list first.
+    const share = Math.max(1, otherMarketCount + 1)
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['variationId', 'warehouseVariantId'],
+      _sum: { quantity: true },
+      where: {
+        locationId: warehouseId,
+        warehouseVariantId: { not: null },
+        ...(allowedVariationIds ? { variationId: { in: [...allowedVariationIds] } } : {}),
+      },
+    })
+    const byVariation = new Map<string, number>()
+    const byColour = new Map<string, Map<string, number>>()
+    for (const row of rows) {
+      if (!row.warehouseVariantId) continue
+      const qty = Math.max(0, row._sum.quantity ?? 0)
+      if (qty === 0) continue
+      byVariation.set(row.variationId, (byVariation.get(row.variationId) ?? 0) + qty / share)
+      const bucket = byColour.get(row.variationId) ?? new Map<string, number>()
+      bucket.set(row.warehouseVariantId, qty / share)
+      byColour.set(row.variationId, bucket)
+    }
+    return { byVariation, byColour }
   }
 
   /// Expands the operator's chosen categoryIds into the set of every
@@ -656,7 +932,7 @@ export class PackingListSuggestionService {
           ? { variationId: { in: [...args.allowedVariationIds] } }
           : {}),
         ...(args.kind
-          // isActive: true — a closed/retired market's historical sales
+          // isActive: true, because a closed market's historical sales
           // must not keep depressing every remaining market's fair share
           // forever. Matches the isActive filter in countOtherMarkets so
           // the fair-share numerator and denominator stay consistent.
@@ -667,12 +943,10 @@ export class PackingListSuggestionService {
     return new Map(rows.map((r) => [r.variationId, Math.max(0, -(r._sum.quantity ?? 0))]))
   }
 
-  /// SALE aggregation at colour grain — only picks up rows where the
-  /// SALE event carries a `warehouseVariantId` (i.e., Square catalog
-  /// mapping is at the per-SKU level, not just family level). This is
-  /// the CORRECT colour signal: what customers actually bought at this
-  /// market, in each colour. Preferred over dispatch mix because
-  /// dispatches tell us what we sent, not what sold.
+  /// SALE aggregation at colour grain. Only picks up rows where the SALE
+  /// event carries a `warehouseVariantId` (i.e. Square catalog mapping is
+  /// per-SKU, not just family level). This is the correct colour signal:
+  /// what customers actually bought, in each colour.
   private async groupSalesByVariantColour(args: {
     locationId?: string
     locationIdNot?: string
@@ -715,10 +989,507 @@ export class PackingListSuggestionService {
   }
 }
 
+/// One (product, colour) pair mid-calculation, before pack shaping. Carries
+/// everything the explanation builders need so the arithmetic can be
+/// replayed for the operator without re-querying anything.
+export interface Candidate {
+  variationId: string
+  warehouseVariantId: string
+  /// Target for this colour after the family-level fair-share scale.
+  natural: number
+  /// Target for this colour before any warehouse or fair-share cap: the
+  /// honest "what this market wants" number.
+  uncapped: number
+  /// Hard ceiling for this colour: its on-hand, narrowed by its fair share.
+  cap: number
+  onHand: number
+  competing: number
+  fairShare: number
+  fairAllocation: number
+  colourFairShare: number
+  totalWarehouseOnHandForFamily: number
+  familyObserved: number
+  lastYearSoldForColour: number
+  colourSharePct: number | null
+  hasColourMix: boolean
+  priceCents: number | null
+}
+
+/// Rounds a quantity into a real pack size: a multiple of `step`, never
+/// below `minQty`, never above what the warehouse can supply. Returns 0 when
+/// the cap cannot support a whole minimum pack, so the caller drops the line
+/// rather than shipping a token unit or two.
+/// Water fill. Scales every line's target by a common factor, re-caps, and
+/// repeats. Lines pinned at their stock cap stay pinned while the rest keep
+/// absorbing what is left of the budget, so the money freed by a capped or
+/// dropped line actually lands somewhere instead of evaporating.
+///
+/// `unitValue` is what one unit of a line is worth in the budget's own
+/// currency: cents for a revenue target, 1 for a unit target. Measuring the
+/// fill in units when the budget is in dollars is precisely what made a
+/// $25,000 goal come out at $18,481.
+export function fillToBudget(
+  list: Candidate[],
+  budgetValue: number,
+  unitValue: (c: Candidate) => number,
+): Map<string, number> {
+  const out = new Map<string, number>()
+  let scale = 1
+  for (let i = 0; i < 30; i++) {
+    let spent = 0
+    let hasHeadroom = false
+    for (const c of list) {
+      const qty = Math.min(c.natural * scale, c.cap)
+      out.set(c.warehouseVariantId, qty)
+      spent += qty * unitValue(c)
+      if (qty < c.cap - 1e-9) hasHeadroom = true
+    }
+    // Done when the budget is met, when every line is pinned at its cap
+    // (genuinely stock-limited), or when there is nothing to scale.
+    if (budgetValue <= 0 || spent <= 0 || !hasHeadroom) break
+    if (spent >= budgetValue * 0.999) break
+    scale *= budgetValue / spent
+  }
+  return out
+}
+
+/// Closes the gap that pack rounding opens. Rounding each line to a multiple
+/// of the step can leave the run either side of the budget; this adds or
+/// removes whole packs until it sits on the target, and never trims below it.
+/// Top-ups go to the highest-demand lines with room left, so closing the gap
+/// does not distort the mix towards whatever happens to be deepest in stock.
+export function balanceToBudget(args: {
+  list: Candidate[]
+  qtyByVariant: Map<string, number>
+  budgetValue: number
+  unitValue: (c: Candidate) => number
+  step: number
+  minQty: number
+}): void {
+  const { list, qtyByVariant, budgetValue, unitValue, step, minQty } = args
+  let value = list.reduce((sum, c) => sum + (qtyByVariant.get(c.warehouseVariantId) ?? 0) * unitValue(c), 0)
+
+  const byDemand = [...list].sort((a, b) => b.natural - a.natural)
+  let guard = 0
+  while (value < budgetValue && guard++ < 500) {
+    let progressed = false
+    for (const c of byDemand) {
+      const qty = qtyByVariant.get(c.warehouseVariantId) ?? 0
+      const maxQty = Math.floor(c.cap / step) * step
+      if (qty + step > maxQty) continue
+      qtyByVariant.set(c.warehouseVariantId, qty + step)
+      value += step * unitValue(c)
+      progressed = true
+      if (value >= budgetValue) break
+    }
+    if (!progressed) break // every line is at its cap: stock is the limit
+  }
+
+  const byQty = [...list].sort(
+    (a, b) => (qtyByVariant.get(b.warehouseVariantId) ?? 0) - (qtyByVariant.get(a.warehouseVariantId) ?? 0),
+  )
+  guard = 0
+  while (guard++ < 500) {
+    let progressed = false
+    for (const c of byQty) {
+      const qty = qtyByVariant.get(c.warehouseVariantId) ?? 0
+      const packValue = step * unitValue(c)
+      if (packValue <= 0) continue
+      if (value - packValue < budgetValue) continue // would drop under target
+      if (qty - step < minQty) continue
+      qtyByVariant.set(c.warehouseVariantId, qty - step)
+      value -= packValue
+      progressed = true
+    }
+    if (!progressed) break
+  }
+}
+
+export function roundPack(qty: number, cap: number, step: number, minQty: number): number {
+  if (qty <= 0 || cap <= 0) return 0
+  let rounded = Math.round(qty / step) * step
+  // Demand that doesn't even round up to a single pack is dropped, never
+  // bumped. Bumping here would be actively wrong: a style that sold 3 units
+  // split across 10 colours would become 10 × the minimum, shipping fifty
+  // units of something that sells three.
+  if (rounded <= 0) return 0
+  if (rounded < minQty) rounded = minQty
+  if (rounded > cap) rounded = Math.floor(cap / step) * step
+  if (rounded < minQty) return cap >= minQty ? minQty : 0
+  return rounded
+}
+
+function decideConstraint(args: {
+  candidate: Candidate
+  beforeRounding: number
+  finalQty: number
+  isBudgetMode: boolean
+  minPackQty: number
+}): SuggestionConstraint {
+  const c = args.candidate
+  const wasCapped = c.natural > c.cap + 0.001 || c.uncapped > c.cap + 0.001
+  if (wasCapped) {
+    // Which ceiling actually bit: physical stock, other markets' open
+    // requests, or the fair-share split.
+    if (c.cap >= c.onHand) return 'WAREHOUSE_STOCK'
+    if (c.competing > 0 && c.fairAllocation - c.competing < c.uncapped) return 'OTHER_REQUESTS'
+    return 'FAIR_SHARE'
+  }
+  if (args.finalQty === args.minPackQty && args.beforeRounding < args.minPackQty) return 'MIN_PACK'
+  if (Math.abs(args.finalQty - args.beforeRounding) > 0.001 && args.isBudgetMode) return 'PACK_ROUNDING'
+  return args.isBudgetMode ? 'BUDGET' : 'DEMAND'
+}
+
+function decideConfidence(args: {
+  source: SuggestionDemandSource
+  observed: number
+  hasColourMix: boolean
+  sourceMarketCount: number
+  targetMode: GenerateSuggestionInput['targetMode']
+  growthPct?: number
+  marketName: string
+}): { level: SuggestionConfidence; reason: string } {
+  if (args.source === 'WAREHOUSE_STOCK') {
+    return {
+      level: 'LOW',
+      reason: 'No sales history exists for this product anywhere, so the number comes from warehouse stock alone.',
+    }
+  }
+  if (args.source === 'CROSS_MARKET' || args.source === 'CROSS_MARKET_WIDENED') {
+    // A guess built on many markets and real volume is a better guess than
+    // one built on a single market's handful of sales, so grade it
+    // instead of stamping every new-market line LOW.
+    if (args.sourceMarketCount >= 3 && args.observed >= 20) {
+      return {
+        level: 'MEDIUM',
+        reason: `Estimated from ${args.sourceMarketCount} other markets with solid volume. A reasonable opening guess for ${args.marketName}, but not measured here.`,
+      }
+    }
+    return {
+      level: 'LOW',
+      reason: `Estimated from ${args.sourceMarketCount} other market${args.sourceMarketCount === 1 ? '' : 's'} with thin volume. ${args.marketName} has no sales of its own yet, so treat this as a starting point.`,
+    }
+  }
+  if (args.source === 'LOCAL_SALES_WIDENED') {
+    return {
+      level: 'MEDIUM',
+      reason: 'Based on this market’s real sales, but they fall outside the date range you picked, so the window was widened to find them.',
+    }
+  }
+  if (args.observed < 5) {
+    return {
+      level: 'MEDIUM',
+      reason: `Only ${Math.round(args.observed)} unit${Math.round(args.observed) === 1 ? '' : 's'} of this style sold here in the window. Real data, but too thin to lean on hard.`,
+    }
+  }
+  if (args.targetMode === 'GROW_PCT' && Math.abs(args.growthPct ?? 0) > 50) {
+    return {
+      level: 'MEDIUM',
+      reason: `Based on solid local sales, but a ${args.growthPct}% change pushes the number well past what the history alone supports.`,
+    }
+  }
+  if (!args.hasColourMix) {
+    return {
+      level: 'MEDIUM',
+      reason: 'This style’s sales are recorded at product level only, so the split across colours is an even guess. Map the SKUs in Square for colour-level accuracy.',
+    }
+  }
+  return {
+    level: 'HIGH',
+    reason: 'Based on this market’s own sales of this exact colour, in the window you chose.',
+  }
+}
+
+/// The per-line arithmetic, in the order it was applied. Every number the
+/// operator sees on screen should be traceable to one of these lines.
+function buildSteps(args: {
+  candidate: Candidate
+  source: SuggestionDemandSource
+  marketName: string
+  marketCount: number
+  sourceMarketCount: number
+  targetMode: GenerateSuggestionInput['targetMode']
+  growthPct?: number
+  shelfBufferPct: number
+  beforeRounding: number
+  finalQty: number
+  roundToNearest: number
+  minPackQty: number
+  targetRevenueDollars?: number
+}): SuggestionStep[] {
+  const c = args.candidate
+  const steps: SuggestionStep[] = []
+
+  // 1. Where the demand number came from.
+  if (args.source === 'WAREHOUSE_STOCK') {
+    steps.push({
+      label: 'Starting point',
+      detail: `No sales history anywhere, so we started from the ${c.onHand} units of this colour in the warehouse, split evenly across ${args.marketCount + 1} markets at about ${Math.round(c.lastYearSoldForColour)} each.`,
+    })
+  } else if (args.source === 'CROSS_MARKET' || args.source === 'CROSS_MARKET_WIDENED') {
+    steps.push({
+      label: 'Starting point',
+      detail: `${args.marketName} has no sales of its own. Across ${args.sourceMarketCount} other market${args.sourceMarketCount === 1 ? '' : 's'} this colour sold about ${Math.round(c.lastYearSoldForColour * Math.max(1, args.marketCount))} units, which divided by ${args.marketCount} market${args.marketCount === 1 ? '' : 's'} gives roughly ${Math.round(c.lastYearSoldForColour)} as a per-market average.`,
+    })
+  } else if (c.hasColourMix) {
+    steps.push({
+      label: 'Starting point',
+      detail: `Sold ${c.lastYearSoldForColour} of this colour at ${args.marketName} in the window${c.colourSharePct != null ? `, ${c.colourSharePct}% of this style's sales here` : ''}.`,
+    })
+  } else {
+    steps.push({
+      label: 'Starting point',
+      detail: `This style sold ${Math.round(c.familyObserved)} units at ${args.marketName}, but Square records it at product level, so the total was split evenly across its colours.`,
+    })
+  }
+
+  // 2. What the chosen target did to it.
+  switch (args.targetMode) {
+    case 'MATCH_LAST_YEAR':
+      steps.push({ label: 'Target', detail: 'Match last season, so the target is that same figure.' })
+      break
+    case 'GROW_PCT':
+      steps.push({
+        label: 'Target',
+        detail: `${(args.growthPct ?? 0) >= 0 ? 'Grown' : 'Shrunk'} by ${Math.abs(args.growthPct ?? 0)}%, capped at 3× last season so an aggressive percentage can't run away.`,
+      })
+      break
+    case 'CUSTOM_UNITS':
+      steps.push({ label: 'Target', detail: 'Your total unit budget, split across products in proportion to what sells.' })
+      break
+    case 'CUSTOM_REVENUE':
+      steps.push({
+        label: 'Target',
+        detail: `Your $${(args.targetRevenueDollars ?? 0).toLocaleString('en-US')} target was split by each product's share of revenue, and this product's slice converted back into units at ${c.priceCents != null ? `$${(c.priceCents / 100).toFixed(2)}` : 'its'} each.`,
+      })
+      break
+    case 'INITIAL_SHIPMENT':
+      steps.push({ label: 'Target', detail: 'A share of current warehouse stock, split across products in proportion to what sells.' })
+      break
+  }
+
+  if (args.shelfBufferPct > 0) {
+    steps.push({
+      label: 'Shelf buffer',
+      detail: `+${args.shelfBufferPct}% on top, so the booth still has stock on the shelf once the target's worth has sold.`,
+    })
+  }
+
+  steps.push({
+    label: 'Market needs',
+    detail: `${Math.round(c.uncapped)} units before any warehouse limits.`,
+  })
+
+  // 3. What limited it.
+  if (c.competing > 0) {
+    steps.push({
+      label: 'Other markets',
+      detail: `${c.competing} units of this style are already on other markets' open or draft requests, so they were taken off the table first.`,
+    })
+  }
+  if (c.fairShare < 1) {
+    steps.push({
+      label: 'Fair share',
+      detail: `${args.marketName} accounts for ${Math.round(c.fairShare * 100)}% of demand for this style across all markets, so it can draw ${c.fairAllocation} of the ${c.totalWarehouseOnHandForFamily} units in stock. The rest stays for the others.`,
+    })
+  }
+  if (c.colourFairShare < 1 && c.cap < c.onHand) {
+    steps.push({
+      label: 'Colour cap',
+      detail: `Held to ${Math.round(c.colourFairShare * 100)}% of this colour's ${c.onHand} units (${c.cap}) so one market can't empty a single popular colour.`,
+    })
+  } else {
+    steps.push({ label: 'In stock', detail: `${c.onHand} units of this colour available in the warehouse.` })
+  }
+
+  // 4. Pack shaping.
+  const preRound = Math.round(args.beforeRounding)
+  if (preRound !== args.finalQty) {
+    steps.push({
+      label: 'Pack rounding',
+      detail: args.finalQty === args.minPackQty && args.beforeRounding < args.minPackQty
+        ? `${preRound} isn't a pack, so it was raised to the ${args.minPackQty}-unit minimum.`
+        : `${preRound} rounded to ${args.finalQty}, the nearest multiple of ${args.roundToNearest} the warehouse can cover.`,
+    })
+  }
+  steps.push({ label: 'Packing', detail: `${args.finalQty} units.` })
+  return steps
+}
+
+/// One-sentence version of the same story, shown inline under each colour.
+function buildRationale(args: {
+  candidate: Candidate
+  source: SuggestionDemandSource
+  marketName: string
+  finalQty: number
+  bindingConstraint: SuggestionConstraint
+}): string {
+  const c = args.candidate
+  const parts: string[] = []
+
+  if (args.source === 'WAREHOUSE_STOCK') {
+    parts.push(`No sales history anywhere, so this is an even share of the ${c.onHand} in stock`)
+  } else if (args.source === 'CROSS_MARKET' || args.source === 'CROSS_MARKET_WIDENED') {
+    parts.push(`No sales at ${args.marketName} yet, and other markets average about ${Math.round(c.lastYearSoldForColour)} of this colour each`)
+  } else if (c.hasColourMix && c.lastYearSoldForColour > 0) {
+    parts.push(`Sold ${c.lastYearSoldForColour} of this colour here${args.source === 'LOCAL_SALES_WIDENED' ? ' (found outside your date range)' : ''}`)
+  } else {
+    parts.push(`This style sold ${Math.round(c.familyObserved)} here; colours split evenly (Square records it at product level)`)
+  }
+
+  switch (args.bindingConstraint) {
+    case 'WAREHOUSE_STOCK':
+      parts.push(`packing ${args.finalQty}, which is all the warehouse has`)
+      break
+    case 'FAIR_SHARE':
+      parts.push(`packing ${args.finalQty}, held to this market's share of the ${c.onHand} in stock so other markets aren't starved`)
+      break
+    case 'OTHER_REQUESTS':
+      parts.push(`packing ${args.finalQty}, because ${c.competing} units are already claimed by other markets' open requests`)
+      break
+    case 'MIN_PACK':
+      parts.push(`packing ${args.finalQty}, the minimum that counts as a pack`)
+      break
+    case 'BUDGET':
+    case 'PACK_ROUNDING':
+      parts.push(`packing ${args.finalQty} to fit your target, rounded to a clean pack size`)
+      break
+    default:
+      parts.push(`packing ${args.finalQty}`)
+  }
+  return parts.join('; ') + '.'
+}
+
+function buildHeadline(args: {
+  source: SuggestionDemandSource
+  marketName: string
+  sourceMarketCount: number
+  windowUsed: { start: Date; end: Date }
+  totalRecommended: number
+  styleCount: number
+}): string {
+  const scale = `${args.totalRecommended.toLocaleString('en-US')} units across ${args.styleCount} style${args.styleCount === 1 ? '' : 's'}`
+  switch (args.source) {
+    case 'LOCAL_SALES':
+      return `${scale}, built from ${args.marketName}'s own sales between ${fmtRange(args.windowUsed)}.`
+    case 'LOCAL_SALES_WIDENED':
+      return `${scale}. Your date range had no sales in it, so this uses all of ${args.marketName}'s history (${fmtRange(args.windowUsed)}).`
+    case 'CROSS_MARKET':
+    case 'CROSS_MARKET_WIDENED':
+      return `${scale}. ${args.marketName} is new, so this is an opening list estimated from ${args.sourceMarketCount} other market${args.sourceMarketCount === 1 ? '' : 's'}.`
+    case 'WAREHOUSE_STOCK':
+      return `${scale}, sized from warehouse stock because there is no sales history to work from.`
+  }
+}
+
+/// The run-level mechanism, one plain sentence per stage. This is what the
+/// "How this list was built" panel renders top to bottom.
+function buildRunSteps(args: {
+  source: SuggestionDemandSource
+  marketName: string
+  marketCount: number
+  sourceMarkets: SuggestionSourceMarket[]
+  windowRequested: { start: Date; end: Date }
+  windowUsed: { start: Date; end: Date }
+  windowWidened: boolean
+  targetMode: GenerateSuggestionInput['targetMode']
+  growthPct?: number
+  targetRevenueDollars?: number
+  shelfBufferPct: number
+  roundToNearest: number
+  minPackQty: number
+  isBudgetMode: boolean
+  droppedBelowMinimum: number
+  totalRecommended: number
+}): string[] {
+  const steps: string[] = []
+
+  if (args.windowWidened) {
+    steps.push(`Your dates held no sales, so the search widened to ${fmtRange(args.windowUsed)}.`)
+  }
+
+  switch (args.source) {
+    case 'LOCAL_SALES':
+    case 'LOCAL_SALES_WIDENED':
+      steps.push(`Measured what ${args.marketName} sold, colour by colour, over ${fmtRange(args.windowUsed)}.`)
+      break
+    case 'CROSS_MARKET':
+    case 'CROSS_MARKET_WIDENED':
+      steps.push(
+        `${args.marketName} has no sales yet, so each product's total across the other markets was divided by ${args.marketCount} for a per-market average. Deliberately cautious: a new market should open light.`,
+      )
+      break
+    case 'WAREHOUSE_STOCK':
+      steps.push(
+        `Nothing has sold anywhere, so stock was split evenly across all ${args.marketCount + 1} markets. With no demand signal, no market has a claim to more than an equal share.`,
+      )
+      break
+  }
+
+  if (args.targetMode === 'CUSTOM_REVENUE') {
+    steps.push(
+      `Split $${(args.targetRevenueDollars ?? 0).toLocaleString('en-US')} by each product's share of revenue, then converted back to units at its own price. That is why a cheap fast-seller and a pricey slow-seller land on very different counts.`,
+    )
+  } else if (args.targetMode === 'GROW_PCT') {
+    steps.push(
+      `Moved each product by ${args.growthPct ?? 0}%, capped at 3x so a big percentage on a one-off sale cannot run away.`,
+    )
+  }
+
+  if (args.shelfBufferPct > 0) {
+    steps.push(
+      `Added ${args.shelfBufferPct}% on top. A target is what you expect to sell, so the shelf needs stock while it sells.`,
+    )
+  }
+
+  steps.push(
+    'Capped each line at warehouse stock, minus what other markets have already requested, then applied fair share at product and colour level so no one market can drain a popular item.',
+  )
+
+  if (args.droppedBelowMinimum > 0) {
+    steps.push(
+      args.isBudgetMode
+        ? `Dropped ${args.droppedBelowMinimum} item${args.droppedBelowMinimum === 1 ? '' : 's'} below ${args.minPackQty} units and spread their share across the rest.`
+        : `Dropped ${args.droppedBelowMinimum} item${args.droppedBelowMinimum === 1 ? '' : 's'} the warehouse cannot fill to a full ${args.minPackQty}-unit pack.`,
+    )
+  }
+  steps.push(
+    `Rounded to the nearest ${args.roundToNearest}, giving ${args.totalRecommended.toLocaleString('en-US')} units. Every number below is editable.`,
+  )
+  return steps
+}
+
+/// Short phrase naming the target that was applied. Lets the compact summary
+/// state the target for every mode, including the ones with no dollar or
+/// unit budget to report.
+function buildTargetSummary(args: {
+  targetMode: GenerateSuggestionInput['targetMode']
+  growthPct?: number
+  targetUnits?: number
+  targetRevenueDollars?: number
+  initialShipmentPct: number
+}): string {
+  switch (args.targetMode) {
+    case 'MATCH_LAST_YEAR':
+      return 'Match what sold last season'
+    case 'GROW_PCT': {
+      const pct = args.growthPct ?? 0
+      return `${pct >= 0 ? 'Grow' : 'Shrink'} last season by ${Math.abs(pct)}%`
+    }
+    case 'CUSTOM_UNITS':
+      return `${(args.targetUnits ?? 0).toLocaleString('en-US')} units in total`
+    case 'CUSTOM_REVENUE':
+      return `$${(args.targetRevenueDollars ?? 0).toLocaleString('en-US')} sales goal`
+    case 'INITIAL_SHIPMENT':
+      return `${args.initialShipmentPct}% of warehouse stock`
+  }
+}
+
 function emptyResult(
   input: GenerateSuggestionInput,
   window: { start: Date; end: Date },
   notes: string[],
+  explain: SuggestionExplain,
 ): GenerateSuggestionResult {
   return {
     locationId: input.locationId,
@@ -727,6 +1498,7 @@ function emptyResult(
     lines: [],
     totals: { variationsCovered: 0, totalRecommendedUnits: 0, totalLastYearUnits: 0 },
     notes,
+    explain,
   }
 }
 
@@ -753,123 +1525,6 @@ function shiftYears(d: Date, years: number): Date {
   return out
 }
 
-function decideConfidence(args: {
-  usedCrossMarket: boolean
-  observed: number
-  hasColourMix: boolean
-  targetMode: GenerateSuggestionInput['targetMode']
-  growthPct?: number
-}): SuggestionConfidence {
-  // Cross-market inference is always LOW — the whole line is a guess.
-  if (args.usedCrossMarket) return 'LOW'
-  // Local sales but very sparse observation → MEDIUM.
-  if (args.observed < 5) return 'MEDIUM'
-  // Growth extrapolations beyond ±50% → MEDIUM (we know the number is
-  // being pushed further than the data supports on its own).
-  if (args.targetMode === 'GROW_PCT' && Math.abs(args.growthPct ?? 0) > 50) return 'MEDIUM'
-  // No per-item sales mix — colours split evenly. Honest MEDIUM.
-  if (!args.hasColourMix) return 'MEDIUM'
-  return 'HIGH'
-}
-
-function buildRationale(args: {
-  lastYearSoldForColour: number
-  colourSharePct: number | null
-  colourSource: 'LOCAL_SALES' | 'CROSS_SALES' | null
-  familyObserved: number
-  onHand: number
-  competing: number
-  targetMode: GenerateSuggestionInput['targetMode']
-  growthPct?: number
-  wasCrossMarket: boolean
-  marketName: string
-  /** Percent of family warehouse stock allocated to this market, or null
-   *  when this market has ~all the demand (fairShare = 1). */
-  fairSharePct: number | null
-  /** Absolute floor of the fair-share allocation (units the market can pull
-   *  from warehouse for this family), or null when the share is 100%. */
-  fairAllocation: number | null
-  /** Warehouse-side family total (across all colours) — the number the
-   *  fair-share percentage is applied to. */
-  totalWarehouseOnHandForFamily: number
-  /** Aspirational per-colour target before any warehouse/competing caps.
-   *  Only present for MATCH_LAST_YEAR / GROW_PCT with local per-colour sales. */
-  grownTargetQty?: number
-  /** Final recommended quantity after all caps — used to detect when the
-   *  warehouse is suppressing the growth target. */
-  recommendedQty?: number
-  /** This colour's fair-share cap (colourFairShare × this colour's
-   *  on-hand), set only when it's below on-hand and therefore the actual
-   *  binding constraint — i.e. the recommendation stopped short of fully
-   *  draining this SKU so other markets still have some to claim. */
-  colourFairCap: number | null
-  /** The real per-colour fair-share percentage actually used for
-   *  colourFairCap — may differ from fairSharePct (the family average)
-   *  when other markets' colour-level sales data lets us be precise
-   *  about THIS specific SKU rather than the family as a whole. */
-  colourFairSharePct: number | null
-}): string {
-  const parts: string[] = []
-  if (args.wasCrossMarket) {
-    parts.push(`No local sales at ${args.marketName} — estimated from other markets' sales`)
-  } else if (args.lastYearSoldForColour > 0 && args.colourSource === 'LOCAL_SALES') {
-    // Suppress the percentage-of-family framing for MATCH / GROW modes
-    // (they compute per-item directly, so the "% of style's sales"
-    // language would suggest an intermediate step that isn't happening).
-    const isDirectColour = args.targetMode === 'MATCH_LAST_YEAR' || args.targetMode === 'GROW_PCT'
-    const share = isDirectColour || args.colourSharePct == null
-      ? ''
-      : ` (${args.colourSharePct}% of this style's item sales)`
-    parts.push(`Sold ${args.lastYearSoldForColour} of this item last season${share}`)
-  } else if (args.familyObserved > 0) {
-    parts.push(`Style sold ${args.familyObserved} last season (item mix estimated evenly — Square records this style's sales at family level only)`)
-  }
-  if (args.targetMode === 'GROW_PCT' && args.growthPct) {
-    const label = args.growthPct >= 0
-      ? `growing target by ${args.growthPct}%`
-      : `shrinking target by ${Math.abs(args.growthPct)}%`
-    const isCapped =
-      args.grownTargetQty !== undefined &&
-      args.recommendedQty !== undefined &&
-      args.grownTargetQty > args.recommendedQty
-    parts.push(
-      isCapped
-        ? `${label} — warehouse has enough for ${args.recommendedQty} units (growth target is ${args.grownTargetQty}; add stock to ship the full amount)`
-        : label,
-    )
-  }
-  if (args.targetMode === 'CUSTOM_UNITS') {
-    parts.push('scaled to fit your custom unit budget')
-  }
-  if (args.targetMode === 'CUSTOM_REVENUE') {
-    parts.push('scaled to hit your revenue target')
-  }
-  if (args.targetMode === 'INITIAL_SHIPMENT') {
-    parts.push('sized as a share of current warehouse stock (initial shipment)')
-  }
-  if (args.competing > 0) {
-    parts.push(`${args.competing} units already requested by other markets`)
-  }
-  if (args.fairSharePct != null && args.fairAllocation != null) {
-    parts.push(
-      `capped to ${args.marketName}'s fair share of warehouse stock (${args.fairSharePct}% × ${args.totalWarehouseOnHandForFamily} = ${args.fairAllocation}) so other markets aren't starved`,
-    )
-  }
-  if (args.colourFairCap != null) {
-    // This is the SKU-level guardrail: even when the family-level fair
-    // share above has headroom, this market can't claim more than its
-    // fair-share slice of THIS specific colour's stock either — otherwise
-    // one market could fully drain a popular colour while the family
-    // numbers still looked fine. Uses the real per-colour percentage
-    // (based on what other markets actually sold of this exact colour)
-    // when available, which can differ from the family-wide percentage
-    // above — e.g. a colour only this market sells gets a much higher
-    // share than the family average, since nobody else needs it.
-    parts.push(
-      `kept to ${args.colourFairSharePct}% of this colour's ${args.onHand}-unit stock (${args.colourFairCap} units) so it isn't fully drained`,
-    )
-  } else {
-    parts.push(`warehouse has ${args.onHand} of this item available`)
-  }
-  return parts.join('; ') + '.'
+function fmtRange(w: { start: Date; end: Date }): string {
+  return `${w.start.toISOString().slice(0, 10)} and ${w.end.toISOString().slice(0, 10)}`
 }
