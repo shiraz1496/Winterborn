@@ -2498,3 +2498,221 @@ textarea {
   outline: 2px solid var(--signal);
   outline-offset: 1px;
 }
+
+/* ---- suggestion explain panel ---------------------------------------- */
+/* The "why does the list look like this" block on /requests/suggest. It
+   sits above the lines and opens by default: the engine's reasoning used
+   to be invisible, which made correct output look arbitrary. */
+
+.explain-panel {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--pine);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+/* Cross-market and stock-only runs are estimates rather than measurements,
+   and the warmer edge says so before the operator reads a single number. */
+.explain-panel.is-estimate { border-left-color: var(--signal); }
+
+.explain-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.explain-head:hover { background: var(--surface-raised); }
+.explain-head-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.explain-headline {
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.explain-source {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.explain-body {
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+}
+.explain-body h3 {
+  margin: 14px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+/* The source-market list is the one thing here that can run to dozens of
+   entries, so it is the one thing that collapses. */
+.explain-markets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.explain-more {
+  padding: 3px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.explain-more:hover { color: var(--text); border-color: var(--text-faint); }
+.explain-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.explain-steps li {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.explain-facts { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.explain-facts > div {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+.explain-facts dt {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.explain-facts dd {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.explain-muted { color: var(--text-faint); }
+
+/* Tablet and phone: the label/value grid stops fitting side by side well
+   before the viewport gets truly narrow, so stack it early. */
+@media (max-width: 900px) {
+  .explain-facts > div { grid-template-columns: 1fr; gap: 2px; }
+}
+@media (max-width: 480px) {
+  .explain-head { padding: 12px; gap: 8px; }
+  .explain-headline { font-size: 0.9rem; }
+  .explain-body { padding: 0 12px 12px; }
+  .explain-steps { padding-left: 18px; }
+  .explain-steps li { font-size: 0.82rem; }
+}
+
+/* ---- disclosure toggles ("Show the maths", "Pack shape") -------------- */
+
+.disclosure-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.disclosure-toggle:hover { color: var(--text); }
+.disclosure-toggle.is-inline { margin-top: 2px; text-transform: none; letter-spacing: 0; }
+.disclosure-summary {
+  color: var(--text-faint);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---- per-line "show the maths" --------------------------------------- */
+
+.math-steps {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  list-style: none;
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.math-steps li {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+.math-step-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.math-step-detail {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+@media (max-width: 900px) {
+  .math-steps li { grid-template-columns: 1fr; gap: 1px; }
+}
+
+/* A colour the engine did not suggest still gets a row (so the operator
+   can add it), but it should not compete visually with the ones it did. */
+.suggest-variant.is-unsuggested { opacity: 0.72; }
+.suggest-variant.is-unsuggested:focus-within,
+.suggest-variant.is-unsuggested:hover { opacity: 1; }
+
+/* ---- pack shape controls --------------------------------------------- */
+
+.pack-shape-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+  padding: 12px;
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+}
+.pack-shape-grid label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.pack-shape-grid input { width: 100%; }
+.field-hint {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+@media (max-width: 900px) {
+  .pack-shape-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .pack-shape-grid { grid-template-columns: 1fr; }
+}

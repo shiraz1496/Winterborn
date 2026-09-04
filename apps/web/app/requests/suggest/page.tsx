@@ -2,12 +2,20 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  DEFAULT_MIN_PACK_QTY,
+  DEFAULT_ROUND_TO_NEAREST,
+  defaultShelfBufferPct,
+} from '@winterborn/shared'
 import type {
   CategoryDto,
   GenerateSuggestionResult,
   LocationDto,
   SuggestionConfidence,
+  SuggestionConstraint,
+  SuggestionExplain,
   SuggestionLine,
+  SuggestionStep,
   SuggestionTargetMode,
   VariationSummary,
   WarehouseVariantSummary,
@@ -29,25 +37,41 @@ import {
 } from '../../../lib/api'
 import { useToast } from '../../../lib/toast'
 
-/// One family in the hydrated suggestion — mirrors the DraftFamily shape
-/// used on /requests/new so the same visual pattern applies here. Adds
-/// `metaByVariant` to carry the rationale + confidence the engine returned
-/// for each specific colour, surfaced when the family expands.
+/// Everything the engine said about one specific colour, kept alongside the
+/// editable quantity so the row can explain itself without another request.
+interface VariantMeta {
+  rationale: string
+  confidence: SuggestionConfidence
+  confidenceReason: string
+  bindingConstraint: SuggestionConstraint
+  /// What the market wanted before warehouse limits. Shown next to the
+  /// recommendation so a suppressed number reads as suppressed rather than
+  /// just small.
+  demandTarget: number
+  steps: SuggestionStep[]
+}
+
+/// One family in the hydrated suggestion. Mirrors the DraftFamily shape
+/// used on /requests/new so the same visual pattern applies here.
 interface SuggestFamily {
   variationId: string
   itemGroupName: string
   familyName: string
   sizeName: string
   categoryPath: string[]
+  /// Ordered ONCE at hydration: the colours the engine actually suggested
+  /// come first (in its own ranking), then everything else alphabetically.
+  /// Deliberately frozen, because editing a quantity must not make rows jump
+  /// around under the operator's cursor mid-edit.
   variants: WarehouseVariantSummary[]
   qtyByVariant: Record<string, number>
   /// Engine's original recommendation, kept immutable so clicking
   /// "Recommended: N" can always reset the stepper to the right value
   /// even after the user has edited the qty.
   recommendedQtyByVariant: Record<string, number>
-  metaByVariant: Record<string, { rationale: string; confidence: SuggestionConfidence }>
+  metaByVariant: Record<string, VariantMeta>
   /// Family-level total sold at this market last season. Drives the sort
-  /// order — highest-demand products lead, matching the backend's own
+  /// order, so highest-demand products lead, matching the backend's own
   /// ordering. Same value across every line in the family, so we just
   /// capture whichever line lands here first.
   familyLastYearSold: number
@@ -73,11 +97,23 @@ function SuggestBody() {
   const [windowStart, setWindowStart] = useState<string>('')
   const [windowEnd, setWindowEnd] = useState<string>('')
 
+  // Pack shape. `shelfBufferPct` starts null meaning "use the default for
+  // this mode". The moment the operator touches it, their number sticks
+  // across mode changes.
+  const [shelfBufferPct, setShelfBufferPct] = useState<number | null>(null)
+  const [roundToNearest, setRoundToNearest] = useState<number>(DEFAULT_ROUND_TO_NEAREST)
+  const [minPackQty, setMinPackQty] = useState<number>(DEFAULT_MIN_PACK_QTY)
+  const [packShapeOpen, setPackShapeOpen] = useState(false)
+  const effectiveShelfBuffer = shelfBufferPct ?? defaultShelfBufferPct(mode)
+
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState<null | 'DRAFT' | 'OPEN'>(null)
   const [notes, setNotes] = useState<string[]>([])
+  const [explain, setExplain] = useState<SuggestionExplain | null>(null)
+  const [explainOpen, setExplainOpen] = useState(true)
   const [families, setFamilies] = useState<SuggestFamily[]>([])
   const [openId, setOpenId] = useState<string | null>(null)
+  const [mathOpen, setMathOpen] = useState<Set<string>>(() => new Set())
   const [totals, setTotals] = useState<{
     variationsCovered: number
     totalRecommendedUnits: number
@@ -90,6 +126,9 @@ function SuggestBody() {
   // generate so numbers are always current at the moment the operator
   // reviews the draft.
   const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
+  // Raw warehouse on-hand, matching the effect below. Note this is not
+  // reservation-adjusted: boxes already being packed for other requests
+  // still count here, so the Wh chip can read higher than Pack will accept.
   const [onHandByVariantAtWarehouse, setOnHandByVariantAtWarehouse] = useState<Map<string, number>>(
     () => new Map(),
   )
@@ -112,7 +151,7 @@ function SuggestBody() {
   ///
   /// In our catalog, the real top-of-tree is a single meta-root
   /// ("BärHaus (IN STOCK)") and everything the CEO actually thinks of as
-  /// a top-level category — Scarves, Footwear, Sweaters, etc. — sits ONE
+  /// a top-level category (Scarves, Footwear, Sweaters, and so on) sits ONE
   /// LEVEL below. If we naively showed roots-only, the picker collapses
   /// to a single item and stops being useful. Skip a lone meta-root and
   /// promote its direct children to "effective roots" so the picker
@@ -204,6 +243,15 @@ function SuggestBody() {
     setPickedCategoryIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
+  function toggleMath(variantId: string) {
+    setMathOpen((prev) => {
+      const next = new Set(prev)
+      if (next.has(variantId)) next.delete(variantId)
+      else next.add(variantId)
+      return next
+    })
+  }
+
   async function runGenerate() {
     if (!locationId) return
     setBusy(true)
@@ -219,11 +267,17 @@ function SuggestBody() {
         ...(pickedCategoryIds.length > 0 ? { categoryIds: pickedCategoryIds } : {}),
         ...(windowStart ? { lastYearStart: new Date(`${windowStart}T00:00:00Z`) } : {}),
         ...(windowEnd ? { lastYearEnd: new Date(`${windowEnd}T23:59:59Z`) } : {}),
+        shelfBufferPct: effectiveShelfBuffer,
+        roundToNearest,
+        minPackQty,
       })
       setNotes(result.notes)
+      setExplain(result.explain)
+      setExplainOpen(true)
       setTotals(result.totals)
-      setFamilies(hydrateFamilies(result.lines, variationById, variantsByVariation, mode, growthPct))
+      setFamilies(hydrateFamilies(result.lines, variationById, variantsByVariation))
       setOpenId(null)
+      setMathOpen(new Set())
       if (result.lines.length === 0) {
         toast.info(result.notes[0] ?? 'No lines suggested for this market.')
       } else {
@@ -289,8 +343,8 @@ function SuggestBody() {
       })
       toast.success(
         target === 'OPEN'
-          ? `Request submitted (${totalUnits} units) — warehouse will start packing.`
-          : `Draft saved (${totalUnits} units) — edit later before submitting.`,
+          ? `Request submitted (${totalUnits} units). Warehouse will start packing.`
+          : `Draft saved (${totalUnits} units). Edit it later before submitting.`,
       )
       router.replace(`/requests/${created.id}`)
     } catch (err) {
@@ -306,7 +360,7 @@ function SuggestBody() {
       <PageHeader
         eyebrow="Owner only"
         title="Suggest a packing list"
-        description="Generate a starting packing list for a market from last season's sales, current warehouse stock, and open requests from other markets. Edit anything, then save as draft or approve to submit the request straight to the warehouse."
+        description="Build a starting packing list for a market from what it sells, what the warehouse holds, and what other markets have already asked for. Every number comes with its own working, so you can expand any item to see how it was reached and change anything you disagree with."
       />
 
       {loadError && <p className="error-banner">{loadError}</p>}
@@ -376,6 +430,9 @@ function SuggestBody() {
             </button>
           ))}
         </div>
+        <p style={{ margin: '6px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+          {MODE_BLURB[mode]}
+        </p>
       </div>
 
       {mode === 'GROW_PCT' && (
@@ -425,9 +482,9 @@ function SuggestBody() {
             onChange={(e) => setTargetRevenueDollars(Number(e.target.value))}
           />
           <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
-            Dollars split across styles in proportion to last season&rsquo;s revenue mix (units × unit price), then
-            converted to units using each style&rsquo;s unit price from the catalog. Products with no unit price on
-            their warehouse SKUs are excluded.
+            This is a sell-through goal, not a shipping value. The dollars are split across styles by their share of
+            revenue (units × price), converted back into units at each style&rsquo;s own price, and then the shelf
+            buffer below is added on top so the booth is not bare by the time the goal is met.
           </p>
         </div>
       )}
@@ -472,8 +529,72 @@ function SuggestBody() {
           />
         </div>
         <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
-          Leave blank to use last season&rsquo;s window (or the trailing 12 months a year ago).
+          Leave blank to use last season&rsquo;s window. If the dates you pick contain no sales, the search widens
+          automatically to all the history we hold rather than coming back empty, and the panel below will say so.
         </p>
+      </div>
+
+      <div className="field">
+        <button
+          type="button"
+          className="disclosure-toggle"
+          aria-expanded={packShapeOpen}
+          onClick={() => setPackShapeOpen((v) => !v)}
+        >
+          <Chevron open={packShapeOpen} />
+          Pack shape
+          <span className="disclosure-summary">
+            round to {roundToNearest} · min {minPackQty} · buffer {effectiveShelfBuffer}%
+          </span>
+        </button>
+        {packShapeOpen && (
+          <div className="pack-shape-grid">
+            <div>
+              <label htmlFor="shelfBufferPct">Shelf buffer (%)</label>
+              <input
+                id="shelfBufferPct"
+                type="number"
+                step={5}
+                min={0}
+                max={200}
+                value={effectiveShelfBuffer}
+                onChange={(e) => setShelfBufferPct(Number(e.target.value))}
+              />
+              <p className="field-hint">
+                Ships more than the goal so the shelf is not bare the moment the goal is met. At 20%, a $25,000
+                sales goal sends $30,000 of stock. Default for this target is {defaultShelfBufferPct(mode)}%.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="roundToNearest">Round to nearest</label>
+              <input
+                id="roundToNearest"
+                type="number"
+                step={1}
+                min={1}
+                max={50}
+                value={roundToNearest}
+                onChange={(e) => setRoundToNearest(Math.max(1, Number(e.target.value)))}
+              />
+              <p className="field-hint">Quantities land on a multiple of this. Nobody packs 21 of something.</p>
+            </div>
+            <div>
+              <label htmlFor="minPackQty">Minimum per item</label>
+              <input
+                id="minPackQty"
+                type="number"
+                step={1}
+                min={1}
+                max={100}
+                value={minPackQty}
+                onChange={(e) => setMinPackQty(Math.max(1, Number(e.target.value)))}
+              />
+              <p className="field-hint">
+                Items that cannot reach this are dropped rather than sent as a token one or two.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       <button
@@ -485,12 +606,13 @@ function SuggestBody() {
         {busy ? 'Generating…' : 'Generate packing list'}
       </button>
 
-      {notes.length > 0 && (
-        <div className="suggest-panel-notes" style={{ marginTop: 16 }}>
-          {notes.map((n, i) => (
-            <p key={i}>{n}</p>
-          ))}
-        </div>
+      {explain && (
+        <ExplainPanel
+          explain={explain}
+          notes={notes}
+          open={explainOpen}
+          onToggle={() => setExplainOpen((v) => !v)}
+        />
       )}
 
       {families.length > 0 && (
@@ -509,6 +631,7 @@ function SuggestBody() {
               const familyMarket = familyOnHand.get(f.variationId) ?? 0
               const familyWarehouse = familyOnHandAtWarehouse.get(f.variationId) ?? 0
               const open = openId === f.variationId
+              const suggestedCount = Object.keys(f.metaByVariant).length
               return (
                 <div key={f.variationId} className="card">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -562,6 +685,10 @@ function SuggestBody() {
                           </span>
                           {f.familyName} · {f.sizeName}
                         </div>
+                        <div className="list-row-meta" style={{ color: 'var(--text-faint)' }}>
+                          {suggestedCount} of {f.variants.length} colour{f.variants.length === 1 ? '' : 's'} suggested
+                          {f.familyLastYearSold > 0 ? ` · ${f.familyLastYearSold} sold in the window` : ''}
+                        </div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
                         <div style={{ textAlign: 'right' }}>
@@ -587,26 +714,7 @@ function SuggestBody() {
                           </div>
                         </div>
                       </div>
-                      <svg
-                        width="16"
-                        height="16"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                        style={{
-                          color: 'var(--text-faint)',
-                          marginLeft: 4,
-                          flexShrink: 0,
-                          transition: 'transform 0.15s ease',
-                          transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
-                        }}
-                      >
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
+                      <Chevron open={open} />
                     </div>
                   </div>
 
@@ -614,7 +722,7 @@ function SuggestBody() {
                     <div className="stack" style={{ marginTop: 14, gap: 8 }}>
                       {f.variants.length === 0 ? (
                         <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.85rem' }}>
-                          No specific variants for this family — request goes at family level.
+                          No specific variants for this family, so the request goes at family level.
                         </p>
                       ) : (
                         f.variants.map((v) => {
@@ -623,9 +731,13 @@ function SuggestBody() {
                           const onHand = onHandByVariantId.get(v.id) ?? 0
                           const onHandWh = onHandByVariantAtWarehouse.get(v.id) ?? 0
                           const meta = f.metaByVariant[v.id]
-                          const isAtRecommended = recommended === undefined || qty === recommended
+                          const showMath = mathOpen.has(v.id)
                           return (
-                            <div key={v.id} className="list-row" style={{ border: '1px solid var(--line)', alignItems: 'flex-start' }}>
+                            <div
+                              key={v.id}
+                              className={`list-row suggest-variant${meta ? '' : ' is-unsuggested'}`}
+                              style={{ border: '1px solid var(--line)', alignItems: 'flex-start' }}
+                            >
                               <ProductThumb
                                 photoUrl={v.photoUrl}
                                 familyName={v.colourVariantName}
@@ -634,7 +746,20 @@ function SuggestBody() {
                               <div className="list-row-body">
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                   <span className="list-row-title">{v.colourVariantName}</span>
-                                  {meta && <ConfidenceBadge level={meta.confidence} />}
+                                  {meta ? (
+                                    <>
+                                      <ConfidenceBadge level={meta.confidence} reason={meta.confidenceReason} />
+                                      <ConstraintBadge constraint={meta.bindingConstraint} />
+                                    </>
+                                  ) : (
+                                    <span
+                                      className="chip"
+                                      style={{ fontSize: '0.7rem' }}
+                                      title="Not suggested: it either did not sell here, or the warehouse cannot fill a full pack of it. You can still add it by hand."
+                                    >
+                                      {qty > 0 ? 'Added by you' : 'Not suggested'}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="list-row-meta mono">{v.warehouseSku}</div>
                                 <div className="stock-inline" style={{ marginTop: 4, flexWrap: 'wrap' }}>
@@ -657,7 +782,7 @@ function SuggestBody() {
                                   {onHandWh === 0 && (
                                     <span
                                       className="backorder-hint"
-                                      title="You can still request this — packing will start when warehouse stock arrives."
+                                      title="You can still request this. Packing will start when warehouse stock arrives."
                                     >
                                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                         <circle cx="12" cy="12" r="9" />
@@ -671,30 +796,61 @@ function SuggestBody() {
                                   <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                     <button
                                       type="button"
-                                      className={`chip${qty > recommended ? ' chip-signal' : ''}`}
+                                      className={`chip${qty !== recommended ? ' chip-signal' : ''}`}
                                       style={{ cursor: qty !== recommended ? 'pointer' : 'default', fontSize: '0.75rem' }}
                                       onClick={() => qty !== recommended && setVariantQty(f.variationId, v.id, recommended)}
                                       title={
-                                        qty > recommended
-                                          ? `Warehouse can safely send ${recommended}. Click to use this amount.`
-                                          : qty < recommended
-                                            ? `You've set this lower than the recommendation (${recommended}). Click to restore.`
-                                            : `Send ${recommended} — warehouse-safe, accounting for other markets`
+                                        qty === recommended
+                                          ? `Send ${recommended}, the warehouse-safe amount after accounting for other markets`
+                                          : `Click to go back to the suggested ${recommended}.`
                                       }
                                     >
-                                      Recommended: {recommended}
+                                      Suggested: {recommended}
                                     </button>
+                                    {meta && meta.demandTarget > recommended && (
+                                      <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                                        this market could take {meta.demandTarget}, but the warehouse is the limit
+                                      </span>
+                                    )}
                                     {qty > recommended && (
                                       <span style={{ fontSize: '0.75rem', color: 'var(--signal)' }}>
-                                        sending {qty - recommended} above safe limit
+                                        {qty - recommended} above the warehouse-safe amount
                                       </span>
                                     )}
                                   </div>
                                 )}
                                 {meta && (
-                                  <div style={{ marginTop: 4, fontSize: '0.78rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
-                                    {meta.rationale}
-                                  </div>
+                                  <>
+                                    <div style={{ marginTop: 4, fontSize: '0.78rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                                      {meta.rationale}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="disclosure-toggle is-inline"
+                                      aria-expanded={showMath}
+                                      onClick={() => toggleMath(v.id)}
+                                    >
+                                      <Chevron open={showMath} />
+                                      {showMath ? 'Hide details' : 'Show details'}
+                                    </button>
+                                    {showMath && (
+                                      <ol className="math-steps">
+                                        {meta.steps.map((s, i) => (
+                                          <li key={i}>
+                                            <span className="math-step-label">{s.label}</span>
+                                            <span className="math-step-detail">{s.detail}</span>
+                                          </li>
+                                        ))}
+                                        <li>
+                                          <span className="math-step-label">Confidence</span>
+                                          <span className="math-step-detail">
+                                            {meta.confidenceReason} This rates the data behind the number, so it stays
+                                            the same if you change the quantity yourself.
+                                          </span>
+                                        </li>
+                                      </ol>
+                                    )}
+                                  </>
                                 )}
                               </div>
                               <div className="stepper">
@@ -760,49 +916,180 @@ function SuggestBody() {
   )
 }
 
-/// Compute the uncapped demand target for a line — what the market
-/// actually needs based on the chosen mode, before warehouse and
-/// competing-demand caps are applied. The input field starts here;
-/// the "Recommended" chip shows the capped (warehouse-safe) value.
-function demandTargetForLine(
-  line: SuggestionLine,
-  mode: SuggestionTargetMode,
-  growthPct: number,
-): number {
-  // Must match SANITY_MULTIPLIER in the backend service.
-  const SANITY_MULTIPLIER = 3
-  let demand: number
-  if (mode === 'MATCH_LAST_YEAR' && line.lastYearSold > 0) {
-    demand = line.lastYearSold
-  } else if (mode === 'GROW_PCT' && line.lastYearSold > 0) {
-    const raw = Math.round(line.lastYearSold * (1 + growthPct / 100))
-    demand = Math.min(raw, Math.round(line.lastYearSold * SANITY_MULTIPLIER))
-  } else {
-    // Budget modes or cross-market inference: use recommended directly
-    // (no meaningful uncapped demand to recover client-side).
-    demand = line.qtyRecommended
-  }
-  // Hard cap: can never request more than the warehouse physically has.
-  // When demand ≤ warehouseOnHand, input shows real demand so the
-  // operator can see the "fair-share gap" vs the Recommended chip.
-  // When demand > warehouseOnHand, cap to on-hand — requesting beyond
-  // stock would just create an unfulfillable line.
-  return Math.min(demand, line.warehouseOnHand)
+const MODE_BLURB: Record<SuggestionTargetMode, string> = {
+  MATCH_LAST_YEAR: 'Ship what this market sold in the window, colour for colour.',
+  GROW_PCT: 'Take what it sold and move it up or down by a percentage.',
+  CUSTOM_UNITS: 'You name a total number of units; it is divided between products by how well each one sells.',
+  CUSTOM_REVENUE:
+    'You name a sales goal in dollars; it is divided by each product’s share of revenue and converted back into units at that product’s own price.',
+  INITIAL_SHIPMENT: 'Send a share of everything sitting in the warehouse, the way you open a season.',
+}
+
+const CONSTRAINT_LABEL: Record<SuggestionConstraint, { label: string; title: string }> = {
+  DEMAND: { label: 'Demand-led', title: 'The number comes straight from what this market sells. Nothing held it back.' },
+  BUDGET: { label: 'Your target', title: 'The number is this item’s slice of the target you set.' },
+  WAREHOUSE_STOCK: { label: 'Stock-limited', title: 'The market wants more, but this is all the warehouse physically has.' },
+  FAIR_SHARE: { label: 'Shared out', title: 'Held back so other markets that also sell this item are not left with nothing.' },
+  OTHER_REQUESTS: { label: 'Already claimed', title: 'Other markets have open or draft requests for this item, and those come off the top.' },
+  PACK_ROUNDING: { label: 'Rounded', title: 'Rounded to a clean pack size.' },
+  MIN_PACK: { label: 'Minimum pack', title: 'Raised to the smallest quantity worth packing.' },
+}
+
+const SOURCE_LABEL: Record<SuggestionExplain['demandSource'], string> = {
+  LOCAL_SALES: 'This market’s own sales',
+  LOCAL_SALES_WIDENED: 'This market’s sales, wider window',
+  CROSS_MARKET: 'Estimated from other markets',
+  CROSS_MARKET_WIDENED: 'Estimated from other markets, wider window',
+  WAREHOUSE_STOCK: 'Warehouse stock only',
+}
+
+/// The "why does the list look like this" panel.
+///
+/// Everything is visible at once when the panel is open. The mechanism used
+/// to be invisible, which made a correct list look arbitrary, so burying it
+/// behind a second toggle would undo the point. The trimming happened in the
+/// wording instead. The one thing that does collapse is the source-market
+/// list, which can run to dozens of names.
+function ExplainPanel({
+  explain,
+  notes,
+  open,
+  onToggle,
+}: {
+  explain: SuggestionExplain
+  notes: string[]
+  open: boolean
+  onToggle: () => void
+}) {
+  const [allMarkets, setAllMarkets] = useState(false)
+  const isEstimate =
+    explain.demandSource === 'CROSS_MARKET' ||
+    explain.demandSource === 'CROSS_MARKET_WIDENED' ||
+    explain.demandSource === 'WAREHOUSE_STOCK'
+  const MARKET_PREVIEW = 6
+  const shownMarkets = allMarkets ? explain.sourceMarkets : explain.sourceMarkets.slice(0, MARKET_PREVIEW)
+  const hiddenMarkets = explain.sourceMarkets.length - shownMarkets.length
+
+  return (
+    <section className={`explain-panel${isEstimate ? ' is-estimate' : ''}`}>
+      <button type="button" className="explain-head" aria-expanded={open} onClick={onToggle}>
+        <Chevron open={open} />
+        <span className="explain-head-text">
+          <span className="explain-headline">{explain.headline}</span>
+          <span className="explain-source">
+            {SOURCE_LABEL[explain.demandSource]}
+            {explain.windowWidened ? ' · window widened' : ''}
+          </span>
+        </span>
+      </button>
+
+      {open && (
+        <div className="explain-body">
+          <dl className="explain-facts">
+            <div>
+              <dt>Data</dt>
+              <dd>{SOURCE_LABEL[explain.demandSource]}</dd>
+            </div>
+            <div>
+              <dt>Window</dt>
+              <dd>
+                {fmtDate(explain.windowUsed.start)} to {fmtDate(explain.windowUsed.end)}
+                {explain.windowWidened && <span className="explain-muted"> (your dates held no sales)</span>}
+              </dd>
+            </div>
+            <div>
+              <dt>Target</dt>
+              <dd>
+                {explain.budget ? (
+                  <>
+                    <div>{explain.budget.targetDisplay}</div>
+                    <div className="explain-muted">→ {explain.budget.sendTargetDisplay}</div>
+                    <div>→ {explain.budget.allocatedDisplay} allocated</div>
+                    {explain.budget.shortfall && (
+                      <div className="explain-muted">{explain.budget.shortfall}</div>
+                    )}
+                  </>
+                ) : (
+                  explain.targetSummary
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Pack shape</dt>
+              <dd>
+                nearest {explain.settings.roundToNearest}, min {explain.settings.minPackQty}, buffer{' '}
+                {explain.settings.shelfBufferPct}%
+                {explain.droppedBelowMinimum > 0 && (
+                  <span className="explain-muted">
+                    {' '}
+                    ({explain.droppedBelowMinimum} item{explain.droppedBelowMinimum === 1 ? '' : 's'} dropped as too
+                    small to pack)
+                  </span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          {explain.sourceMarkets.length > 0 && (
+            <>
+              <h3>
+                Markets this estimate came from ({explain.sourceMarkets.length})
+              </h3>
+              <div className="explain-markets">
+                {shownMarkets.map((m) => (
+                  <span key={m.locationId} className="chip">
+                    {m.name} · {m.unitsSold.toLocaleString('en-US')}
+                  </span>
+                ))}
+                {(hiddenMarkets > 0 || allMarkets) && (
+                  <button type="button" className="explain-more" onClick={() => setAllMarkets((v) => !v)}>
+                    {allMarkets ? 'View less' : `View all ${explain.sourceMarkets.length}`}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
+          <h3>How this list was built</h3>
+          <ol className="explain-steps">
+            {explain.steps.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+
+          {notes.length > 0 && (
+            <div className="suggest-panel-notes">
+              {notes.map((n, i) => (
+                <p key={i}>{n}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function fmtDate(d: Date | string): string {
+  const date = d instanceof Date ? d : new Date(d)
+  return date.toISOString().slice(0, 10)
 }
 
 /// Group flat suggestion lines by variationId into the family-shaped
 /// structure the /requests/new UI pattern consumes. Skips lines whose
-/// referenced variation or variant we can't find locally — the engine
+/// referenced variation or variant we can't find locally, since the engine
 /// might refer to something the frontend doesn't have loaded (rare, but
 /// e.g. between generation and hydration a product could be edited).
 function hydrateFamilies(
   wireLines: SuggestionLine[],
   variationById: Map<string, VariationSummary>,
   variantsByVariation: Map<string, WarehouseVariantSummary[]>,
-  mode: SuggestionTargetMode,
-  growthPct: number,
 ): SuggestFamily[] {
   const familyByVariation = new Map<string, SuggestFamily>()
+  // Rank of each suggested colour in the engine's own ordering, so the
+  // colours it actually recommended float to the top of the expanded list.
+  const suggestedRank = new Map<string, number>()
+
   for (const line of wireLines) {
     if (!line.warehouseVariantId) continue
     const meta = variationById.get(line.variationId)
@@ -826,13 +1113,44 @@ function hydrateFamilies(
       }
       familyByVariation.set(line.variationId, fam)
     }
-    fam.qtyByVariant[line.warehouseVariantId] = demandTargetForLine(line, mode, growthPct)
+    if (!suggestedRank.has(line.warehouseVariantId)) suggestedRank.set(line.warehouseVariantId, suggestedRank.size)
+    // Start the editable quantity at what the market actually wants, as long
+    // as the warehouse physically has it. If this colour sold 302 last season
+    // and there are 1,504 sitting in the warehouse, 302 is the number to
+    // default to, even though fair share reserves most of that stock for
+    // other markets and the suggestion is therefore lower. The "Suggested"
+    // chip still shows the warehouse-safe figure, one click away.
+    fam.qtyByVariant[line.warehouseVariantId] = Math.max(
+      line.qtyRecommended,
+      Math.min(line.demandTarget, line.warehouseOnHand),
+    )
     fam.recommendedQtyByVariant[line.warehouseVariantId] = line.qtyRecommended
     fam.metaByVariant[line.warehouseVariantId] = {
       rationale: line.rationale,
       confidence: line.confidence,
+      confidenceReason: line.confidenceReason,
+      bindingConstraint: line.bindingConstraint,
+      demandTarget: line.demandTarget,
+      steps: line.steps,
     }
   }
+
+  // Order the colours inside each family ONCE, here: suggested colours in
+  // the engine's ranking first, then the rest alphabetically. Doing it at
+  // hydration rather than at render is deliberate: the operator asked for
+  // the relevant items up top on first view, and for rows to stay put once
+  // they start changing numbers.
+  for (const fam of familyByVariation.values()) {
+    fam.variants = [...fam.variants].sort((a, b) => {
+      const ra = suggestedRank.get(a.id)
+      const rb = suggestedRank.get(b.id)
+      if (ra !== undefined && rb !== undefined) return ra - rb
+      if (ra !== undefined) return -1
+      if (rb !== undefined) return 1
+      return a.colourVariantName.localeCompare(b.colourVariantName)
+    })
+  }
+
   // Sort families by REAL market demand (last season sales), not by
   // recommended qty. Matters most in Custom-revenue and Grow-% modes
   // where recommended qty can diverge from actual demand. Tie-breaker:
@@ -853,11 +1171,44 @@ function totalOf(f: SuggestFamily): number {
   return s
 }
 
-function ConfidenceBadge({ level }: { level: SuggestionConfidence }) {
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{
+        color: 'var(--text-faint)',
+        flexShrink: 0,
+        transition: 'transform 0.15s ease',
+        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+      }}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  )
+}
+
+function ConfidenceBadge({ level, reason }: { level: SuggestionConfidence; reason: string }) {
   const label = level === 'HIGH' ? 'High confidence' : level === 'MEDIUM' ? 'Medium confidence' : 'Low confidence'
   const cls = level === 'HIGH' ? 'chip chip-pine' : level === 'MEDIUM' ? 'chip chip-signal' : 'chip chip-rust'
   return (
-    <span className={cls} style={{ fontSize: '0.7rem' }}>
+    <span className={cls} style={{ fontSize: '0.7rem' }} title={`${reason} It rates the data behind the number, not the quantity you choose.`}>
+      {label}
+    </span>
+  )
+}
+
+function ConstraintBadge({ constraint }: { constraint: SuggestionConstraint }) {
+  const { label, title } = CONSTRAINT_LABEL[constraint]
+  return (
+    <span className="chip" style={{ fontSize: '0.7rem' }} title={title}>
       {label}
     </span>
   )
