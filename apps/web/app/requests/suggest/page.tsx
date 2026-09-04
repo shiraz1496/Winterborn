@@ -312,6 +312,13 @@ function SuggestBody() {
     if (openId === familyId) setOpenId(null)
   }
 
+  // A run with no local sales grades evidence rather than measurement, which
+  // changes how every badge below is worded.
+  const runIsEstimate =
+    explain?.demandSource === 'CROSS_MARKET' ||
+    explain?.demandSource === 'CROSS_MARKET_WIDENED' ||
+    explain?.demandSource === 'WAREHOUSE_STOCK'
+
   const totalUnits = useMemo(
     () => families.reduce((sum, f) => sum + Object.values(f.qtyByVariant).reduce((s, n) => s + n, 0), 0),
     [families],
@@ -748,7 +755,11 @@ function SuggestBody() {
                                   <span className="list-row-title">{v.colourVariantName}</span>
                                   {meta ? (
                                     <>
-                                      <ConfidenceBadge level={meta.confidence} reason={meta.confidenceReason} />
+                                      <ConfidenceBadge
+                                        level={meta.confidence}
+                                        reason={meta.confidenceReason}
+                                        isEstimate={runIsEstimate}
+                                      />
                                       <ConstraintBadge constraint={meta.bindingConstraint} />
                                     </>
                                   ) : (
@@ -842,10 +853,14 @@ function SuggestBody() {
                                           </li>
                                         ))}
                                         <li>
-                                          <span className="math-step-label">Confidence</span>
+                                          <span className="math-step-label">
+                                            {runIsEstimate ? 'Evidence' : 'Confidence'}
+                                          </span>
                                           <span className="math-step-detail">
-                                            {meta.confidenceReason} This rates the data behind the number, so it stays
-                                            the same if you change the quantity yourself.
+                                            {meta.confidenceReason}{' '}
+                                            {runIsEstimate
+                                              ? 'It grades the evidence, so it stays the same if you change the quantity yourself.'
+                                              : 'It rates the data behind the number, so it stays the same if you change the quantity yourself.'}
                                           </span>
                                         </li>
                                       </ol>
@@ -1195,11 +1210,37 @@ function Chevron({ open }: { open: boolean }) {
   )
 }
 
-function ConfidenceBadge({ level, reason }: { level: SuggestionConfidence; reason: string }) {
-  const label = level === 'HIGH' ? 'High confidence' : level === 'MEDIUM' ? 'Medium confidence' : 'Low confidence'
+/// The badge reads differently depending on what the grade is actually
+/// grading. With local sales it is confidence in a measurement. On a new
+/// market there is nothing to measure, so the grade is an evaluation of how
+/// well the other markets evidence this product, and "high confidence" would
+/// wrongly read as a promise that it will sell. Same grade, honest wording.
+function ConfidenceBadge({
+  level,
+  reason,
+  isEstimate,
+}: {
+  level: SuggestionConfidence
+  reason: string
+  isEstimate: boolean
+}) {
+  const label = isEstimate
+    ? level === 'HIGH'
+      ? 'Strong evidence'
+      : level === 'MEDIUM'
+        ? 'Fair evidence'
+        : 'Thin evidence'
+    : level === 'HIGH'
+      ? 'High confidence'
+      : level === 'MEDIUM'
+        ? 'Medium confidence'
+        : 'Low confidence'
   const cls = level === 'HIGH' ? 'chip chip-pine' : level === 'MEDIUM' ? 'chip chip-signal' : 'chip chip-rust'
+  const tail = isEstimate
+    ? ' It grades how well other markets evidence this product, not how much you choose to send.'
+    : ' It rates the data behind the number, not the quantity you choose.'
   return (
-    <span className={cls} style={{ fontSize: '0.7rem' }} title={`${reason} It rates the data behind the number, not the quantity you choose.`}>
+    <span className={cls} style={{ fontSize: '0.7rem' }} title={reason + tail}>
       {label}
     </span>
   )

@@ -152,6 +152,7 @@ export class PackingListSuggestionService {
       colourSplitByVariation,
       sourceMarkets,
       marketCount,
+      evidenceByVariation,
     } = demand
     const usedCrossMarket = source === 'CROSS_MARKET' || source === 'CROSS_MARKET_WIDENED'
     const windowWidened =
@@ -503,10 +504,10 @@ export class PackingListSuggestionService {
         source,
         observed: c.familyObserved,
         hasColourMix: c.hasColourMix,
-        sourceMarketCount: sourceMarkets.length,
         targetMode: input.targetMode,
         growthPct: input.growthPct,
         marketName: location.name,
+        evidence: evidenceByVariation.get(c.variationId),
       })
 
       lines.push({
@@ -690,6 +691,7 @@ export class PackingListSuggestionService {
     colourSplitByVariation: Map<string, Map<string, number>>
     sourceMarkets: SuggestionSourceMarket[]
     marketCount: number
+    evidenceByVariation: Map<string, CrossMarketEvidence>
   }> {
     const { locationId, windowRequested, allowedVariationIds } = args
     const marketCount = await this.countOtherMarkets(locationId)
@@ -711,6 +713,7 @@ export class PackingListSuggestionService {
         colourSplitByVariation: await this.groupSalesByVariantColour({ locationId, window: windowRequested, allowedVariationIds }),
         sourceMarkets: [],
         marketCount,
+        evidenceByVariation: new Map(),
       }
     }
 
@@ -730,6 +733,7 @@ export class PackingListSuggestionService {
           colourSplitByVariation: await this.groupSalesByVariantColour({ locationId, window: fullWindow, allowedVariationIds }),
           sourceMarkets: [],
           marketCount,
+          evidenceByVariation: new Map(),
         }
       }
     }
@@ -764,13 +768,17 @@ export class PackingListSuggestionService {
         colourSplitByVariation.set(vId, scaled)
       }
 
+      const sourceMarkets = await this.sourceMarketsFor(locationId, attempt.window, allowedVariationIds)
       return {
         source: attempt.source,
         windowUsed: attempt.window,
         demandByVariation,
         colourSplitByVariation,
-        sourceMarkets: await this.sourceMarketsFor(locationId, attempt.window, allowedVariationIds),
+        sourceMarkets,
         marketCount,
+        evidenceByVariation: await this.crossMarketEvidence(
+          locationId, attempt.window, sourceMarkets.length, allowedVariationIds,
+        ),
       }
     }
 
@@ -784,6 +792,7 @@ export class PackingListSuggestionService {
       colourSplitByVariation: stock.byColour,
       sourceMarkets: [],
       marketCount,
+      evidenceByVariation: new Map(),
     }
   }
 
@@ -805,6 +814,50 @@ export class PackingListSuggestionService {
     const end = max > requested.end ? max : requested.end
     if (start.getTime() === requested.start.getTime() && end.getTime() === requested.end.getTime()) return null
     return { start, end }
+  }
+
+  /// Per-product evidence behind a cross-market estimate: how many markets
+  /// sold it, in what volume, and whether one market is carrying the whole
+  /// number. This is what lets a new market's list grade its products against
+  /// each other instead of stamping every line with the same badge.
+  private async crossMarketEvidence(
+    excludeLocationId: string,
+    window: { start: Date; end: Date },
+    marketsTotal: number,
+    allowedVariationIds?: Set<string>,
+  ): Promise<Map<string, CrossMarketEvidence>> {
+    const rows = await this.prisma.ledgerEvent.groupBy({
+      by: ['variationId', 'locationId'],
+      _sum: { quantity: true },
+      where: {
+        type: 'SALE',
+        occurredAt: { gte: window.start, lte: window.end },
+        locationId: { not: excludeLocationId },
+        location: { kind: 'MARKET', isActive: true },
+        ...(allowedVariationIds ? { variationId: { in: [...allowedVariationIds] } } : {}),
+      },
+    })
+    const perVariation = new Map<string, number[]>()
+    for (const row of rows) {
+      // SALEs are negative; flip to positive units-sold.
+      const units = Math.max(0, -(row._sum.quantity ?? 0))
+      if (units === 0) continue
+      const bucket = perVariation.get(row.variationId) ?? []
+      bucket.push(units)
+      perVariation.set(row.variationId, bucket)
+    }
+
+    const out = new Map<string, CrossMarketEvidence>()
+    for (const [variationId, perMarketUnits] of perVariation.entries()) {
+      const totalUnits = perMarketUnits.reduce((a, b) => a + b, 0)
+      out.set(variationId, {
+        marketsSold: perMarketUnits.length,
+        marketsTotal: Math.max(perMarketUnits.length, marketsTotal),
+        totalUnits,
+        topMarketShare: totalUnits > 0 ? Math.max(...perMarketUnits) / totalUnits : 1,
+      })
+    }
+    return out
   }
 
   /// Named markets (and their units) behind a cross-market inference.
@@ -989,6 +1042,24 @@ export class PackingListSuggestionService {
   }
 }
 
+/// How well-evidenced a cross-market estimate is for ONE product. A new
+/// market has no sales of its own, so "confidence" cannot mean "this will
+/// sell". It means: how much do the other markets actually tell us about this
+/// product? A style that sold at 11 of 13 markets in real volume, with no
+/// single market carrying it, is strong evidence. One that sold 6 units at a
+/// single market is thin, and the badge should say so rather than flattening
+/// every line on a new-market list to the same grade.
+export interface CrossMarketEvidence {
+  /// Markets that sold this product at all.
+  marketsSold: number
+  /// Markets in the comparison set (those with any sales in the window).
+  marketsTotal: number
+  totalUnits: number
+  /// The biggest single market's share of this product's total. High means
+  /// the breadth number is being carried by one outlier.
+  topMarketShare: number
+}
+
 /// One (product, colour) pair mid-calculation, before pack shaping. Carries
 /// everything the explanation builders need so the arithmetic can be
 /// replayed for the operator without re-querying anything.
@@ -1140,14 +1211,16 @@ function decideConstraint(args: {
   return args.isBudgetMode ? 'BUDGET' : 'DEMAND'
 }
 
-function decideConfidence(args: {
+export function decideConfidence(args: {
   source: SuggestionDemandSource
   observed: number
   hasColourMix: boolean
-  sourceMarketCount: number
   targetMode: GenerateSuggestionInput['targetMode']
   growthPct?: number
   marketName: string
+  /// Only set on the cross-market paths, where the grade is an evaluation of
+  /// other markets' evidence rather than a read on local sales.
+  evidence?: CrossMarketEvidence
 }): { level: SuggestionConfidence; reason: string } {
   if (args.source === 'WAREHOUSE_STOCK') {
     return {
@@ -1156,18 +1229,47 @@ function decideConfidence(args: {
     }
   }
   if (args.source === 'CROSS_MARKET' || args.source === 'CROSS_MARKET_WIDENED') {
-    // A guess built on many markets and real volume is a better guess than
-    // one built on a single market's handful of sales, so grade it
-    // instead of stamping every new-market line LOW.
-    if (args.sourceMarketCount >= 3 && args.observed >= 20) {
+    // A new market has no sales of its own, so this grade cannot mean "this
+    // will sell". It grades the EVIDENCE: how many of the other markets sell
+    // this product, in what volume, and whether one outlier is carrying the
+    // whole number. Graded per product so the list actually discriminates,
+    // rather than flattening every line to one badge.
+    const e = args.evidence
+    if (!e || e.marketsSold === 0) {
+      return {
+        level: 'LOW',
+        reason: `No usable sales for this product at any other market, so there is nothing to evaluate. Purely a placeholder for ${args.marketName}.`,
+      }
+    }
+    const breadth = e.marketsTotal > 0 ? e.marketsSold / e.marketsTotal : 0
+    const spread = `Sells at ${e.marketsSold} of ${e.marketsTotal} markets (${e.totalUnits.toLocaleString('en-US')} units)`
+    const concentrated = e.topMarketShare > 0.6
+    const caveat = ` ${args.marketName} has no history of its own, so this grades the evidence, not a measurement.`
+
+    if (breadth >= 0.6 && e.totalUnits >= 50 && !concentrated) {
+      // Travels widely, in real volume, with no single market carrying it.
+      // If we only have family-level sales the colour split is still an even
+      // guess, so hold it at the middle grade.
+      if (!args.hasColourMix) {
+        return {
+          level: 'MEDIUM',
+          reason: `${spread}, so the product itself is well evidenced, but its sales are recorded at product level only and the split across colours is an even guess.${caveat}`,
+        }
+      }
+      return {
+        level: 'HIGH',
+        reason: `${spread}, spread evenly rather than carried by one of them. Strong evidence this product travels.${caveat}`,
+      }
+    }
+    if (breadth >= 0.3 && e.totalUnits >= 15) {
       return {
         level: 'MEDIUM',
-        reason: `Estimated from ${args.sourceMarketCount} other markets with solid volume. A reasonable opening guess for ${args.marketName}, but not measured here.`,
+        reason: `${spread}${concentrated ? `, though ${Math.round(e.topMarketShare * 100)}% of that is one market` : ''}. Fair evidence, but less consistent than the products graded strong.${caveat}`,
       }
     }
     return {
       level: 'LOW',
-      reason: `Estimated from ${args.sourceMarketCount} other market${args.sourceMarketCount === 1 ? '' : 's'} with thin volume. ${args.marketName} has no sales of its own yet, so treat this as a starting point.`,
+      reason: `${spread}${concentrated ? `, ${Math.round(e.topMarketShare * 100)}% of it from a single market` : ''}. Thin evidence: this may be a local favourite rather than a product that travels.${caveat}`,
     }
   }
   if (args.source === 'LOCAL_SALES_WIDENED') {
