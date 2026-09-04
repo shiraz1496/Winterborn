@@ -346,6 +346,14 @@ export class ProductCreationService {
       { actorId: user.id, actorRole: user.role, source: 'UI' },
     )
 
+    // Deliberately NOT pushed to Square here. A product is created at
+    // intake — nothing has shipped anywhere yet — so it must not show up
+    // as a real Square catalog item this early. The push happens once a
+    // box carrying this product is DISPATCHED (created on Square with a
+    // 0 stock count at the destination market); the real arrived count
+    // follows once that box is confirmed ARRIVED. See BoxesService.dispatch
+    // / receiveForRequest / receiveByToken.
+
     return {
       itemGroupId: transactional.itemGroup.id,
       skusCreated: skus.length,

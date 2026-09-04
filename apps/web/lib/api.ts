@@ -341,10 +341,10 @@ export function browseCatalogItems(itemGroupId: string, locationId?: string) {
   )
 }
 
-export function getCatalogItemDetail(warehouseVariantId: string) {
+export function getCatalogItemDetail(warehouseVariantId: string, locationId?: string | null) {
   return request(
     'GET',
-    `/catalog/browse/items/${encodeURIComponent(warehouseVariantId)}`,
+    `/catalog/browse/items/${encodeURIComponent(warehouseVariantId)}${qs({ locationId: locationId ?? undefined })}`,
     catalogItemDetailSchema,
   )
 }
@@ -440,6 +440,24 @@ export function setWarehouseVariantSquareId(warehouseVariantId: string, squareId
     `/catalog/warehouse-variants/${warehouseVariantId}/square-id`,
     z.object({ id: z.string(), squareVariationId: z.string().nullable() }),
     body,
+  )
+}
+
+export function setCategorySquareId(categoryId: string, squareId: string | null) {
+  const body = setSquareIdInputSchema.parse({ squareId })
+  return request(
+    'PATCH',
+    `/catalog/categories/${categoryId}/square-id`,
+    z.object({ id: z.string(), name: z.string(), squareCategoryId: z.string().nullable() }),
+    body,
+  )
+}
+
+export function listSquareCategories() {
+  return request(
+    'GET',
+    '/catalog/square-categories',
+    z.array(z.object({ squareCategoryId: z.string(), name: z.string(), path: z.array(z.string()) })),
   )
 }
 

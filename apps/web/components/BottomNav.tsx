@@ -106,6 +106,7 @@ const ALL_TABS: (Tab & { roles?: CurrentUserDto['role'][] })[] = [
   { href: '/scan', label: 'Scan', icon: 'scan', roles: ['OWNER', 'MARKET_MANAGER'] },
   { href: '/warehouse', label: 'Warehouse', icon: 'warehouse', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/catalog', label: 'Catalog', icon: 'catalog', roles: ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR', 'MARKET_MANAGER'] },
+  { href: '/admin/locations', label: 'Locations', icon: 'admin', roles: ['OWNER', 'WAREHOUSE_MANAGER'] },
   { href: '/admin/users', label: 'Users', icon: 'users', roles: ['OWNER'] },
   { href: '/admin/audit', label: 'Audits', icon: 'admin', roles: ['OWNER'] },
   // Temporarily hidden from the nav — the underlying routes still work

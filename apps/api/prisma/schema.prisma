@@ -39,6 +39,17 @@ model Category {
   colourFamilies ColourFamily[]
   sizeOptions    SizeOption[]
   createdAt      DateTime       @default(now())
+  /// Square CATEGORY catalog object id. Set either by an operator via
+  /// PATCH catalog/categories/:id/square-id (pointing at an existing
+  /// Square category), or auto-created + written back the first time a
+  /// product in this category (or a descendant) is pushed to Square with
+  /// no mapping yet — see SquareCatalogWriteService.resolveSquareCategoryId.
+  squareCategoryId String? @unique
+  /// Square CatalogImage id set as this category's primary image —
+  /// the same preview photo the catalog browse UI shows for this
+  /// folder (first non-null photo among its descendant SKUs, in
+  /// warehouseSku order). Null until the first upload succeeds.
+  squareImageId    String?
 
   parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
   children Category[] @relation("CategoryTree")
@@ -48,11 +59,17 @@ model Category {
 }
 
 model ItemGroup {
-  id           String  @id @default(cuid())
-  categoryId   String
-  name         String
-  squareItemId String? @unique
-  brand        Brand   @default(OWN)
+  id            String  @id @default(cuid())
+  categoryId    String
+  name          String
+  squareItemId  String? @unique
+  /// Square CatalogImage id set as this ITEM's primary image — the
+  /// representative photo of whichever WarehouseVariant was synced
+  /// first with a photo. Null until the first image upload succeeds;
+  /// checked before re-uploading so a resync doesn't re-push the same
+  /// picture on every dispatch/edit.
+  squareImageId String?
+  brand         Brand   @default(OWN)
 
   category          Category           @relation(fields: [categoryId], references: [id])
   variations        Variation[]
@@ -226,6 +243,11 @@ model WarehouseVariant {
   /// stays as a family-level fallback for products where Square only exposes
   /// one variation per item.
   squareVariationId String? @unique
+  /// Square CatalogImage id set as this ITEM_VARIATION's primary image,
+  /// uploaded from photoUrls[0]. Null until the first upload succeeds;
+  /// checked before re-uploading so a resync doesn't re-push the same
+  /// picture on every dispatch/edit.
+  squareImageId     String?
   unitCostCents   Int?
   isSaleItem      Boolean @default(true)
 

@@ -92,8 +92,16 @@ export class LedgerReadService {
   /// family) can still leave the warehouse. Sums ledger events at variant
   /// scope, so it correctly reflects DISPATCH + INTAKE + SALE + WRITE_OFF
   /// history at that grain.
-  async onHandForWarehouseVariant(warehouseVariantId: string, locationId: string): Promise<number> {
-    const agg = await this.prisma.ledgerEvent.aggregate({
+  /// `client` lets a caller run this inside its own transaction (e.g.
+  /// BoxesService.dispatch's advisory-locked check-then-append) instead of
+  /// a separate connection, so the read genuinely happens under that
+  /// transaction's lock rather than racing it.
+  async onHandForWarehouseVariant(
+    warehouseVariantId: string,
+    locationId: string,
+    client: Pick<PrismaService, 'ledgerEvent'> = this.prisma,
+  ): Promise<number> {
+    const agg = await client.ledgerEvent.aggregate({
       _sum: { quantity: true },
       where: { warehouseVariantId, locationId },
     })

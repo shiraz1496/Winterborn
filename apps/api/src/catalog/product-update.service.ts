@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 import { AuditService } from '../audit/audit.service.js'
+import { SquareCatalogWriteService } from './square-catalog-write.service.js'
 
 /// Field-level updates for existing products.
 ///
@@ -35,6 +36,7 @@ export class ProductUpdateService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly squareWrite: SquareCatalogWriteService,
   ) {}
 
   async updateItemGroup(id: string, raw: UpdateItemGroupInput, user: CurrentUserPayload) {
@@ -43,7 +45,7 @@ export class ProductUpdateService {
       return { id, changed: [] as string[] }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const ig = await tx.itemGroup.findUnique({ where: { id } })
       if (!ig) throw new NotFoundException(`item group ${id} not found`)
 
@@ -102,13 +104,23 @@ export class ProductUpdateService {
 
       return { id, changed }
     })
+
+    // Rename or folder move — push the current name/state to Square, but
+    // ONLY if this product has already been dispatched to a market and
+    // exists on Square. A product isn't created on Square until dispatch
+    // (see BoxesService); editing one before that must not create it early.
+    if (result.changed.length > 0) {
+      await this.squareWrite.syncItemGroupToSquareIfLinkedBestEffort(id)
+    }
+
+    return result
   }
 
   async updateWarehouseVariant(id: string, raw: UpdateWarehouseVariantInput, user: CurrentUserPayload) {
     const input = updateWarehouseVariantInputSchema.parse(raw)
     if (this.isEmptyUpdate(input)) return { id, changed: [] as string[] }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const wv = await tx.warehouseVariant.findUnique({
         where: { id },
         include: {
@@ -258,8 +270,19 @@ export class ProductUpdateService {
         })),
       )
 
-      return { id, changed: audit.map((r) => r.field) }
+      return { id, changed: audit.map((r) => r.field), itemGroupId: wv.itemGroupId }
     })
+
+    // Field edit (price, colour, size, photos, …) — push the current
+    // state of the whole product to Square, but ONLY if it has already
+    // been dispatched to a market and exists on Square (see
+    // updateItemGroup above for why creation-on-edit is deliberately
+    // avoided).
+    if (result.changed.length > 0) {
+      await this.squareWrite.syncItemGroupToSquareIfLinkedBestEffort(result.itemGroupId)
+    }
+
+    return { id: result.id, changed: result.changed }
   }
 
   private isEmptyUpdate(input: UpdateWarehouseVariantInput): boolean {

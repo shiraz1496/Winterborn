@@ -1,6 +1,6 @@
 'use client'
 
-import { useParams } from 'next/navigation'
+import { useParams, useSearchParams } from 'next/navigation'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { CatalogItemDetail, ColourFamilyDto } from '@winterborn/shared'
 import { PageHeader } from '../../../../../components/PageHeader'
@@ -18,13 +18,20 @@ import {
 } from '../../../../../lib/api'
 import { MAX_PHOTOS_PER_SKU, prepareProductPhoto, uploadProductPhotos } from '../../../../../lib/photo-upload'
 import { useToast } from '../../../../../lib/toast'
-import { Breadcrumbs, formatMoney } from '../../_shared'
+import { Breadcrumbs, formatMoney, withLoc } from '../../_shared'
 
 const EDIT_ROLES = ['OWNER', 'WAREHOUSE_MANAGER'] as const
 
 function ItemDetail() {
   const params = useParams<{ variantId: string }>()
   const { variantId } = params
+  const searchParams = useSearchParams()
+  // Which location's context the operator arrived from (e.g. a market
+  // filtered catalog view) — propagated via ?loc= from the parent list
+  // page's own location picker. When present and it's a MARKET, on-hand
+  // shown here should reflect THAT location, not default to the
+  // warehouse total regardless of context.
+  const locationId = searchParams.get('loc')
   const toast = useToast()
   const { user } = useAuth()
   const canEdit = user ? EDIT_ROLES.includes(user.role as (typeof EDIT_ROLES)[number]) : false
@@ -44,17 +51,24 @@ function ItemDetail() {
   async function load() {
     setLoading(true)
     try {
-      const d = await getCatalogItemDetail(variantId)
+      const d = await getCatalogItemDetail(variantId, locationId)
       setDetail(d)
       setActivePhoto(0)
       setError(null)
-      // Fetch net-available in parallel with rendering. If the call fails
-      // (permissions, network) we quietly leave the row hidden — the rest
-      // of the detail card still works.
-      try {
-        const { available } = await availableAtWarehouse([variantId])
-        setWarehouseAvailable(available[variantId] ?? null)
-      } catch {
+      // Net warehouse-side availability only matters in the warehouse's
+      // own context — a market has no PACKING-reservation concept, so
+      // skip this call entirely when viewing a market (avoids a
+      // misleading "Available" row bleeding warehouse semantics into a
+      // market view). Failure is swallowed either way: the rest of the
+      // detail card still works without it.
+      if (!d.location) {
+        try {
+          const { available } = await availableAtWarehouse([variantId])
+          setWarehouseAvailable(available[variantId] ?? null)
+        } catch {
+          setWarehouseAvailable(null)
+        }
+      } else {
         setWarehouseAvailable(null)
       }
     } catch (err) {
@@ -67,7 +81,7 @@ function ItemDetail() {
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [variantId])
+  }, [variantId, locationId])
 
   if (loading) {
     return (
@@ -91,19 +105,24 @@ function ItemDetail() {
     )
   }
 
-  const totalValueCents = detail.totalOnHand * (detail.unitCostCents ?? 0)
+  // Viewing in a market's context shows that market's own on-hand and
+  // value; otherwise (warehouse, or no location context at all) the
+  // existing warehouse-wide totals + PACKING-reservation breakdown.
+  const viewingMarket = detail.location !== null
+  const displayedOnHand = viewingMarket ? (detail.locationOnHand ?? 0) : detail.totalOnHand
+  const totalValueCents = displayedOnHand * (detail.unitCostCents ?? 0)
 
   return (
     <div>
       <Breadcrumbs
         crumbs={[
-          { href: '/admin/catalog', label: 'Catalog' },
+          { href: withLoc('/admin/catalog', locationId), label: 'Catalog' },
           ...detail.breadcrumb.map((c) => ({
-            href: `/admin/catalog/f/${encodeURIComponent(c.id)}`,
+            href: withLoc(`/admin/catalog/f/${encodeURIComponent(c.id)}`, locationId),
             label: c.name,
           })),
           {
-            href: `/admin/catalog/g/${encodeURIComponent(detail.itemGroupId)}`,
+            href: withLoc(`/admin/catalog/g/${encodeURIComponent(detail.itemGroupId)}`, locationId),
             label: detail.itemGroupName,
           },
           { label: detail.colourVariantName },
@@ -188,35 +207,50 @@ function ItemDetail() {
                 <dd style={{ margin: 0 }}>
                   {detail.unitCostCents !== null ? formatMoney(detail.unitCostCents) : '—'}
                 </dd>
-                <dt style={{ color: 'var(--text-dim)' }}>Total on hand</dt>
-                <dd className="mono" style={{ margin: 0, fontWeight: 700 }}>{detail.totalOnHand.toLocaleString()}</dd>
-                {warehouseAvailable !== null && detail.totalOnHand - warehouseAvailable > 0 && (
+                {viewingMarket ? (
                   <>
-                    <dt style={{ color: 'var(--text-dim)' }} title="Units committed to open packing boxes but not yet dispatched">
-                      In packing
+                    <dt style={{ color: 'var(--text-dim)' }} title={`On hand at ${detail.location!.name} specifically — not the warehouse total`}>
+                      On hand at {detail.location!.name}
                     </dt>
-                    <dd
-                      className="mono"
-                      style={{ margin: 0, color: 'var(--signal, #d2892a)' }}
-                    >
-                      {(detail.totalOnHand - warehouseAvailable).toLocaleString()}
+                    <dd className="mono" style={{ margin: 0, fontWeight: 700 }}>
+                      {(detail.locationOnHand ?? 0).toLocaleString()}
                     </dd>
                   </>
-                )}
-                {warehouseAvailable !== null && (
+                ) : (
                   <>
-                    <dt
-                      style={{ color: 'var(--text-dim)' }}
-                      title="On hand minus what's already reserved in open packing boxes — the number the pack screen enforces"
-                    >
-                      Available
-                    </dt>
-                    <dd className="mono" style={{ margin: 0 }}>
-                      {warehouseAvailable.toLocaleString()}
-                    </dd>
+                    <dt style={{ color: 'var(--text-dim)' }}>Total on hand</dt>
+                    <dd className="mono" style={{ margin: 0, fontWeight: 700 }}>{detail.totalOnHand.toLocaleString()}</dd>
+                    {warehouseAvailable !== null && detail.totalOnHand - warehouseAvailable > 0 && (
+                      <>
+                        <dt style={{ color: 'var(--text-dim)' }} title="Units committed to open packing boxes but not yet dispatched">
+                          In packing
+                        </dt>
+                        <dd
+                          className="mono"
+                          style={{ margin: 0, color: 'var(--signal, #d2892a)' }}
+                        >
+                          {(detail.totalOnHand - warehouseAvailable).toLocaleString()}
+                        </dd>
+                      </>
+                    )}
+                    {warehouseAvailable !== null && (
+                      <>
+                        <dt
+                          style={{ color: 'var(--text-dim)' }}
+                          title="On hand minus what's already reserved in open packing boxes — the number the pack screen enforces"
+                        >
+                          Available
+                        </dt>
+                        <dd className="mono" style={{ margin: 0 }}>
+                          {warehouseAvailable.toLocaleString()}
+                        </dd>
+                      </>
+                    )}
                   </>
                 )}
-                <dt style={{ color: 'var(--text-dim)' }}>Total value</dt>
+                <dt style={{ color: 'var(--text-dim)' }}>
+                  {viewingMarket ? `Value at ${detail.location!.name}` : 'Total value'}
+                </dt>
                 <dd style={{ margin: 0 }}>{formatMoney(totalValueCents)}</dd>
               </dl>
             )}

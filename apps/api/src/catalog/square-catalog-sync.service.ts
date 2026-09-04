@@ -123,4 +123,54 @@ export class SquareCatalogSyncService {
       syncedAt,
     }
   }
+
+  /**
+   * Live (uncached) list of every Square CATEGORY object — feeds the
+   * manual Category → Square category mapping picker. Deliberately not
+   * cached like ITEMs above: categories are looked up rarely (once per
+   * manual mapping action, not on every product sync — the auto-create
+   * path in SquareCatalogWriteService reads a single object by id, not
+   * this list), so a fresh call each time avoids adding a second cache
+   * table + staleness story for a lightly-used screen.
+   *
+   * Includes the full root-first breadcrumb `path` for each category
+   * (walked via `categoryData.parentCategory`), not just its own name.
+   * Square allows two categories with the same name at different nesting
+   * levels (e.g. a top-level "Toys" and a nested "…/Toys"), and without
+   * the path a flat name-only list can't tell them apart — the picker
+   * needs to show the same hierarchy an operator sees in the Square
+   * Dashboard, not a name in isolation.
+   */
+  async listCategories(): Promise<Array<{ squareCategoryId: string; name: string; path: string[] }>> {
+    const page = await square.catalog.list({ types: 'CATEGORY' })
+    const nameById = new Map<string, string>()
+    const parentById = new Map<string, string | undefined>()
+    for await (const raw of page) {
+      if (raw.type !== 'CATEGORY' || !raw.id || !raw.categoryData?.name) continue
+      nameById.set(raw.id, raw.categoryData.name)
+      parentById.set(raw.id, raw.categoryData.parentCategory?.id)
+    }
+
+    const pathFor = (id: string): string[] => {
+      const path: string[] = []
+      let current: string | undefined = id
+      const seen = new Set<string>() // guards against a malformed cycle
+      while (current && !seen.has(current)) {
+        seen.add(current)
+        const name = nameById.get(current)
+        if (!name) break
+        path.unshift(name)
+        current = parentById.get(current)
+      }
+      return path
+    }
+
+    const out = [...nameById.entries()].map(([squareCategoryId, name]) => ({
+      squareCategoryId,
+      name,
+      path: pathFor(squareCategoryId),
+    }))
+    out.sort((a, b) => a.path.join(' › ').localeCompare(b.path.join(' › ')))
+    return out
+  }
 }

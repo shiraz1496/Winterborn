@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import type { ItemGroupDetail, ItemGroupMappingProgress } from '@winterborn/shared'
+import type { CategoryDto, ItemGroupDetail, ItemGroupMappingProgress } from '@winterborn/shared'
 import { PageHeader } from '../../../components/PageHeader'
 import { RequireAuth } from '../../../components/RequireAuth'
 import { SearchableSelect } from '../../../components/SearchableSelect'
@@ -10,7 +10,10 @@ import {
   createProductAttribute,
   createProductAttributeValue,
   getItemGroupMappingDetail,
+  listCategories,
   listItemGroupsForMapping,
+  listSquareCategories,
+  setCategorySquareId,
   updateItemGroupMapping,
 } from '../../../lib/api'
 import { useBodyScrollLock } from '../../../lib/use-body-scroll-lock'
@@ -696,7 +699,170 @@ function MappingModal({ itemGroupId, onClose, onSaved }: { itemGroupId: string; 
   )
 }
 
+/// Root-first breadcrumb for one category, walked from the flat list via
+/// parentId. Same pattern used elsewhere (VariationSummary.categoryPath)
+/// but computed client-side here since Category itself has no precomputed
+/// path field. `skipId`, when given, is left out of the walk — used to
+/// drop the lone meta-root from the breadcrumb so it matches what
+/// actually lands on Square (that category is never created there; its
+/// children are top-level), not the local tree's literal shape.
+function categoryPath(category: CategoryDto, byId: Map<string, CategoryDto>, skipId?: string): string[] {
+  const path: string[] = [category.name]
+  let current = category
+  while (current.parentId) {
+    const parent = byId.get(current.parentId)
+    if (!parent) break
+    if (parent.id !== skipId) path.unshift(parent.name)
+    current = parent
+  }
+  return path
+}
+
+function CategoryMappingList() {
+  const [categories, setCategories] = useState<CategoryDto[]>([])
+  const [squareCategories, setSquareCategories] = useState<Array<{ squareCategoryId: string; name: string; path: string[] }>>([])
+  const [loading, setLoading] = useState(true)
+  const [squareLoading, setSquareLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  function load() {
+    setLoading(true)
+    listCategories()
+      .then(setCategories)
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load categories.'))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+    setSquareLoading(true)
+    listSquareCategories()
+      .then(setSquareCategories)
+      .catch(() => setSquareCategories([]))
+      .finally(() => setSquareLoading(false))
+  }, [])
+
+  const byId = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories])
+
+  // Hide the lone meta-root ("BärHaus (IN STOCK)") — it's the
+  // warehouse/brand-name wrapper, not a real category, and never gets
+  // created on Square (see SquareCatalogWriteService.resolveSquareCategoryId's
+  // isLoneMetaRoot check). Listing it here as mappable would just
+  // confuse the picture: it can never actually be "mapped" — same
+  // "single root, promote children" rule /requests/suggest already
+  // applies to its own category picker.
+  const soleMetaRootId = useMemo(() => {
+    const roots = categories.filter((c) => c.parentId === null)
+    return roots.length === 1 ? roots[0]!.id : undefined
+  }, [categories])
+
+  const mappableCategories = useMemo(
+    () => (soleMetaRootId ? categories.filter((c) => c.id !== soleMetaRootId) : categories),
+    [categories, soleMetaRootId],
+  )
+
+  const rows = useMemo(() => {
+    const withPath = mappableCategories.map((c) => ({ category: c, path: categoryPath(c, byId, soleMetaRootId) }))
+    withPath.sort((a, b) => a.path.join(' › ').localeCompare(b.path.join(' › ')))
+    if (!filter.trim()) return withPath
+    const q = filter.trim().toLowerCase()
+    return withPath.filter((r) => r.path.join(' › ').toLowerCase().includes(q))
+  }, [mappableCategories, byId, filter, soleMetaRootId])
+
+  // Which local category (if any) currently owns each Square category —
+  // a Square category should only ever be pointed at by one local
+  // category, so once claimed it drops out of every OTHER row's picker.
+  // Same pattern as the product mapping modal's candidatesForRow.
+  const ownerBySquareCategoryId = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const c of categories) if (c.squareCategoryId) m.set(c.squareCategoryId, c.id)
+    return m
+  }, [categories])
+
+  function squareOptionsForRow(categoryId: string) {
+    return squareCategories
+      .filter((c) => {
+        const owner = ownerBySquareCategoryId.get(c.squareCategoryId)
+        return !owner || owner === categoryId
+      })
+      .map((c) => ({ id: c.squareCategoryId, label: c.path.join(' › ') }))
+  }
+
+  async function onChange(categoryId: string, squareCategoryId: string | null) {
+    setSavingId(categoryId)
+    setSaveError(null)
+    try {
+      await setCategorySquareId(categoryId, squareCategoryId)
+      setCategories((prev) => prev.map((c) => (c.id === categoryId ? { ...c, squareCategoryId } : c)))
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : 'Could not update mapping.')
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  if (loading) {
+    return <div className="screen-loading"><div className="spinner" aria-hidden="true" /></div>
+  }
+
+  return (
+    <div>
+      {error && <p className="error-banner">{error}</p>}
+      {saveError && <p className="error-banner">{saveError}</p>}
+      <p style={{ color: 'var(--text-dim)', fontSize: '0.85rem', marginBottom: 12 }}>
+        Optional. A product&rsquo;s category is auto-created on Square the first time that product syncs, if
+        nothing is mapped here — use this only to point a category at an <em>existing</em> Square category
+        instead of creating a new one.
+      </p>
+      <input
+        type="search"
+        placeholder="Filter by category name…"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        style={{ width: '100%', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--line)', fontSize: '0.9rem', marginBottom: 16, boxSizing: 'border-box' }}
+      />
+      {rows.length === 0 ? (
+        <div className="empty-state"><p className="empty-state-title">No categories match</p></div>
+      ) : (
+        <div className="stack" style={{ gap: 6 }}>
+          {rows.map(({ category, path }) => (
+            <div
+              key={category.id}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 'var(--radius-md)', background: 'var(--surface)' }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="list-row-title">{category.name}</div>
+                <div className="list-row-meta">{path.slice(0, -1).join(' › ') || 'root'}</div>
+              </div>
+              {category.squareCategoryId ? (
+                <span className="chip chip-pine">mapped</span>
+              ) : (
+                <span className="chip">will auto-create</span>
+              )}
+              <div style={{ minWidth: 220 }}>
+                <SearchableSelect
+                  size="sm"
+                  value={category.squareCategoryId}
+                  options={squareOptionsForRow(category.id)}
+                  placeholder={squareLoading ? 'Loading Square categories…' : '— none, auto-create —'}
+                  emptyMessage="No Square categories found."
+                  onChange={(id) => onChange(category.id, id)}
+                />
+              </div>
+              {savingId === category.id && <span className="eyebrow" style={{ color: 'var(--text-dim)' }}>Saving…</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SquareMappingBody() {
+  const [tab, setTab] = useState<'products' | 'categories'>('categories')
   const [openId, setOpenId] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
 
@@ -707,13 +873,39 @@ function SquareMappingBody() {
         title="Square mapping"
         description="One row per product. Click to open the mapping modal — pick the Square item, choose an axis (Color / Size / Style / or a custom one), and bind each SKU's Square variation. Sales fired by Square decrement the specific SKU you bind here."
       />
-      <ProductList onSelect={setOpenId} refreshKey={refreshKey} />
-      {openId && (
-        <MappingModal
-          itemGroupId={openId}
-          onClose={() => setOpenId(null)}
-          onSaved={() => { setOpenId(null); setRefreshKey((k) => k + 1) }}
-        />
+      <div className="segmented" role="tablist" aria-label="Mapping type" style={{ marginBottom: 16, maxWidth: 320 }}>
+        {/* <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'products'}
+          className={`segmented-btn${tab === 'products' ? ' active' : ''}`}
+          onClick={() => setTab('products')}
+        >
+          Products
+        </button> */}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'categories'}
+          className={`segmented-btn${tab === 'categories' ? ' active' : ''}`}
+          onClick={() => setTab('categories')}
+        >
+          Categories
+        </button>
+      </div>
+      {tab === 'products' ? (
+        <>
+          <ProductList onSelect={setOpenId} refreshKey={refreshKey} />
+          {openId && (
+            <MappingModal
+              itemGroupId={openId}
+              onClose={() => setOpenId(null)}
+              onSaved={() => { setOpenId(null); setRefreshKey((k) => k + 1) }}
+            />
+          )}
+        </>
+      ) : (
+        <CategoryMappingList />
       )}
     </div>
   )

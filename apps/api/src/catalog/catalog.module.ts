@@ -12,6 +12,8 @@ import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
 import { ProductUpdateService } from './product-update.service.js'
 import { CloudinarySignatureService } from './cloudinary-signature.service.js'
+import { SquareCatalogWriteService } from './square-catalog-write.service.js'
+import { SquareInventoryWriteService } from './square-inventory-write.service.js'
 import { upsertSortlyFolderChain, type FolderCache } from './folder-tree.js'
 
 const UNIQUE_VIOLATION = 'P2002'
@@ -431,7 +433,15 @@ export class SortlyImportService {
     ProductCreationService,
     ProductUpdateService,
     CloudinarySignatureService,
+    SquareCatalogWriteService,
+    SquareInventoryWriteService,
   ],
-  exports: [SortlyImportService, CatalogReadService, SquareCatalogSyncService],
+  exports: [
+    SortlyImportService,
+    CatalogReadService,
+    SquareCatalogSyncService,
+    SquareCatalogWriteService,
+    SquareInventoryWriteService,
+  ],
 })
 export class CatalogModule {}

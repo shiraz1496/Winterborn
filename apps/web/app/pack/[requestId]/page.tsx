@@ -449,6 +449,52 @@ function PackBody() {
     }
   }
 
+  /// Abandon this pack session and send the request back to OPEN. Any
+  /// PACKING boxes already started for this request are discarded
+  /// server-side (freeing the warehouse stock they'd reserved) before
+  /// the request's own state moves — see RequestsService.transition's
+  /// PACKING->OPEN handling.
+  function stopPacking() {
+    if (!request) return
+    const count = soloPackingBoxesForThisRequest.length
+    setConfirm({
+      title: 'Stop packing this request?',
+      confirmLabel: 'Stop packing',
+      variant: 'danger',
+      body: (
+        <>
+          <p style={{ margin: count > 0 ? '0 0 10px' : 0 }}>
+            This sends the request back to <strong>Open</strong> so someone can pick it up later.
+          </p>
+          {count > 0 && (
+            <p style={{ margin: 0 }}>
+              {count} box{count === 1 ? '' : 'es'} already started ({packingForThisRequest} unit
+              {packingForThisRequest === 1 ? '' : 's'}) will be discarded and that stock freed back up.
+            </p>
+          )}
+        </>
+      ),
+      onConfirm: () => void runStopPacking(),
+    })
+
+    async function runStopPacking() {
+      if (!request) return
+      setConfirm(null)
+      setBusy(true)
+      setError(null)
+      try {
+        await transitionRequest(request.id, 'OPEN')
+        toast.success('Packing stopped — request is Open again')
+        router.push(`/requests/${request.id}`)
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : 'Could not stop packing.'
+        setError(msg)
+        toast.error(msg)
+        setBusy(false)
+      }
+    }
+  }
+
   if (loading || !request) {
     return (
       <div className="screen-loading">
@@ -531,6 +577,11 @@ function PackBody() {
         eyebrow={locationName ? `Packing for ${locationName}` : 'Packing'}
         title="Pack this request"
         description="For each family below, expand and add units of the actual warehouse SKU. Fill a box, click Pack this box, then Dispatch when the truck's ready. Dispatch writes the stock movement to the ledger — no scanner required."
+        actions={
+          <button type="button" className="btn btn-danger" onClick={stopPacking} disabled={busy}>
+            Stop packing
+          </button>
+        }
       />
 
       {error && <p className="error-banner">{error}</p>}

@@ -31,10 +31,17 @@ export class LedgerService {
    * poll deliberately produce identical keys for the same sale, so a week of
    * missed webhooks self-heals on one poll pass without double-counting.
    */
-  async append(input: AppendEventInput): Promise<{ id: string; created: boolean }> {
+  /// `client` lets a caller run this inside its own transaction (e.g.
+  /// BoxesService.dispatch's advisory-locked check-then-append) so the
+  /// insert genuinely happens under that transaction's lock, not on a
+  /// separate connection racing it.
+  async append(
+    input: AppendEventInput,
+    client: Pick<PrismaService, 'ledgerEvent'> = this.prisma,
+  ): Promise<{ id: string; created: boolean }> {
     const e = appendEventInputSchema.parse(input)
     try {
-      const row = await this.prisma.ledgerEvent.create({
+      const row = await client.ledgerEvent.create({
         data: {
           type: e.type,
           locationId: e.locationId,
@@ -54,7 +61,7 @@ export class LedgerService {
       return { id: row.id, created: true }
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === UNIQUE_VIOLATION) {
-        const existing = await this.prisma.ledgerEvent.findUniqueOrThrow({
+        const existing = await client.ledgerEvent.findUniqueOrThrow({
           where: { idempotencyKey: e.idempotencyKey },
         })
         return { id: existing.id, created: false }

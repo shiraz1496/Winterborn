@@ -100,7 +100,7 @@ export class CatalogReadService {
 
   async listCategories(): Promise<CategoryDto[]> {
     const rows = await this.prisma.category.findMany({ orderBy: { name: 'asc' } })
-    return rows.map((r) => ({ id: r.id, name: r.name, parentId: r.parentId }))
+    return rows.map((r) => ({ id: r.id, name: r.name, parentId: r.parentId, squareCategoryId: r.squareCategoryId }))
   }
 
   /// Create a Category anywhere in the tree — root when parentId is null,
@@ -474,6 +474,29 @@ export class CatalogReadService {
   /// Set or clear ItemGroup.squareItemId. Uniqueness collisions on the
   /// column surface as ConflictException so the UI can render "already
   /// assigned to <other item>" instead of a raw 500.
+  /// Manual Category → Square CATEGORY mapping — same pattern as
+  /// setItemGroupSquareId. Not required before a product syncs:
+  /// SquareCatalogWriteService.resolveSquareCategoryId auto-creates a
+  /// Square category when none is mapped yet. This exists for an
+  /// operator who wants a product to land under an EXISTING Square
+  /// category instead of a freshly auto-created one.
+  async setCategorySquareId(categoryId: string, squareId: string | null) {
+    const existing = await this.prisma.category.findUnique({ where: { id: categoryId } })
+    if (!existing) throw new NotFoundException(`category ${categoryId} not found`)
+    try {
+      return await this.prisma.category.update({
+        where: { id: categoryId },
+        data: { squareCategoryId: squareId },
+        select: { id: true, name: true, squareCategoryId: true },
+      })
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`squareCategoryId "${squareId}" is already assigned to another category`)
+      }
+      throw err
+    }
+  }
+
   async setItemGroupSquareId(itemGroupId: string, squareId: string | null) {
     const existing = await this.prisma.itemGroup.findUnique({ where: { id: itemGroupId } })
     if (!existing) throw new NotFoundException(`item group ${itemGroupId} not found`)
@@ -1214,9 +1237,18 @@ export class CatalogReadService {
 
   /// Full detail for one SKU: photos, breadcrumb parts, and a per-warehouse
   /// on-hand breakdown so the "edit count" form knows which location it's
-  /// correcting. Only warehouse-kind locations are surfaced — market copies
-  /// aren't editable from this screen.
-  async getCatalogItemDetail(warehouseVariantId: string): Promise<CatalogItemDetail> {
+  /// correcting. Only warehouse-kind locations are surfaced in
+  /// stockByLocation — market copies aren't editable from this screen.
+  ///
+  /// `viewLocationId`, when passed, is resolved separately into
+  /// `locationOnHand`/`location` — this is what lets the detail page show
+  /// "on hand at Atlanta" when the operator arrived here from a
+  /// market-filtered catalog view, instead of always defaulting to the
+  /// warehouse total regardless of which location's context they're in.
+  async getCatalogItemDetail(
+    warehouseVariantId: string,
+    viewLocationId?: string | null,
+  ): Promise<CatalogItemDetail> {
     const wv = await this.prisma.warehouseVariant.findUnique({
       where: { id: warehouseVariantId },
       include: {
@@ -1263,6 +1295,20 @@ export class CatalogReadService {
       onHand: onHandByLoc.get(w.id) ?? 0,
     }))
     const totalOnHand = stockByLocation.reduce((s, r) => s + r.onHand, 0)
+
+    let locationOnHand: number | null = null
+    let location: { id: string; name: string } | null = null
+    if (viewLocationId) {
+      const viewLocation = await this.prisma.location.findUnique({
+        where: { id: viewLocationId },
+        select: { id: true, name: true },
+      })
+      if (viewLocation) {
+        location = viewLocation
+        locationOnHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, viewLocationId)
+      }
+    }
+
     const backfillPhoto = wv.colourVariant.photoUrl
     const photoUrls = wv.photoUrls.length > 0 ? wv.photoUrls : backfillPhoto ? [backfillPhoto] : []
     // Filter out Color/Size — those have dedicated detail rows already
@@ -1291,6 +1337,8 @@ export class CatalogReadService {
       unitCostCents: wv.unitCostCents,
       totalOnHand,
       stockByLocation,
+      locationOnHand,
+      location,
       breadcrumb,
       attributes,
     }

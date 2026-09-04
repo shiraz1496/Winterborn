@@ -34,7 +34,12 @@ const EDITABLE_STATES: readonly RequestState[] = ['DRAFT', 'OPEN']
 export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly RequestState[]>> = {
   DRAFT: ['OPEN'],
   OPEN: ['PACKING'],
-  PACKING: ['PACKED', 'DISPATCHED'],
+  // PACKING -> OPEN ("Stop packing"): abandons the in-progress pack
+  // session. Only legal while nothing has shipped yet — see the
+  // dedicated handling in transition() below, which discards any
+  // PACKING-state boxes for this request before the state actually
+  // moves, so warehouse stock they'd reserved is freed back up.
+  PACKING: ['PACKED', 'DISPATCHED', 'OPEN'],
   PACKED: ['PACKING', 'DISPATCHED'],
   DISPATCHED: ['ARRIVED', 'CLOSED'],
   ARRIVED: ['CLOSED'],
@@ -66,6 +71,7 @@ const TRANSITION_ROLES: Readonly<Partial<Record<`${RequestState}->${RequestState
   'OPEN->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKING->PACKED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKED->PACKING': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
+  'PACKING->OPEN': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKING->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'PACKED->DISPATCHED': ['OWNER', 'WAREHOUSE_MANAGER', 'WAREHOUSE_OPERATOR'],
   'DISPATCHED->ARRIVED': ['MARKET_MANAGER'],
@@ -293,6 +299,60 @@ export class RequestsService {
 
     if (before.state !== toState && toState === 'CLOSED' && (before.state === 'DISPATCHED' || before.state === 'ARRIVED')) {
       await this.boxes.receiveForRequest(requestId, actor)
+    }
+
+    // "Mark dispatched" (PACKING/PACKED -> DISPATCHED) must physically
+    // dispatch every real box under this request, not just relabel the
+    // request row. Without this, the request claims DISPATCHED while the
+    // Box itself stays PACKING forever: no DISPATCH ledger event (so
+    // warehouse on-hand never actually decrements), no arrival possible
+    // (receive/scan correctly refuses a box that was never dispatched),
+    // and — since BoxesService.dispatch() is also where the Square push
+    // lives — the product never reaches Square either. Same "boxes
+    // first, then the request label" ordering as the CLOSED case above,
+    // and for the same reason: BoxesService.dispatch() writes its own
+    // ledger rows outside a transaction (append-only), so it can't be
+    // nested inside the request's own $transaction below.
+    if (
+      before.state !== toState &&
+      toState === 'DISPATCHED' &&
+      (before.state === 'PACKING' || before.state === 'PACKED')
+    ) {
+      // Box has no "PACKED" state of its own (that's a RestockRequest-only
+      // bucket, set once every requested unit is on a non-dispatched box)
+      // — a box that isn't yet DISPATCHED/ARRIVED/RETURNED is simply
+      // PACKING, whether or not the request as a whole has been fully
+      // packed.
+      const boxesToDispatch = await this.prisma.box.findMany({
+        where: {
+          state: 'PACKING',
+          OR: [{ requestId }, { lines: { some: { requestId } } }],
+        },
+        select: { id: true },
+      })
+      for (const box of boxesToDispatch) {
+        await this.boxes.dispatch(box.id, actor)
+      }
+    }
+
+    // "Stop packing" (PACKING -> OPEN): abandons the pack session.
+    // Discard every solo PACKING box for this request first so the
+    // warehouse stock they'd reserved (BoxesService.availableAtWarehouse)
+    // is freed immediately — otherwise the request would say OPEN while
+    // still quietly holding stock hostage in an abandoned box. A box
+    // SHARED with a sibling request can't be safely discarded here (it
+    // would silently mutate a request this operator may not even be
+    // looking at); if any exist, refuse the transition and point at the
+    // shipment view instead of half-completing the rollback.
+    if (before.state !== toState && toState === 'OPEN' && before.state === 'PACKING') {
+      const { sharedSkipped } = await this.boxes.unpackForRequest(requestId, actor)
+      if (sharedSkipped.length > 0) {
+        throw new BadRequestException(
+          `Cannot stop packing — ${sharedSkipped.length} box${sharedSkipped.length === 1 ? '' : 'es'} ` +
+            `on this request ${sharedSkipped.length === 1 ? 'is' : 'are'} shared with another request. ` +
+            `Unpack ${sharedSkipped.length === 1 ? 'it' : 'them'} from the shipment view first.`,
+        )
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {

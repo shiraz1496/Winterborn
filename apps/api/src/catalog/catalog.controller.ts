@@ -12,6 +12,7 @@ import { StockCorrectionService } from './stock-correction.service.js'
 import { ProductCreationService } from './product-creation.service.js'
 import { ProductUpdateService } from './product-update.service.js'
 import { CloudinarySignatureService } from './cloudinary-signature.service.js'
+import { SquareCatalogWriteService } from './square-catalog-write.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 
 /// Read-only catalog/stock/location surface for the frontend, plus the one
@@ -30,6 +31,7 @@ export class CatalogController {
     private readonly productCreation: ProductCreationService,
     private readonly productUpdate: ProductUpdateService,
     private readonly cloudinarySignature: CloudinarySignatureService,
+    private readonly squareCatalogWrite: SquareCatalogWriteService,
   ) {}
 
   @Get('locations')
@@ -156,6 +158,13 @@ export class CatalogController {
     return this.catalog.listSquareMapping()
   }
 
+  @Patch('catalog/categories/:id/square-id')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  setCategorySquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
+    const parsed = setSquareIdInputSchema.parse(body)
+    return this.catalog.setCategorySquareId(id, parsed.squareId)
+  }
+
   @Patch('catalog/item-groups/:id/square-id')
   @Roles('OWNER', 'WAREHOUSE_MANAGER')
   setItemGroupSquareId(@Param('id') id: string, @Body() body: SetSquareIdInput) {
@@ -177,6 +186,19 @@ export class CatalogController {
     return this.catalog.setWarehouseVariantSquareId(id, parsed.squareId)
   }
 
+  /// Manual retry for the create/update → Square push. Create and update
+  /// already push automatically and best-effort; this exists for the
+  /// case that push failed (network blip, rate limit) and an operator
+  /// wants to retry without re-editing the product. Rebuilds and sends
+  /// the item group's FULL current variation list every time — not
+  /// incremental — so it's always safe to call even if a partial state
+  /// was left behind by a prior failure.
+  @Post('catalog/item-groups/:id/sync-square')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  syncItemGroupToSquare(@Param('id') id: string) {
+    return this.squareCatalogWrite.syncItemGroupToSquare(id)
+  }
+
   /// Manually trigger a full Square catalog sync. Owner/WM only. Not automatic —
   /// the operator runs it when they've added new items in Square that need to
   /// show up in the mapping modal's dropdowns.
@@ -184,6 +206,14 @@ export class CatalogController {
   @Roles('OWNER', 'WAREHOUSE_MANAGER')
   syncSquare() {
     return this.squareCatalogSync.sync()
+  }
+
+  /// Live list of Square CATEGORY objects, for the category-mapping
+  /// picker. Not cached — see SquareCatalogSyncService.listCategories.
+  @Get('catalog/square-categories')
+  @Roles('OWNER', 'WAREHOUSE_MANAGER')
+  listSquareCategories() {
+    return this.squareCatalogSync.listCategories()
   }
 
   /// List every locally-cached Square item (name + id + last-synced timestamp).
@@ -351,8 +381,11 @@ export class CatalogController {
   }
 
   @Get('catalog/browse/items/:warehouseVariantId')
-  browseItemDetail(@Param('warehouseVariantId') warehouseVariantId: string) {
-    return this.catalog.getCatalogItemDetail(warehouseVariantId)
+  browseItemDetail(
+    @Param('warehouseVariantId') warehouseVariantId: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.catalog.getCatalogItemDetail(warehouseVariantId, locationId ?? null)
   }
 
   /// Manual physical-count correction. User supplies a target on-hand and

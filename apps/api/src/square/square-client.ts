@@ -2,12 +2,13 @@ import type { Square } from 'square'
 import { square, assertNoErrors } from '../catalog/square-client.js'
 
 /**
- * Orders-API surface for the sync path. Reuses the single sandboxed
- * `square` client and `assertNoErrors` helper from `../catalog/square-client.ts`
- * rather than standing up a second SDK instance -- every Square call in
- * this codebase goes through one client, one sandbox guard, one
- * errors-array check (spec §7, global constraint: "Every Square call
- * checks res.errors").
+ * Orders-API surface for the sync path. Reuses the single `square` client
+ * and `assertNoErrors` helper from `../catalog/square-client.ts` rather
+ * than standing up a second SDK instance -- every Square call in this
+ * codebase goes through one client (environment resolved dynamically from
+ * SQUARE_ENV -- sandbox or production, whichever is configured), one
+ * delete/archive guard, one errors-array check (spec §7, global
+ * constraint: "Every Square call checks res.errors").
  */
 export { square, assertNoErrors }
 

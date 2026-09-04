@@ -9,33 +9,57 @@ import { SquareClient, SquareEnvironment } from 'square'
 // location rather than trusting process.cwd().
 dotenv.config({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.env') })
 
+export type ResolvedSquareEnv = 'sandbox' | 'production'
+
 /**
- * Refuses to run against anything but the Square sandbox. Catalog writes
- * are destructive and irreversible against real sales history -- see
- * `docs/superpowers/decisions/2026-08-19-flat-item-migration.md`. The
- * production run is explicitly out of scope for this plan.
+ * Resolves which Square environment this process talks to, from
+ * SQUARE_ENV. Validates that SQUARE_APPLICATION_ID actually matches the
+ * requested environment -- catches the classic misconfiguration of a
+ * sandbox app id paired with SQUARE_ENV=production (or vice versa)
+ * *before* any HTTP call is made, since that mismatch is exactly the
+ * kind of mistake that would otherwise write to the wrong catalog.
+ *
+ * This governs which catalog gets written to, sandbox or the live
+ * $2.9M/14-market production catalog -- it does NOT relax what's
+ * allowed once connected. `forbidCatalogDeletion` below still blocks
+ * every delete and archiving upsert in both environments; only a human
+ * in the Square Dashboard can remove a catalog object. See
+ * `docs/superpowers/decisions/2026-08-19-flat-item-migration.md`.
  */
-export function assertSandbox(): void {
-  if (process.env.SQUARE_ENV !== 'sandbox') {
-    throw new Error(
-      `Refusing to run: SQUARE_ENV is "${process.env.SQUARE_ENV}", expected "sandbox". ` +
-        `This code must never touch production.`,
-    )
+export function resolveSquareEnv(): ResolvedSquareEnv {
+  const raw = process.env.SQUARE_ENV
+  if (raw !== 'sandbox' && raw !== 'production') {
+    throw new Error(`SQUARE_ENV must be "sandbox" or "production", got "${raw}".`)
   }
   const appId = process.env.SQUARE_APPLICATION_ID ?? ''
-  if (!appId.startsWith('sandbox-')) {
+  if (raw === 'sandbox' && !appId.startsWith('sandbox-')) {
     throw new Error(
-      `Refusing to run: SQUARE_APPLICATION_ID does not start with "sandbox-". ` +
+      `SQUARE_ENV=sandbox but SQUARE_APPLICATION_ID does not start with "sandbox-". ` +
         `Got "${appId.slice(0, 12)}...". Check the environment toggle in the Developer Console.`,
     )
   }
+  if (raw === 'production' && appId.startsWith('sandbox-')) {
+    throw new Error(
+      `SQUARE_ENV=production but SQUARE_APPLICATION_ID starts with "sandbox-" ` +
+        `("${appId.slice(0, 12)}..."). Refusing to run with mismatched credentials.`,
+    )
+  }
+  return raw
 }
 
-assertSandbox()
+/** @deprecated kept for any external caller expecting the old name; use resolveSquareEnv(). */
+export function assertSandbox(): void {
+  const env = resolveSquareEnv()
+  if (env !== 'sandbox') {
+    throw new Error(`Refusing to run: SQUARE_ENV is "${env}", expected "sandbox".`)
+  }
+}
+
+export const squareEnv = resolveSquareEnv()
 
 export const square = new SquareClient({
   token: process.env.SQUARE_ACCESS_TOKEN!,
-  environment: SquareEnvironment.Sandbox,
+  environment: squareEnv === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox,
 })
 
 /**
@@ -156,6 +180,20 @@ export function isNotFoundError(err: unknown): boolean {
   const e = err as { statusCode?: number; errors?: Array<{ code?: string; category?: string }> }
   if (e.statusCode !== 404) return false
   return (e.errors ?? []).some((x) => x.code === 'NOT_FOUND' && x.category === 'INVALID_REQUEST_ERROR')
+}
+
+/**
+ * True when `err` is Square's optimistic-concurrency rejection — the
+ * `version` sent with an upsert no longer matches what Square currently
+ * holds for that object, because something else updated it in between
+ * our read and our write. Lets a caller distinguish "someone else won
+ * the race, read the version again and retry" from every other failure
+ * mode, which must propagate as a real error.
+ */
+export function isVersionMismatchError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const e = err as { errors?: Array<{ code?: string }> }
+  return (e.errors ?? []).some((x) => x.code === 'VERSION_MISMATCH')
 }
 
 /** True if the catalog object still resolves (live), false if it 404s as absent. */

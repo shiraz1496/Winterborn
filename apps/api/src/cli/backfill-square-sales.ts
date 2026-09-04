@@ -23,10 +23,11 @@ import { mapOrderToLedgerInputs } from '../square/order-mapper.js'
  * which environment it resolved so a mismatch is obvious in the dry-run
  * output before any writes happen.
  *
- * Deliberately does NOT reuse `apps/api/src/square/square-client.ts` — that
- * module's `assertSandbox()` guard runs at module-load time and would fail
- * outright when SQUARE_ENV=production. This CLI is read-only against Square
- * and needs to work in both environments, so it stands up its own client.
+ * Does not reuse `apps/api/src/catalog/square-client.ts`'s shared `square`
+ * client — that module now also resolves SQUARE_ENV dynamically, but it
+ * additionally carries the delete/archive write-guard (irrelevant here,
+ * this CLI is read-only) and app-wide NestJS wiring this standalone script
+ * doesn't need. Kept as its own minimal client instead.
  *
  * Uses `mapOrderToLedgerInputs` — the same mapper the webhook and poll
  * use — so idempotency keys match. If the poll later re-scans the same

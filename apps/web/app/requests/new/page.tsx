@@ -11,6 +11,7 @@ import { SearchableSelect } from '../../../components/SearchableSelect'
 import { useAuth } from '../../../lib/auth-context'
 import {
   ApiError,
+  availableAtWarehouse,
   createRequest,
   listLocations,
   listVariations,
@@ -46,11 +47,17 @@ function NewRequestBody() {
   const [variations, setVariations] = useState<VariationSummary[]>([])
   const [allVariants, setAllVariants] = useState<WarehouseVariantSummary[]>([])
   const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
-  // Warehouse on-hand per warehouse variant. Surfaced alongside the market
-  // number so the operator can compare "what's in this market" against
-  // "what's available to send" — the CEO was reading the market count as
-  // the warehouse count, so both need to be labelled and shown together.
-  const [onHandByVariantAtWarehouse, setOnHandByVariantAtWarehouse] = useState<Map<string, number>>(
+  // Warehouse AVAILABILITY per warehouse variant — on-hand minus units
+  // already committed to another request's box that's mid-pack (state
+  // PACKING). Deliberately not raw on-hand: a market manager creating a
+  // request here needs "can I actually get this," not "how much
+  // physically sits in the warehouse right now" — the latter overstates
+  // what's free the moment another request has claimed some of it via an
+  // in-progress box, which is exactly what let an operator create a
+  // request the Pack screen then rejected. Same reservation math the
+  // pack screen itself enforces (BoxesService.availableAtWarehouse), so
+  // this number can never promise more than pack will actually accept.
+  const [availableByVariantAtWarehouse, setAvailableByVariantAtWarehouse] = useState<Map<string, number>>(
     () => new Map(),
   )
   const [locationId, setLocationId] = useState<string>(user?.locationId ?? '')
@@ -101,29 +108,29 @@ function NewRequestBody() {
   const markets = useMemo(() => locations.filter((l) => l.kind === 'MARKET'), [locations])
   const warehouseId = useMemo(() => locations.find((l) => l.kind === 'WAREHOUSE')?.id ?? null, [locations])
 
-  // Warehouse on-hand, fetched once we know which warehouse to look at.
-  // Doesn't depend on the selected market — the "in warehouse" count is
-  // the same regardless of which market the operator is packing for.
+  // Warehouse availability, fetched once the catalog is loaded. Doesn't
+  // depend on the selected market — the reservation-adjusted "available"
+  // count is the same regardless of which market the operator is
+  // requesting for (PACKING reservations aren't per-market, they're
+  // whatever's already claimed at the warehouse for ANY request).
   useEffect(() => {
-    if (!warehouseId) {
-      setOnHandByVariantAtWarehouse(new Map())
+    if (!warehouseId || allVariants.length === 0) {
+      setAvailableByVariantAtWarehouse(new Map())
       return
     }
     let cancelled = false
-    stockByVariant(warehouseId)
-      .then((stock) => {
+    availableAtWarehouse(allVariants.map((wv) => wv.id))
+      .then(({ available }) => {
         if (cancelled) return
-        const m = new Map<string, number>()
-        for (const s of stock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
-        setOnHandByVariantAtWarehouse(m)
+        setAvailableByVariantAtWarehouse(new Map(Object.entries(available)))
       })
       .catch(() => {
-        if (!cancelled) setOnHandByVariantAtWarehouse(new Map())
+        if (!cancelled) setAvailableByVariantAtWarehouse(new Map())
       })
     return () => {
       cancelled = true
     }
-  }, [warehouseId])
+  }, [warehouseId, allVariants])
 
   // Auto-select the first market for owners so the picker isn't left on
   // "pick one" — they still get the full list to switch. Market managers
@@ -161,11 +168,11 @@ function NewRequestBody() {
     for (const [variationId, list] of variantsByVariation) {
       m.set(
         variationId,
-        list.reduce((sum, wv) => sum + (onHandByVariantAtWarehouse.get(wv.id) ?? 0), 0),
+        list.reduce((sum, wv) => sum + (availableByVariantAtWarehouse.get(wv.id) ?? 0), 0),
       )
     }
     return m
-  }, [variantsByVariation, onHandByVariantAtWarehouse])
+  }, [variantsByVariation, availableByVariantAtWarehouse])
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -499,7 +506,7 @@ function NewRequestBody() {
                       f.variants.map((v) => {
                         const qty = f.qtyByVariant[v.id] ?? 0
                         const onHand = onHandByVariantId.get(v.id) ?? 0
-                        const onHandWh = onHandByVariantAtWarehouse.get(v.id) ?? 0
+                        const onHandWh = availableByVariantAtWarehouse.get(v.id) ?? 0
                         return (
                           <div
                             key={v.id}

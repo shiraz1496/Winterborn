@@ -34,9 +34,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    void refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    let cancelled = false
+    let attempt = 0
+
+    async function attemptRefresh() {
+      try {
+        await refresh()
+      } catch {
+        // Transient failure (network hiccup, or the API cold-starting --
+        // Render's free tier spins the backend down after idle, and the
+        // first request after that can take 30s+) -- refresh() rethrows
+        // anything that isn't a clean 401, and left unhandled here `user`
+        // would stay `undefined` forever, pinning every screen behind
+        // RequireAuth on its spinner until the visitor hard-reloads.
+        // Retry with capped backoff instead of giving up after one shot.
+        if (cancelled) return
+        attempt += 1
+        const delay = Math.min(2000 * 2 ** (attempt - 1), 15000)
+        setTimeout(() => {
+          if (!cancelled) void attemptRefresh()
+        }, delay)
+      }
+    }
+
+    void attemptRefresh()
+    return () => {
+      cancelled = true
+    }
+  }, [refresh])
 
   return <AuthContext.Provider value={{ user, refresh }}>{children}</AuthContext.Provider>
 }

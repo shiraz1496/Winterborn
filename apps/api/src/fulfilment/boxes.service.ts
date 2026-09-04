@@ -1,11 +1,13 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common'
 import { randomBytes, randomUUID } from 'node:crypto'
-import type { RequestState } from '@prisma/client'
+import { Prisma, type RequestState } from '@prisma/client'
 import { transferKeyPrefix, type ReceiveBoxResult } from '@winterborn/shared'
 import { PrismaService } from '../prisma/prisma.service.js'
 import { LedgerService } from '../ledger/ledger.service.js'
 import { LedgerReadService } from '../ledger/ledger-read.service.js'
 import { AuditService } from '../audit/audit.service.js'
+import { SquareCatalogWriteService } from '../catalog/square-catalog-write.service.js'
+import { SquareInventoryWriteService } from '../catalog/square-inventory-write.service.js'
 import type { CurrentUserPayload } from '../auth/current-user.js'
 
 /// Thrown when a pack or dispatch would drive warehouse stock below zero.
@@ -75,6 +77,8 @@ export class BoxesService {
     private readonly ledger: LedgerService,
     private readonly ledgerRead: LedgerReadService,
     private readonly audit: AuditService,
+    private readonly squareWrite: SquareCatalogWriteService,
+    private readonly squareInventory: SquareInventoryWriteService,
   ) {}
 
   /// Re-derives the PACKING ↔ PACKED state for a request based on box
@@ -141,13 +145,23 @@ export class BoxesService {
   ///
   /// Returns a Map keyed by warehouseVariantId with the available count.
   /// Missing keys mean "no stock recorded" (0 on-hand, 0 reserved).
-  async availableAtWarehouse(warehouseVariantIds: string[]): Promise<Map<string, number>> {
+  ///
+  /// `client` lets a caller run this inside its own transaction (see
+  /// `withWarehouseVariantLocks` below) so the read genuinely happens
+  /// under that transaction's advisory lock, not on a separate
+  /// connection racing it — otherwise this read-then-write pattern is
+  /// exactly the check-then-act race two concurrent packs of the same
+  /// SKU could hit.
+  async availableAtWarehouse(
+    warehouseVariantIds: string[],
+    client: Pick<PrismaService, 'location' | 'ledgerEvent' | 'boxLine'> = this.prisma,
+  ): Promise<Map<string, number>> {
     if (warehouseVariantIds.length === 0) return new Map()
-    const warehouse = await this.prisma.location.findFirst({ where: { kind: 'WAREHOUSE' } })
+    const warehouse = await client.location.findFirst({ where: { kind: 'WAREHOUSE' } })
     if (!warehouse) return new Map()
 
     const [onHandRows, reservedRows] = await Promise.all([
-      this.prisma.ledgerEvent.groupBy({
+      client.ledgerEvent.groupBy({
         by: ['warehouseVariantId'],
         _sum: { quantity: true },
         where: {
@@ -155,7 +169,7 @@ export class BoxesService {
           warehouseVariantId: { in: warehouseVariantIds },
         },
       }),
-      this.prisma.boxLine.groupBy({
+      client.boxLine.groupBy({
         by: ['warehouseVariantId'],
         _sum: { quantity: true },
         where: {
@@ -183,6 +197,38 @@ export class BoxesService {
     return available
   }
 
+  /**
+   * Runs `fn` inside a transaction holding a Postgres advisory lock per
+   * warehouseVariantId, so the availability check and the write that
+   * depends on it (a new BoxLine reservation, or the DISPATCH ledger row)
+   * happen atomically as far as any OTHER call touching the same SKU is
+   * concerned. Without this, `pack`/`addLine`/`dispatch` each did a plain
+   * read-then-write with nothing tying the two together — two concurrent
+   * packs of the same SKU could both read "8 available" before either had
+   * written its reservation, and together over-commit past what the
+   * warehouse actually has. Postgres's default READ COMMITTED isolation
+   * does not protect against this on its own.
+   *
+   * `pg_advisory_xact_lock` is transaction-scoped: it releases
+   * automatically on commit or rollback, so a crash or an exception can
+   * never leave a stuck lock behind the way a manually-released lock
+   * could. Locks are acquired in a fixed order (sorted warehouseVariantId)
+   * so two calls touching an overlapping-but-differently-ordered set of
+   * SKUs can never deadlock against each other.
+   */
+  private async withWarehouseVariantLocks<T>(
+    warehouseVariantIds: Iterable<string>,
+    fn: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    const sorted = [...new Set(warehouseVariantIds)].sort()
+    return this.prisma.$transaction(async (tx) => {
+      for (const id of sorted) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('warehouse-stock'), hashtext(${id}))`
+      }
+      return fn(tx)
+    })
+  }
+
   async pack(input: PackBoxInput, actor: CurrentUserPayload) {
     if (input.lines.length === 0) throw new BadRequestException('a box must be packed with at least one line')
     for (const line of input.lines) {
@@ -199,13 +245,6 @@ export class BoxesService {
         (requestedByVariant.get(line.warehouseVariantId) ?? 0) + line.quantity,
       )
     }
-    const available = await this.availableAtWarehouse(Array.from(requestedByVariant.keys()))
-    const shortfall: InsufficientStockDetail[] = []
-    for (const [warehouseVariantId, requested] of requestedByVariant) {
-      const avail = available.get(warehouseVariantId) ?? 0
-      if (requested > avail) shortfall.push({ warehouseVariantId, requested, available: avail })
-    }
-    if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
 
     // Opaque, carries no contents -- the QR encodes this token only (spec
     // §9.4). Contents live entirely in BoxLine, so editing the manifest
@@ -232,16 +271,28 @@ export class BoxesService {
     // single request on the Box row — the mapping lives on the lines.
     const finalBoxRequestId = distinctRequestIds.size > 1 ? null : boxRequestId
 
-    const box = await this.prisma.box.create({
-      data: {
-        requestId: finalBoxRequestId,
-        destinationLocationId: input.destinationLocationId,
-        qrToken,
-        packedById: actor.id,
-        packedAt: new Date(),
-        lines: { create: linesWithRequest },
-      },
-      include: { lines: true },
+    // Check-then-create, made atomic w.r.t. any other call touching the
+    // same SKU(s) via the advisory lock — see withWarehouseVariantLocks.
+    const box = await this.withWarehouseVariantLocks(requestedByVariant.keys(), async (tx) => {
+      const available = await this.availableAtWarehouse(Array.from(requestedByVariant.keys()), tx)
+      const shortfall: InsufficientStockDetail[] = []
+      for (const [warehouseVariantId, requested] of requestedByVariant) {
+        const avail = available.get(warehouseVariantId) ?? 0
+        if (requested > avail) shortfall.push({ warehouseVariantId, requested, available: avail })
+      }
+      if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
+
+      return tx.box.create({
+        data: {
+          requestId: finalBoxRequestId,
+          destinationLocationId: input.destinationLocationId,
+          qrToken,
+          packedById: actor.id,
+          packedAt: new Date(),
+          lines: { create: linesWithRequest },
+        },
+        include: { lines: true },
+      })
     })
 
     await this.audit.recordCreation(
@@ -423,15 +474,17 @@ export class BoxesService {
     if (box.state !== 'PACKING') {
       throw new BadRequestException(`box lines cannot be edited once dispatched (state=${box.state})`)
     }
-    const available = await this.availableAtWarehouse([input.warehouseVariantId])
-    const avail = available.get(input.warehouseVariantId) ?? 0
-    if (input.quantity > avail) {
-      throw new InsufficientStockException([
-        { warehouseVariantId: input.warehouseVariantId, requested: input.quantity, available: avail },
-      ])
-    }
-    const line = await this.prisma.boxLine.create({
-      data: { boxId, warehouseVariantId: input.warehouseVariantId, quantity: input.quantity },
+    const line = await this.withWarehouseVariantLocks([input.warehouseVariantId], async (tx) => {
+      const available = await this.availableAtWarehouse([input.warehouseVariantId], tx)
+      const avail = available.get(input.warehouseVariantId) ?? 0
+      if (input.quantity > avail) {
+        throw new InsufficientStockException([
+          { warehouseVariantId: input.warehouseVariantId, requested: input.quantity, available: avail },
+        ])
+      }
+      return tx.boxLine.create({
+        data: { boxId, warehouseVariantId: input.warehouseVariantId, quantity: input.quantity },
+      })
     })
     // A fresh line pushes coverage up — reconcile the parent request(s).
     const touchedRequestIds = new Set<string>()
@@ -465,14 +518,19 @@ export class BoxesService {
     const warehouse = await this.prisma.location.findFirstOrThrow({ where: { kind: 'WAREHOUSE' } })
     const now = new Date()
 
-    // Safety net: even after the pack-time reservation guard, verify that
-    // physical ledger on-hand still covers this box's lines. Race conditions
-    // (two boxes packed simultaneously against the same shrinking pool, or
-    // an out-of-band SALE while a box sat in PACKING) could otherwise let a
-    // dispatch drive stock below zero. Idempotent re-dispatches are exempt
-    // because their DISPATCH row already exists and the ledger append is a
-    // no-op — check state before enforcing.
-    if (box.state !== 'DISPATCHED') {
+    // One transferId per box, so both the DISPATCH row (now) and the
+    // eventual INTAKE row (on receive) can be joined.
+    const transferId = box.dispatchedAt ? undefined : randomUUID()
+    const isFirstDispatch = box.state !== 'DISPATCHED'
+    // Products first PROVEN real by leaving the warehouse for a market —
+    // this, not creation, is when a product gets pushed to Square (see
+    // product-creation.service.ts for why). Dedupe by warehouseVariantId:
+    // a multi-request box can carry two BoxLine rows for the same SKU.
+    const dispatchedItemGroupIds = new Set<string>()
+    const dispatchedWarehouseVariantIds = new Set<string>()
+
+    const posted: { warehouseVariantId: string; created: boolean }[] = []
+    if (isFirstDispatch) {
       const perLineRequested = new Map<string, number>()
       for (const line of box.lines) {
         perLineRequested.set(
@@ -480,38 +538,69 @@ export class BoxesService {
           (perLineRequested.get(line.warehouseVariantId) ?? 0) + line.quantity,
         )
       }
-      const shortfall: InsufficientStockDetail[] = []
-      for (const [warehouseVariantId, requested] of perLineRequested) {
-        const onHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, warehouse.id)
-        if (requested > onHand) shortfall.push({ warehouseVariantId, requested, available: onHand })
-      }
-      if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
-    }
+      // Safety net, made atomic via the same advisory lock pack()/addLine()
+      // use: even after the pack-time reservation guard, verify that
+      // physical ledger on-hand still covers this box's lines, and post
+      // the DISPATCH rows under that SAME lock — not just check-then-hope.
+      // Race conditions (two boxes of the same SKU dispatched at once, or
+      // an out-of-band SALE while a box sat in PACKING) could otherwise
+      // let two dispatches both pass the check and together drive stock
+      // below zero.
+      await this.withWarehouseVariantLocks(perLineRequested.keys(), async (tx) => {
+        const shortfall: InsufficientStockDetail[] = []
+        for (const [warehouseVariantId, requested] of perLineRequested) {
+          const onHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, warehouse.id, tx)
+          if (requested > onHand) shortfall.push({ warehouseVariantId, requested, available: onHand })
+        }
+        if (shortfall.length > 0) throw new InsufficientStockException(shortfall)
 
-    // One transferId per box, so both the DISPATCH row (now) and the
-    // eventual INTAKE row (on receive) can be joined.
-    const transferId = box.dispatchedAt ? undefined : randomUUID()
-
-    const posted: { warehouseVariantId: string; created: boolean }[] = []
-    for (const line of box.lines) {
-      const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
-      const result = await this.ledger.append({
-        type: 'DISPATCH',
-        locationId: warehouse.id,
-        variationId: wv.variationId,
-        warehouseVariantId: wv.id,
-        quantity: -line.quantity,
-        occurredAt: now,
-        source: 'UI',
-        sourceRef: boxId,
-        idempotencyKey: `${transferKeyPrefix('dispatch', boxId, wv.id)}:from`,
-        actorId: actor?.id,
-        transferId,
+        for (const line of box.lines) {
+          const wv = await tx.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
+          const result = await this.ledger.append(
+            {
+              type: 'DISPATCH',
+              locationId: warehouse.id,
+              variationId: wv.variationId,
+              warehouseVariantId: wv.id,
+              quantity: -line.quantity,
+              occurredAt: now,
+              source: 'UI',
+              sourceRef: boxId,
+              idempotencyKey: `${transferKeyPrefix('dispatch', boxId, wv.id)}:from`,
+              actorId: actor?.id,
+              transferId,
+            },
+            tx,
+          )
+          posted.push({ warehouseVariantId: wv.id, created: result.created })
+          dispatchedItemGroupIds.add(wv.itemGroupId)
+          dispatchedWarehouseVariantIds.add(wv.id)
+        }
       })
-      posted.push({ warehouseVariantId: wv.id, created: result.created })
+    } else {
+      // Re-dispatch of an already-DISPATCHED box: every DISPATCH row
+      // already exists, so this is provably a no-op via the idempotency
+      // key alone — no lock or re-check needed, nothing new is at stake.
+      for (const line of box.lines) {
+        const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
+        const result = await this.ledger.append({
+          type: 'DISPATCH',
+          locationId: warehouse.id,
+          variationId: wv.variationId,
+          warehouseVariantId: wv.id,
+          quantity: -line.quantity,
+          occurredAt: now,
+          source: 'UI',
+          sourceRef: boxId,
+          idempotencyKey: `${transferKeyPrefix('dispatch', boxId, wv.id)}:from`,
+          actorId: actor?.id,
+          transferId,
+        })
+        posted.push({ warehouseVariantId: wv.id, created: result.created })
+      }
     }
 
-    if (box.state !== 'DISPATCHED') {
+    if (isFirstDispatch) {
       await this.prisma.box.update({ where: { id: boxId }, data: { state: 'DISPATCHED', dispatchedAt: now } })
       await this.audit.recordTransition(null, 'Box', boxId, 'state', box.state, 'DISPATCHED', {
         actorId: actor?.id ?? null,
@@ -542,6 +631,22 @@ export class BoxesService {
           actorRole: actor?.role ?? null,
           source: 'UI',
         })
+      }
+    }
+
+    // Square push: catalog first (so a squareVariationId exists to
+    // attach a count to), then an explicit 0-count at the destination
+    // market. The product exists on Square from this point on, but reads
+    // as out-of-stock at THIS market specifically — not globally — until
+    // receiveForRequest/receiveByToken pushes the real arrived count.
+    // Sequenced (not parallel): the inventory push depends on the
+    // catalog sync having just linked squareVariationId.
+    if (isFirstDispatch) {
+      for (const itemGroupId of dispatchedItemGroupIds) {
+        await this.squareWrite.syncItemGroupToSquareBestEffort(itemGroupId)
+      }
+      for (const warehouseVariantId of dispatchedWarehouseVariantIds) {
+        await this.squareInventory.pushCountBestEffort(warehouseVariantId, box.destinationLocationId, 0)
       }
     }
 
@@ -579,6 +684,15 @@ export class BoxesService {
     let boxesReceived = 0
     let linesPosted = 0
     const now = new Date()
+    // Products first PROVEN real by dispatch already pushed the catalog +
+    // a 0 count to Square at dispatch time (see dispatch() above); this
+    // re-sync just catches anything changed since (price, name, …) and
+    // is a safety net if the dispatch-time push happened to fail. The
+    // real work at arrival is the inventory count — (locationId,
+    // warehouseVariantId) pairs newly arrived this call, so the true
+    // post-arrival on-hand gets pushed to Square for exactly that market.
+    const newlyArrivedItemGroupIds = new Set<string>()
+    const newlyArrivedByLocation = new Map<string, Set<string>>()
 
     for (const box of boxes) {
       // The transferId lives on the DISPATCH row already appended for this
@@ -588,6 +702,7 @@ export class BoxesService {
         select: { transferId: true },
       })
       const transferId = existing?.transferId ?? undefined
+      const wasArrived = box.state === 'ARRIVED'
 
       for (const line of box.lines) {
         const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({ where: { id: line.warehouseVariantId } })
@@ -605,9 +720,15 @@ export class BoxesService {
           transferId,
         })
         if (result.created) linesPosted++
+        if (!wasArrived) {
+          newlyArrivedItemGroupIds.add(wv.itemGroupId)
+          const set = newlyArrivedByLocation.get(box.destinationLocationId) ?? new Set<string>()
+          set.add(wv.id)
+          newlyArrivedByLocation.set(box.destinationLocationId, set)
+        }
       }
 
-      if (box.state !== 'ARRIVED') {
+      if (!wasArrived) {
         await this.prisma.box.update({ where: { id: box.id }, data: { state: 'ARRIVED', arrivedAt: now } })
         await this.audit.recordTransition(null, 'Box', box.id, 'state', box.state, 'ARRIVED', {
           actorId: actor?.id ?? null,
@@ -618,6 +739,16 @@ export class BoxesService {
         })
       }
       boxesReceived++
+    }
+
+    for (const itemGroupId of newlyArrivedItemGroupIds) {
+      await this.squareWrite.syncItemGroupToSquareBestEffort(itemGroupId)
+    }
+    for (const [locationId, warehouseVariantIds] of newlyArrivedByLocation) {
+      for (const warehouseVariantId of warehouseVariantIds) {
+        const onHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, locationId)
+        await this.squareInventory.pushCountBestEffort(warehouseVariantId, locationId, onHand)
+      }
     }
 
     return { boxesReceived, linesPosted }
@@ -766,6 +897,14 @@ export class BoxesService {
         select: { transferId: true },
       })
       const transferId = existing?.transferId ?? undefined
+      // Catalog was already pushed at dispatch time (see dispatch()
+      // above); this re-sync is just a safety net for anything changed
+      // since, or a prior dispatch-time push that failed. The real work
+      // here is the inventory count: push the true post-arrival on-hand
+      // for this market so Square's per-location stock reflects reality
+      // instead of the 0 that was set at dispatch.
+      const arrivedItemGroupIds = new Set<string>()
+      const arrivedWarehouseVariantIds = new Set<string>()
       for (const line of box.lines) {
         const wv = await this.prisma.warehouseVariant.findUniqueOrThrow({
           where: { id: line.warehouseVariantId },
@@ -783,6 +922,8 @@ export class BoxesService {
           actorId: actor.id,
           transferId,
         })
+        arrivedItemGroupIds.add(wv.itemGroupId)
+        arrivedWarehouseVariantIds.add(wv.id)
       }
       await this.prisma.box.update({
         where: { id: box.id },
@@ -795,6 +936,13 @@ export class BoxesService {
         reason: 'received via QR scan',
         source: 'UI',
       })
+      for (const itemGroupId of arrivedItemGroupIds) {
+        await this.squareWrite.syncItemGroupToSquareBestEffort(itemGroupId)
+      }
+      for (const warehouseVariantId of arrivedWarehouseVariantIds) {
+        const onHand = await this.ledgerRead.onHandForWarehouseVariant(warehouseVariantId, box.destinationLocationId)
+        await this.squareInventory.pushCountBestEffort(warehouseVariantId, box.destinationLocationId, onHand)
+      }
     }
 
     // Parent-request progress + auto-close. For a multi-request box we

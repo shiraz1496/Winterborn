@@ -19,6 +19,7 @@ import { RequireAuth } from '../../../components/RequireAuth'
 import { SearchableSelect } from '../../../components/SearchableSelect'
 import {
   ApiError,
+  availableAtWarehouse,
   createRequest,
   generateSuggestion,
   listCategories,
@@ -90,7 +91,11 @@ function SuggestBody() {
   // generate so numbers are always current at the moment the operator
   // reviews the draft.
   const [onHandByVariantId, setOnHandByVariantId] = useState<Map<string, number>>(() => new Map())
-  const [onHandByVariantAtWarehouse, setOnHandByVariantAtWarehouse] = useState<Map<string, number>>(
+  // Reservation-adjusted, not raw on-hand — see /requests/new for the
+  // full rationale. A suggested quantity based on raw on-hand can exceed
+  // what's actually free once other requests' boxes are mid-pack; this
+  // is what Pack will actually accept.
+  const [availableByVariantAtWarehouse, setAvailableByVariantAtWarehouse] = useState<Map<string, number>>(
     () => new Map(),
   )
 
@@ -164,25 +169,23 @@ function SuggestBody() {
   }, [locationId])
 
   useEffect(() => {
-    if (!warehouseId) {
-      setOnHandByVariantAtWarehouse(new Map())
+    if (!warehouseId || allVariants.length === 0) {
+      setAvailableByVariantAtWarehouse(new Map())
       return
     }
     let cancelled = false
-    stockByVariant(warehouseId)
-      .then((stock) => {
+    availableAtWarehouse(allVariants.map((wv) => wv.id))
+      .then(({ available }) => {
         if (cancelled) return
-        const m = new Map<string, number>()
-        for (const s of stock) if (s.warehouseVariantId) m.set(s.warehouseVariantId, s.onHand)
-        setOnHandByVariantAtWarehouse(m)
+        setAvailableByVariantAtWarehouse(new Map(Object.entries(available)))
       })
       .catch(() => {
-        if (!cancelled) setOnHandByVariantAtWarehouse(new Map())
+        if (!cancelled) setAvailableByVariantAtWarehouse(new Map())
       })
     return () => {
       cancelled = true
     }
-  }, [warehouseId])
+  }, [warehouseId, allVariants])
 
   const familyOnHand = useMemo(() => {
     const m = new Map<string, number>()
@@ -195,10 +198,10 @@ function SuggestBody() {
   const familyOnHandAtWarehouse = useMemo(() => {
     const m = new Map<string, number>()
     for (const [variationId, list] of variantsByVariation) {
-      m.set(variationId, list.reduce((sum, wv) => sum + (onHandByVariantAtWarehouse.get(wv.id) ?? 0), 0))
+      m.set(variationId, list.reduce((sum, wv) => sum + (availableByVariantAtWarehouse.get(wv.id) ?? 0), 0))
     }
     return m
-  }, [variantsByVariation, onHandByVariantAtWarehouse])
+  }, [variantsByVariation, availableByVariantAtWarehouse])
 
   const toggleCategory = (id: string) => {
     setPickedCategoryIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -621,7 +624,7 @@ function SuggestBody() {
                           const qty = f.qtyByVariant[v.id] ?? 0
                           const recommended = f.recommendedQtyByVariant[v.id]
                           const onHand = onHandByVariantId.get(v.id) ?? 0
-                          const onHandWh = onHandByVariantAtWarehouse.get(v.id) ?? 0
+                          const onHandWh = availableByVariantAtWarehouse.get(v.id) ?? 0
                           const meta = f.metaByVariant[v.id]
                           const isAtRecommended = recommended === undefined || qty === recommended
                           return (
@@ -735,23 +738,22 @@ function SuggestBody() {
             })}
           </div>
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <div className="stack">
             <button
-              className="btn"
+              className="btn btn-primary btn-block"
+              onClick={() => submit('OPEN')}
+              disabled={saving !== null || lineCount === 0}
+              type="button"
+            >
+              {saving === 'OPEN' ? 'Approving…' : `Approve → send ${totalUnits} unit${totalUnits === 1 ? '' : 's'}`}
+            </button>
+            <button
+              className="btn btn-block"
               onClick={() => submit('DRAFT')}
               disabled={saving !== null || lineCount === 0}
               type="button"
             >
               {saving === 'DRAFT' ? 'Saving…' : 'Save as draft'}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => submit('OPEN')}
-              disabled={saving !== null || lineCount === 0}
-              style={{ width: 'auto', paddingLeft: 24, paddingRight: 24 }}
-              type="button"
-            >
-              {saving === 'OPEN' ? 'Approving…' : `Approve → send ${totalUnits} unit${totalUnits === 1 ? '' : 's'}`}
             </button>
           </div>
         </>

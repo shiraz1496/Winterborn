@@ -313,6 +313,9 @@ export const categorySchema = z.object({
   /// parent id — the tree is walked from the client for pickers that
   /// present roots-only or nested selects.
   parentId: z.string().nullable(),
+  /// Square CATEGORY object id, if mapped (manually, or auto-created the
+  /// first time a product in this category synced to Square).
+  squareCategoryId: z.string().nullable(),
 })
 export type CategoryDto = z.infer<typeof categorySchema>
 
@@ -761,6 +764,16 @@ export const catalogItemDetailSchema = z.object({
   unitCostCents: z.number().int().nullable(),
   totalOnHand: z.number().int(),
   stockByLocation: z.array(catalogItemStockRowSchema),
+  /// On-hand at the location passed via ?locationId=, when it's a MARKET
+  /// (not a warehouse — those already appear in stockByLocation). Null
+  /// when no locationId was requested, or the requested location has no
+  /// stock history at all for this SKU. Lets the detail page show "on
+  /// hand at Atlanta" instead of always defaulting to the warehouse
+  /// total when the operator is viewing in a market's context.
+  locationOnHand: z.number().int().nullable(),
+  /// The resolved location for locationOnHand — echoed back so the page
+  /// can label the row without a separate locations fetch.
+  location: z.object({ id: z.string(), name: z.string() }).nullable(),
   /// Ancestors of the leaf Category root-first (INCLUDING the leaf
   /// category itself). Lets the item-detail page render its full crumb
   /// trail without a follow-up browse call.
